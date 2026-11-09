@@ -1,0 +1,9 @@
+# 打包产物（安装包放 GitHub Releases，不进仓库）
+dist/
+
+# 注入程序日志
+inject.log
+
+# 本地备份
+*.bak
+*.bak-*

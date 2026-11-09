@@ -1,0 +1,178 @@
+[
+  [
+    "^just now$",
+    "刚刚"
+  ],
+  [
+    "^(\\d+)s ago$",
+    "$1 秒前"
+  ],
+  [
+    "^(\\d+)m ago$",
+    "$1 分钟前"
+  ],
+  [
+    "^(\\d+)h ago$",
+    "$1 小时前"
+  ],
+  [
+    "^(\\d+)d ago$",
+    "$1 天前"
+  ],
+  [
+    "^(\\d+)w ago$",
+    "$1 周前"
+  ],
+  [
+    "^(\\d+)mo ago$",
+    "$1 个月前"
+  ],
+  [
+    "^(\\d+)y ago$",
+    "$1 年前"
+  ],
+  [
+    "^(\\d+)s$",
+    "$1秒"
+  ],
+  [
+    "^(\\d+)m$",
+    "$1分钟"
+  ],
+  [
+    "^(\\d+)h$",
+    "$1小时"
+  ],
+  [
+    "^(\\d+)d$",
+    "$1天"
+  ],
+  [
+    "^(\\d+)w$",
+    "$1周"
+  ],
+  [
+    "^(\\d+)mo$",
+    "$1个月"
+  ],
+  [
+    "^(\\d+)y$",
+    "$1年"
+  ],
+  [
+    "^Thought for (\\d+)s$",
+    "思考了 $1 秒"
+  ],
+  [
+    "^Thinking for (\\d+)s$",
+    "已思考 $1 秒"
+  ],
+  [
+    "^Thinking \\((\\d+)s\\)…$",
+    "思考中（$1 秒）…"
+  ],
+  [
+    "^Still thinking, (\\d+) seconds$",
+    "仍在思考，已 $1 秒"
+  ],
+  [
+    "^Show (\\d+) earlier steps$",
+    "显示前面 $1 个步骤"
+  ],
+  [
+    "^Show (\\d+) breakdowns$",
+    "显示 $1 项明细"
+  ],
+  [
+    "^Message queued\\. (\\d+) messages in queue\\.$",
+    "消息已排队，队列中有 $1 条消息。"
+  ],
+  [
+    "^Marked (\\d+) conversations as read$",
+    "已将 $1 个对话标为已读"
+  ],
+  [
+    "^Sort and filter conversations \\((\\d+) active\\)$",
+    "排序和筛选对话（$1 个进行中）"
+  ],
+  [
+    "^Waiting for command completion \\(up to (\\d+) seconds\\)$",
+    "等待命令完成（最多 $1 秒）"
+  ],
+  [
+    "^Searched for \"(.+)\"$",
+    "搜索了“$1”"
+  ],
+  [
+    "^Searched web: \"(.+)\"$",
+    "网页搜索：“$1”"
+  ],
+  [
+    "^Code search: \"(.+)\"$",
+    "代码搜索：“$1”"
+  ],
+  [
+    "^Search Google for \"(.+)\"$",
+    "在 Google 上搜索“$1”"
+  ],
+  [
+    "^Hi (.+), what can we get done today\\?$",
+    "$1，你好！今天想做点什么？"
+  ],
+  [
+    "^Yes, allow (.+) in this conversation$",
+    "是，在此对话中允许 $1"
+  ],
+  [
+    "^Yes, and always allow '(.+)' in this conversation$",
+    "是，并在此对话中始终允许“$1”"
+  ],
+  [
+    "^Yes, save rule for '(.+)' in this conversation$",
+    "是，在此对话中为“$1”保存规则"
+  ],
+  [
+    "^Rules: (\\d+) tokens$",
+    "规则：$1 个 token"
+  ],
+  [
+    "^Created automation \"(.+)\"\\.$",
+    "已创建自动化“$1”。"
+  ],
+  [
+    "^Explored files$",
+    "浏览了文件"
+  ],
+  [
+    "^Explored (\\d+) files?$",
+    "浏览了 $1 个文件"
+  ],
+  [
+    "^Explored ([^,]+)$",
+    "浏览了 $1"
+  ],
+  [
+    "^Ran command$",
+    "运行了命令"
+  ],
+  [
+    "^Ran commands$",
+    "运行了多条命令"
+  ],
+  [
+    "^Edited files$",
+    "编辑了文件"
+  ],
+  [
+    "^Edited (\\d+) files?$",
+    "编辑了 $1 个文件"
+  ],
+  [
+    "^Edited ([^,]+)$",
+    "编辑了 $1"
+  ],
+  [
+    "^Editing ([^,]+)$",
+    "正在编辑 $1"
+  ]
+]
