@@ -57,7 +57,7 @@ Antigravity 桌面版（Windows）的非官方中文美化包：界面汉化、�
 ## 安装（一键安装包）
 
 1. 安装 Antigravity，并登录一次。
-2. 拿到 `Antigravity中文美化包.zip`：从本仓库的 Releases 下载；Releases 里没有的话，按下文“打包”自己生成。
+2. 拿到安装包：从本仓库的 [Releases](https://github.com/ncdeng/agy-zh-pack/releases) 下载 `agy-zh-pack-v<版本>.zip`（解压后是 `Antigravity中文美化包` 文件夹）；也可以按下文“打包”自己生成。
 3. 把 zip 解压到任意位置。不要在压缩包里直接运行。
 4. 双击 `一键安装.cmd`。如果弹出“Windows 已保护你的电脑”，点“更多信息”，再点“仍要运行”。
 5. 如果 Antigravity 正开着，安装程序会提示。按回车后它会自动关闭 Antigravity，装好后再打开。
@@ -118,7 +118,7 @@ node inject.mjs
 node package/build.mjs
 ```
 
-生成 `dist/Antigravity中文美化包/` 和同名 zip。zip 里带上当前运行的 `node.exe` 和 `package/third_party/node-LICENSE.txt`（Node.js 的许可证）。用别的 Node.js 版本打包时，把许可证换成对应版本的：`https://raw.githubusercontent.com/nodejs/node/<版本>/LICENSE`。
+生成 `dist/Antigravity中文美化包/` 和同名 zip。传到 GitHub Releases 时，把 zip 改成英文名 `agy-zh-pack-v<版本>.zip`（GitHub 会去掉文件名里的中文）。zip 里带上当前运行的 `node.exe` 和 `package/third_party/node-LICENSE.txt`（Node.js 的许可证）。用别的 Node.js 版本打包时，把许可证换成对应版本的：`https://raw.githubusercontent.com/nodejs/node/<版本>/LICENSE`。
 
 ## 文件
 
