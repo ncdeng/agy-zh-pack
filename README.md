@@ -2,11 +2,20 @@
 
 Antigravity 桌面版（Windows）的非官方中文美化包：界面汉化、助手回复的字体和配色、输入框上方的用量状态栏。
 
-> 这是第三方项目，和 Google 没有关系。使用前请先读下面的“风险”一节。
+> 这是第三方项目，和 Google 没有关系。使用前请先读“风险”一节。
+
+## 一眼看懂
+
+| 功能 | 默认 | 会不会改发给 Google 的内容 |
+|---|---|---|
+| 界面汉化 | 开 | 不会，只改本机显示 |
+| 回复字体、配色、缩放 | 开 | 不会，只改本机显示 |
+| 用量状态栏 | 开 | 不会，只读本机数据 |
+| 解锁 512K 上下文 | **关** | **会**，所以要你自己选择打开 |
 
 ## 功能
 
-- **界面汉化**：菜单、设置、按钮、提示文字换成中文（约 1700 条词典 + 44 条规则）。对话内容、代码、文件名不翻译。
+- **界面汉化**：菜单、设置、按钮、提示文字换成中文（约 2800 条词典 + 56 条正则规则）。对话内容、代码、文件名不翻译。
 - **回复字体**：助手回复的英文用 Lora，中文用 Noto Serif SC，标题用 Poppins。字体从 Google Fonts 在线加载。
 - **外观**：界面缩放 131%、强对比度、系统字体、暖白配色。配色参考 Anthropic 公开的品牌指南。
 - **用量状态栏**（输入框上方）：
@@ -15,34 +24,70 @@ Antigravity 桌面版（Windows）的非官方中文美化包：界面汉化、�
   - 5 小时额度和每周额度：已用比例、重置时间、和匀速用完相比的快慢。
   - 子代理：在跑的子代理每个单独一行，跑完约 10 秒后收起。打开子代理窗口时，显示那个子代理自己的数据。
   - 鼠标停在任何一项上，会显示详细说明。
-- **可选：上下文上限 512K**。默认关闭，见下文“风险”。
+- **可选：解锁 512K 上下文**。默认关闭，见下文“上下文开关”。
 
 ## 风险
 
 请先读完这一节，再决定用不用。
 
 - Antigravity 附加服务条款第 6 条规定：不得滥用、损害、干扰服务，包括 “using the Service in connection with products not provided by us”。违反条款可能导致 Antigravity 和 Gemini CLI 账号被暂停或终止。本项目是第三方工具，作者不能保证使用它不违反条款。
-- 汉化、字体、配色只改本机的界面显示。状态栏只读取本机数据。
-- **512K 上下文风险最高，所以默认关闭。** 打开后，发给 Google 服务器的请求内容会改变：Gemini 和 Claude 模型的压缩线从 256K 提高到 512K（和 agy CLI 选 512K 时发的字段一样）。上下文越长，每一轮消耗的额度越多。要打开，把 `statusbar.js` 里的 `CTX_LIMIT` 改成 `512000`。
-- 本项目依赖 Antigravity 内部的页面结构和接口。Antigravity 更新后，部分功能可能失效。
-- 测试过的版本：Antigravity 桌面版 2.29.0，Windows 11；2.31.2 已补齐汉化词典。
+- 默认情况下，本项目只改本机的界面显示，状态栏只读取本机数据，不改发给 Google 的内容。
+- 解锁 512K 上下文会改变发给 Google 的内容，风险最高，所以默认关闭，只有你自己选择才会打开。
+- 本项目依赖 Antigravity 内部的页面结构和接口。Antigravity 更新后，部分功能可能失效，新加的界面文字会先显示英文。
+
+## 上下文开关（可选，默认关闭）
+
+**它做什么**：Antigravity 桌面版默认在对话约 25.6 万 token 时自动压缩上下文（Gemini 和 Claude 模型）。解锁后，压缩线提高到 51.2 万 token，长对话能记住更多内容。做法和 agy CLI 在 `/model` 里选 512K 时一样：给请求补上 `checkpointConfig.maxTokenLimit = 512000`。
+
+**代价**：
+
+- 发给 Google 的内容会变，和官方桌面端的默认行为不同（见“风险”）。
+- 上下文越长，每一轮消耗的额度越多，额度会用得更快。
+
+**怎么打开或关闭**：
+
+- 一键安装时，安装程序会问一次。直接按回车 = 不解锁。
+- 装好以后，双击安装包文件夹里的 `上下文开关.cmd`，按提示输入。不用关 Antigravity，几秒内自动生效，从下一条消息开始按新设置计算。
+- 从源码运行时，在 `inject.mjs` 同目录建 `config.json`，内容是 `{"contextLimit": 512000}`；删掉这个文件或写 `0` 就是关闭。文件写错时按关闭处理。
+
+**怎么确认**：看状态栏的上下文一项。上限显示 `512k` 就是已解锁，`256k` 就是默认。
+
+**关闭以后**：已经超过 25.6 万 token 的长对话，下一轮可能会被自动压缩。
 
 ## 安装（一键安装包）
 
 1. 安装 Antigravity，并登录一次。
-2. 从 Releases 下载 `Antigravity中文美化包.zip`，解压到任意位置。不要在压缩包里直接运行。
-3. 双击 `一键安装.cmd`。如果弹出“Windows 已保护你的电脑”，点“更多信息”，再点“仍要运行”。
-4. 如果 Antigravity 正开着，安装程序会提示。按回车后它会自动关闭 Antigravity，装好后再打开。
+2. 拿到 `Antigravity中文美化包.zip`：从本仓库的 Releases 下载；Releases 里没有的话，按下文“打包”自己生成。
+3. 把 zip 解压到任意位置。不要在压缩包里直接运行。
+4. 双击 `一键安装.cmd`。如果弹出“Windows 已保护你的电脑”，点“更多信息”，再点“仍要运行”。
+5. 如果 Antigravity 正开着，安装程序会提示。按回车后它会自动关闭 Antigravity，装好后再打开。
+6. 安装程序会问要不要解锁 512K 上下文。不确定就直接按回车（不解锁）。
 
 安装程序做的事：
 
-- 把文件复制到 `%LOCALAPPDATA%\AgyZhPack`。安装包自带 `node.exe`，不用另装 Node.js。
+- 把文件复制到 `%LOCALAPPDATA%\AgyZhPack`。安装包自带 `node.exe`（Node.js 官方程序，许可证在 `app\node-LICENSE.txt`），不用另装 Node.js。
 - 改 Antigravity 的外观设置。改之前把原值记在 `originals.json`，卸载时恢复。
+- 把上下文开关的选择写进 `%LOCALAPPDATA%\AgyZhPack\config.json`。
 - 建计划任务 `AgyZhPack`：登录时在后台启动注入程序（普通权限，约占 60 MB 内存）。建不了计划任务时，改用“启动”文件夹。
 
 ## 卸载
 
-双击 `一键卸载.cmd`，按提示选择要不要把外观恢复成安装前的样子。请保留解压出来的文件夹，卸载时要用。
+双击 `一键卸载.cmd`，按提示选择要不要把外观恢复成安装前的样子。请保留解压出来的文件夹，卸载和切换上下文开关时都要用。
+
+## 测试情况
+
+| Antigravity 版本 | 测过的内容 | 日期 |
+|---|---|---|
+| 2.31.2 | 汉化（设置页各屏、对话页）、字体和配色、状态栏（模型、上下文、缓存、首字、速度、5 小时和每周额度）、512K 改写生效、上下文开关切换、一键安装/开关/卸载（隔离目录） | 2026-11-13 |
+| 2.31.2 | **没测**：子代理那几行（这次没有跑子代理） | — |
+| 2.29.0 | 全部功能，包括子代理那几行和一键安装 | 2026-11-04～09 |
+
+系统：Windows 11。
+
+已知的汉化不足：
+
+- 有些句子由几段文字拼成，中间夹着文件名或链接。这类句子按段翻译，语序不一定自然；只剩一两个虚词、单独读不通的片段保持英文。
+- 设置页的部分说明（比如界面布局的模式名、内置技能的说明）是 Antigravity 后台下发的，不在前端代码里。后台改了文字，这些地方会先变回英文。
 
 ## 原理
 
@@ -50,6 +95,7 @@ Antigravity 桌面版（Windows）的非官方中文美化包：界面汉化、�
 - `inject.mjs` 常驻后台，每 3 秒检查一次。发现主窗口后，用 Chrome DevTools Protocol 注入样式、翻译器和状态栏脚本。
 - 不修改 Antigravity 的安装文件，Antigravity 自动更新后仍然有效。
 - 状态栏在页面里包一层 `fetch`，旁听应用和本机后台（`language_server`）之间的 grpc-web+json 数据。另外，它向本机后台查几个只读接口：额度、实际模型名、子代理运行状态。
+- 上下文开关打开时，同一层 `fetch` 包装给带 `cascadeConfig` 的请求补上 `checkpointConfig.maxTokenLimit`；关闭时完全不改请求。
 - 外观设置存在 `%APPDATA%\Antigravity\app_storage.json` 和 `%USERPROFILE%\.gemini\config\config.json`，只由安装脚本写入。
 
 ## 从源码运行
@@ -61,7 +107,8 @@ node inject.mjs
 ```
 
 - 注入程序常驻后台。已经有一个在跑时，新启动的会自动退出。
-- 改了 `style.css`、`statusbar.js` 或 `i18n` 下的文件后，已打开的窗口会自动更新，不用重启。
+- 改了 `style.css`、`statusbar.js`、`config.json` 或 `i18n` 下的文件后，已打开的窗口会自动更新，不用重启。
+- 改了 `i18n/translator.js` 的逻辑，要把里面的 `VERSION` 加 1，已打开的窗口才会换用新翻译器。
 - 如果注入程序在 Antigravity 打开很久以后才启动，状态栏会提示按 Ctrl+R 刷新一次窗口。
 - 从源码运行不会改外观设置。要改外观，用一键安装包。
 
@@ -71,9 +118,7 @@ node inject.mjs
 node package/build.mjs
 ```
 
-生成 `dist/Antigravity中文美化包/` 和同名 zip。zip 里带上当前运行的 `node.exe`。
-
-发布前，把 Node.js 的许可证放到 `package/third_party/node-LICENSE.txt`，打包时会一起放进安装包。
+生成 `dist/Antigravity中文美化包/` 和同名 zip。zip 里带上当前运行的 `node.exe` 和 `package/third_party/node-LICENSE.txt`（Node.js 的许可证）。用别的 Node.js 版本打包时，把许可证换成对应版本的：`https://raw.githubusercontent.com/nodejs/node/<版本>/LICENSE`。
 
 ## 文件
 
@@ -81,12 +126,14 @@ node package/build.mjs
 |---|---|
 | `inject.mjs` | 注入程序：连 Antigravity 的调试端口，注入下面几个文件 |
 | `style.css` | 助手回复的字体 |
-| `statusbar.js` | 用量状态栏（在页面里运行） |
+| `statusbar.js` | 用量状态栏和上下文开关的改写（在页面里运行） |
 | `i18n/translator.js` | 翻译器（在页面里运行） |
 | `i18n/zh-CN.json` | 词典：界面英文原文 → 中文 |
 | `i18n/zh-CN.rules.json` | 正则规则：相对时间、思考时长等带数字的文字 |
-| `package/app/setup.mjs` | 一键安装和卸载 |
+| `config.json` | 上下文开关的设置（不在仓库里，由安装程序或你自己创建） |
+| `package/app/setup.mjs` | 一键安装、卸载、上下文开关 |
 | `package/build.mjs` | 生成安装包 |
+| `package/third_party/node-LICENSE.txt` | 安装包自带的 Node.js 的许可证 |
 
 ## 致谢
 
@@ -94,6 +141,7 @@ node package/build.mjs
 - 状态栏配色：Catppuccin（浅色 Latte，深色 Mocha）。
 - 字体：Lora、Poppins、Noto Serif SC、Noto Sans SC（Google Fonts，SIL Open Font License 1.1）。
 - 图标：Material Symbols（Apache License 2.0）。
+- 安装包自带 Node.js（MIT 许可，见 `package/third_party/node-LICENSE.txt`）。
 
 ## 许可
 

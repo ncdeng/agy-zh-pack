@@ -2,12 +2,14 @@
 //   - 样式：助手回复用 Anthropic 官方字体（同目录 style.css）；
 //   - 汉化：界面英文换成中文（i18n\ 下的 translator.js + zh-CN.json 词典 + zh-CN.rules.json 规则）；
 //   - 状态栏：输入框上方显示模型、上下文、token、首字时间、速度、额度（statusbar.js）。
+//   - 可选：上下文上限。同目录 config.json 里的 contextLimit（默认没有这个文件 = 0 = 关闭）传给状态栏，
+//     见 statusbar.js 开头的说明。一键安装包在安装时问一次，以后用“上下文开关.cmd”改。
 //
 // 原理：Antigravity 主进程启动时总会打开 Chromium 远程调试端口（端口号写在
 // %APPDATA%\Antigravity\DevToolsActivePort）。本脚本常驻后台，每 3 秒检查一次：
 //   - 发现主窗口页面后连上去，用 Page.addScriptToEvaluateOnNewDocument 登记注入脚本
 //     （刷新、跳转都会自动重新加样式），并立刻在当前页面加上样式；
-//   - style.css 或 i18n\ 下的文件改动后，自动更新所有已连接的窗口；
+//   - style.css、statusbar.js、config.json 或 i18n\ 下的文件改动后，自动更新所有已连接的窗口；
 //   - 窗口关闭或应用退出后连接自然断开，下次启动再连。
 //   - 连上一个刚打开、但状态栏晚到的窗口时，自动刷新一次（见 maybeReload）。
 // 不修改 Antigravity 的安装文件，应用自动更新后仍然有效。
@@ -53,8 +55,17 @@ const FILES = {
   rules: path.join(DIR, 'i18n', 'zh-CN.rules.json'),
   translator: path.join(DIR, 'i18n', 'translator.js'),
   statusbar: path.join(DIR, 'statusbar.js'),
+  config: path.join(DIR, 'config.json'), // 用户设置，可以没有
 };
-const assets = { css: '', dict: null, rules: [], translator: '', statusbar: '' };
+const JSON_KEYS = new Set(['dict', 'rules', 'config']);
+const assets = { css: '', dict: null, rules: [], translator: '', statusbar: '', config: {} };
+const EMPTY = { dict: null, rules: [], config: {} };
+
+// 传给状态栏的设置。contextLimit 只接受 0（关闭）或 256001～1000000 之间的整数，其他值一律按 0 处理。
+function barConfig() {
+  const n = Math.floor(Number(assets.config && assets.config.contextLimit));
+  return { contextLimit: n > 256000 && n <= 1000000 ? n : 0 };
+}
 const mtimes = {};
 function loadAssets() {
   let changed = false;
@@ -65,15 +76,17 @@ function loadAssets() {
     mtimes[key] = mtime;
     changed = true;
     if (!mtime) {
-      assets[key] = key === 'dict' ? null : key === 'rules' ? [] : '';
+      assets[key] = key in EMPTY ? EMPTY[key] : '';
       continue;
     }
     try {
       const text = fs.readFileSync(file, 'utf8').replace(/^﻿/, ''); // 去掉 UTF-8 BOM
-      assets[key] = key === 'dict' || key === 'rules' ? JSON.parse(text) : text;
+      assets[key] = JSON_KEYS.has(key) ? JSON.parse(text) : text;
     } catch (e) {
       log(`read ${path.basename(file)} failed: ${e.message}`);
+      if (key === 'config') assets.config = {}; // 设置文件写坏了就按默认（关闭）处理
     }
+    if (key === 'config') log(`config: contextLimit=${barConfig().contextLimit}`);
   }
   return changed;
 }
@@ -84,7 +97,7 @@ function pageScript() {
     : `window.__agyI18n && window.__agyI18n.disable();`;
   // 状态栏：删掉 statusbar.js 就不再加载（已打开的窗口要刷新才会消失）
   const bar = assets.statusbar
-    ? `try { (${assets.statusbar})(); } catch (e) { console.warn('agy statusbar', e); }`
+    ? `try { (${assets.statusbar})(${JSON.stringify(barConfig())}); } catch (e) { console.warn('agy statusbar', e); }`
     : '';
   return `(() => {
     ${bar}
@@ -178,7 +191,7 @@ async function apply(sess) {
 async function tick() {
   const changed = loadAssets();
   if (changed && sessions.size) {
-    log('style/i18n files changed, updating open windows');
+    log('style/i18n/config files changed, updating open windows');
     for (const s of sessions.values()) apply(s).catch((e) => log(`update failed: ${e.message}`));
   }
 

@@ -7,3 +7,6 @@ inject.log
 # 本地备份
 *.bak
 *.bak-*
+
+# 用户设置（上下文开关），每台机器自己的
+config.json

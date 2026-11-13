@@ -21,27 +21,39 @@ copy(path.join(HERE, 'app', 'setup.mjs'), 'setup.mjs');
 for (const f of ['inject.mjs', 'style.css', 'statusbar.js']) copy(path.join(SRC, f), f);
 for (const f of ['translator.js', 'zh-CN.json', 'zh-CN.rules.json']) copy(path.join(SRC, 'i18n', f), path.join('i18n', f));
 
-// node.exe 是 Node.js 官方程序（MIT 许可）。把 Node.js 的 LICENSE 放在 package\third_party\node-LICENSE.txt，
-// 打包时会一起放进去；没有这个文件就提醒一下（公开发布前要补上）。
+// node.exe 是 Node.js 官方程序（MIT 许可）。Node.js 的 LICENSE 放在 package\third_party\node-LICENSE.txt
+// （从 github.com/nodejs/node 对应版本的 LICENSE 下载），打包时一起放进去。没有这个文件就不打包。
 const NODE_LICENSE = path.join(HERE, 'third_party', 'node-LICENSE.txt');
-if (fs.existsSync(NODE_LICENSE)) copy(NODE_LICENSE, 'node-LICENSE.txt');
-else console.warn('注意：没有 package/third_party/node-LICENSE.txt，安装包里没带 Node.js 的许可证（公开发布前要补上）');
-
-// 上下文上限：按 statusbar.js 里的 CTX_LIMIT 写使用说明（0 = 关闭）
-const CTX_LIMIT = Number((/const CTX_LIMIT = (\d+)/.exec(fs.readFileSync(path.join(SRC, 'statusbar.js'), 'utf8')) || [])[1]) || 0;
-const ctxText = CTX_LIMIT > 0
-  ? `- 上下文上限从 256K 提高到 ${Math.round(CTX_LIMIT / 1000)}K（Gemini 和 Claude 模型）：长对话不会在 25 万 token 左右就被自动压缩。\n` +
-    '  注意：上下文越长，每一轮消耗的额度越多。\n'
-  : '';
+if (!fs.existsSync(NODE_LICENSE)) {
+  console.error('缺少 package/third_party/node-LICENSE.txt（Node.js 的许可证），安装包里必须带上。');
+  console.error(`下载地址：https://raw.githubusercontent.com/nodejs/node/${process.version}/LICENSE`);
+  process.exit(1);
+}
+copy(NODE_LICENSE, 'node-LICENSE.txt');
 
 const cmd = (action) => ['@echo off', 'chcp 65001 >nul', `"%~dp0app\\node.exe" "%~dp0app\\setup.mjs" ${action}`, 'echo.', 'pause', ''].join('\r\n');
 fs.writeFileSync(path.join(OUT, '一键安装.cmd'), cmd('install'), 'ascii');
 fs.writeFileSync(path.join(OUT, '一键卸载.cmd'), cmd('uninstall'), 'ascii');
+fs.writeFileSync(path.join(OUT, '上下文开关.cmd'), cmd('context'), 'ascii');
 
-const readme = `Antigravity 中文美化包
+// 测试过的 Antigravity 版本（改了要同步 README.md 的“测试情况”）
+const TESTED = 'Antigravity 桌面版 2.31.2，Windows 11';
+
+const readme = `Antigravity 中文美化包（非官方）
+
+这是第三方工具，和 Google 没有关系。安装前请先读完“风险”一节。
+
+【风险】
+- Antigravity 附加服务条款第 6 条：不得滥用、损害、干扰服务，包括
+  “using the Service in connection with products not provided by us”（和非 Google 提供的产品一起使用服务）。
+  违反条款可能导致 Antigravity 和 Gemini CLI 账号被暂停或终止。作者不能保证使用本工具不违反条款。
+- 默认情况下，本工具只改本机的界面显示（汉化、字体、配色、状态栏），不改发给 Google 的内容。
+- 可选的“解锁 512K 上下文”会改变发给 Google 的内容，风险更高，默认不开启，见下面“上下文开关”。
+- 本工具依赖 Antigravity 内部的页面结构。Antigravity 更新后，部分功能可能失效或显示英文。
+  测试过的版本：${TESTED}。
 
 【装好以后的样子】
-- 界面变成中文：菜单、设置、按钮、提示文字等。对话内容不翻译。
+- 界面变成中文：菜单、设置、按钮、提示文字等。对话内容、代码、文件名不翻译。
 - 回复用 Claude 官方风格的字体：英文 Lora，中文宋体风格（Noto Serif SC），标题用 Poppins。
 - Claude 风格的暖白配色，界面放大到 131%，对比度加强，字更清楚。
 - 输入框上方有用量信息（两行）：
@@ -49,14 +61,22 @@ const readme = `Antigravity 中文美化包
   第二行：首字时间、生成速度、这次的 token 数、5 小时额度和每周额度（已用比例、重置时间、和匀速用完的进度差）。
   子代理在跑时，每个子代理单独一行，跑完约 10 秒后自动收起；打开子代理窗口时，显示的是那个子代理自己的数据。
   鼠标停在任何一项上，会显示详细说明。
-${ctxText}
+
 【安装】
 1. 先安装 Antigravity，并登录一次。
 2. 把压缩包解压到任意位置（不要在压缩包里直接双击运行）。
 3. 双击“一键安装.cmd”。
    如果弹出“Windows 已保护你的电脑”，点“更多信息”，再点“仍要运行”。
 4. 如果 Antigravity 正开着，窗口里会提示，按回车后它会自动关闭，装好后再自动打开。
-5. 看到“安装完成”，按任意键关掉窗口就行。
+5. 安装中会问要不要解锁 512K 上下文。不确定就直接按回车（不解锁）。
+6. 看到“安装完成”，按任意键关掉窗口就行。
+
+【上下文开关（可选，默认关闭）】
+- Antigravity 默认在对话约 25.6 万 token 时自动压缩上下文（Gemini 和 Claude 模型）。
+  解锁后压缩线提高到 51.2 万 token，长对话能记住更多内容。
+- 代价：会改变发给 Google 的内容（风险见上），而且上下文越长，每一轮消耗的额度越多。
+- 想打开或关闭：双击“上下文开关.cmd”，按提示输入。不用关 Antigravity，几秒内自动生效。
+- 确认有没有生效：看输入框上方状态栏的上下文一项，上限显示 512k 就是已解锁，256k 就是默认。
 
 【调整】
 - 字太大或太小：在 Antigravity 里按 Ctrl+= 放大，按 Ctrl+- 缩小。
@@ -65,15 +85,15 @@ ${ctxText}
 
 【卸载】
 双击“一键卸载.cmd”，按提示选择要不要把外观恢复成安装前的样子。
-请保留这个文件夹，卸载时要用。
+请保留这个文件夹，卸载和切换上下文开关时要用。
 
 【说明】
 - 不修改 Antigravity 本身的文件，Antigravity 自动更新后仍然有效。
-- 安装位置：%LOCALAPPDATA%\\AgyZhPack
+- 安装位置：%LOCALAPPDATA%\\AgyZhPack（上下文开关的设置存在里面的 config.json）
 - 开机自启项：计划任务“AgyZhPack”（登录后立刻在后台运行，约占 60 MB 内存）。
   电脑不允许建计划任务时，会改用“启动”文件夹里的 agy-zh-pack.vbs（开机后要等几分钟才生效）。
-- 只改界面显示${CTX_LIMIT > 0 ? '，以及发给 Antigravity 本机后台的上下文上限' : ''}；用量和额度是向本机后台查的。
-  除了从 Google Fonts 在线加载字体和图标，不会连接其他网站。
+- 用量和额度是向本机的 Antigravity 后台查的。除了从 Google Fonts 在线加载字体和图标，不会连接其他网站。
+- 自带的 node.exe 是 Node.js ${process.version} 官方程序，许可证见 app\\node-LICENSE.txt。
 `;
 fs.writeFileSync(path.join(OUT, '使用说明.txt'), '﻿' + readme.replace(/\n/g, '\r\n'), 'utf8');
 

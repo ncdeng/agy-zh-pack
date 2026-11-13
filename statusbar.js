@@ -9,12 +9,13 @@
 // （GetCascadeTrajectoryGeneratorMetadata）、子代理是否还在跑（GetAllCascadeTrajectories）。
 // 计算：首字 = viewableAt − createdAt；速度 = 输出 token ÷（finishedGeneratingAt − viewableAt）。
 //
-// 唯一会改内容的地方：上下文上限（见下面 CTX_LIMIT，默认关闭）。打开后，应用发给后台的请求里如果带 cascadeConfig，
-// 就补上 checkpointConfig.maxTokenLimit，把压缩线从默认的 256K 提高。CTX_LIMIT 是 0 时完全不改请求。
+// 唯一会改内容的地方：上下文上限（默认关闭）。打开后，应用发给后台的请求里如果带 cascadeConfig，
+// 就补上 checkpointConfig.maxTokenLimit，把压缩线从默认的 256K 提高。关闭时完全不改请求。
+// 开关在注入器同目录的 config.json（{"contextLimit": 512000}），由注入器作为参数 CFG 传进来。
 //
 // 旁听要在应用脚本运行前装好（注入器用 addScriptToEvaluateOnNewDocument 保证），
 // 所以第一次装上后要刷新一次窗口（Ctrl+R）或重启 Antigravity 才有数据。
-function agyStatusBar() {
+function agyStatusBar(CFG) {
   'use strict';
   // 再次注入时（改了本文件）：数据和旁听保留，只替换显示部分
   const S = window.__agyStats || (window.__agyStats = { convs: new Map(), models: new Map(), render: () => {} });
@@ -30,12 +31,13 @@ function agyStatusBar() {
   // 超过就压缩。请求的 cascadeConfig.checkpointConfig.maxTokenLimit 可以改这个预算：
   // agy CLI 在 /model 里选 512K 时发的就是 maxTokenLimit = 512000（CLI 的 buildCascadeConfigInternal）。
   // 这里照着做：只改 Gemini / Claude 模型（GPT-OSS 等上下文小的模型不动），应用自己已经设了值就不动。
-  // 改 CTX_LIMIT 或下面的改写逻辑不用刷新窗口（fetch 包装每次都调最新的 S.rewrite）；
+  // 开关或改写逻辑变了不用刷新窗口（fetch 包装每次都调最新的 S.rewrite 和 S.ctxLimit）；
   // 但旧版状态栏装的 fetch 包装不会调 S.rewrite，所以第一次升级到这一版要刷新一次窗口。
   //
-  // 默认关闭（0）。这项会改变发给 Google 服务器的请求内容，Antigravity 的服务条款第 6 条禁止干扰服务，
-  // 可能导致账号被暂停；而且上下文越长，每一轮消耗的额度越多。要打开，自己承担风险，把下面改成 512000。
-  const CTX_LIMIT = 0;                 // 0 = 关闭，不改任何请求；512000 = 和 agy CLI 选 512K 时一样
+  // 默认关闭（0）。打开后，Antigravity 发给 Google 服务器的上下文会变长，和官方桌面端的默认行为不同。
+  // Antigravity 的服务条款第 6 条禁止干扰服务，可能导致账号被暂停；而且上下文越长，每一轮消耗的额度越多。
+  // 只有用户在 config.json 里自己写了 contextLimit（安装时选“开启”或用“上下文开关.cmd”）才会打开。
+  const CTX_LIMIT = (CFG && CFG.contextLimit) > 0 ? CFG.contextLimit : 0; // 0 = 关闭，不改任何请求；512000 = 和 agy CLI 选 512K 时一样
   const CTX_MODELS = /^(Gemini|Claude)\b/;
   S.ctxLimit = CTX_LIMIT;
   const enc = new TextEncoder();

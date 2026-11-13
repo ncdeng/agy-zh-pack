@@ -1,6 +1,7 @@
-// Antigravity 中文美化包：安装 / 卸载脚本。由“一键安装.cmd / 一键卸载.cmd”调用：
+// Antigravity 中文美化包：安装 / 卸载 / 上下文开关脚本。由“一键安装.cmd / 一键卸载.cmd / 上下文开关.cmd”调用：
 //   node.exe setup.mjs install
 //   node.exe setup.mjs uninstall
+//   node.exe setup.mjs context
 //
 // 安装做的事：
 //   1. 把注入器和样式、汉化、状态栏文件复制到 %LOCALAPPDATA%\AgyZhPack\；
@@ -9,8 +10,10 @@
 //   3. 开机自启：建一个登录时触发的计划任务 AgyZhPack（当前用户、普通权限），运行安装目录里的
 //      agy-zh-pack.vbs，在后台隐藏启动注入器。不用“启动”文件夹，因为 Windows 会把那里的程序延后约 7 分钟，
 //      这段时间打开的 Antigravity 是英文的；计划任务建不了时才退回“启动”文件夹；
-//   4. 立即启动注入器，并重新打开 Antigravity。
+//   4. 问用户要不要解锁 512K 上下文（默认不解锁），结果写进 AgyZhPack\config.json；
+//   5. 立即启动注入器，并重新打开 Antigravity。
 // 外观设置只能在 Antigravity 关闭时写入，所以安装和卸载时会先提示关闭它。
+// 上下文开关（context）只改 config.json，注入器发现文件变了会自动更新已打开的窗口，不用关 Antigravity。
 //
 // 测试用：设环境变量 AGY_SETUP_TEST=1，跳过所有进程操作（不关、不开 Antigravity，不启动注入器），也不建计划任务；
 // 再设 AGY_SETUP_TEST_TASK=1 就真的建一个名叫 AgyZhPack-test 的计划任务（卸载时删掉），用来测建任务这一步。
@@ -35,6 +38,8 @@ const AGY_EXE = path.join(LOCAL, 'Programs', 'antigravity', 'Antigravity.exe');
 const APP_STORAGE = path.join(ROAMING, 'Antigravity', 'app_storage.json');
 const CONFIG = path.join(os.homedir(), '.gemini', 'config', 'config.json');
 const ORIGINALS = path.join(INSTALL, 'originals.json');
+const USER_CONFIG = path.join(INSTALL, 'config.json'); // 用户设置：目前只有 contextLimit
+const CTX_ON = 512000; // 解锁后的上下文上限，和 agy CLI 在 /model 里选 512K 时一样
 
 // 要写入的外观设置
 const APP_STORAGE_SET = {
@@ -136,6 +141,34 @@ const startAgy = () => {
   spawn(AGY_EXE, [], { detached: true, stdio: 'ignore' }).unref();
 };
 
+// ---------- 上下文上限（可选，默认关闭） ----------
+const readUserConfig = () => { try { return readJson(USER_CONFIG); } catch { return {}; } };
+const ctxEnabled = () => Number(readUserConfig().contextLimit) > 256000;
+const writeCtx = (on) => {
+  const cfg = readUserConfig();
+  cfg.contextLimit = on ? CTX_ON : 0;
+  writeJson(USER_CONFIG, cfg);
+};
+const sayCtxRisk = () => {
+  say('  【可选】解锁 512K 上下文');
+  say('  Antigravity 默认在对话约 25.6 万 token 时自动压缩上下文（Gemini 和 Claude 模型）。');
+  say('  解锁后，压缩线提高到 51.2 万 token，长对话能记住更多内容。');
+  say('  请先了解风险：');
+  say('    - 这项会改变 Antigravity 发给 Google 服务器的内容，和官方桌面端的默认行为不同。');
+  say('      Antigravity 服务条款禁止干扰服务，违反可能导致账号被暂停。');
+  say('    - 上下文越长，每一轮消耗的额度越多，额度会用得更快。');
+  say('  不解锁的话，美化包只改本机的界面显示。');
+  say('  以后想改，双击“上下文开关.cmd”就行。');
+};
+// 问一次要不要解锁；current = 现在的设置，直接回车保持不变（新装时 current 是 false，即默认不解锁）
+const askCtx = async (current) => {
+  const a = await ask(current
+    ? '  现在是“已解锁”。输入 n 回车=关闭（恢复默认），直接回车=保持解锁：'
+    : '  现在是“未解锁”（推荐）。输入 y 回车=解锁，直接回车=保持不解锁：');
+  if (current) return !/^n/i.test(a);
+  return /^y/i.test(a);
+};
+
 // ---------- 安装 ----------
 async function install() {
   say('');
@@ -203,7 +236,15 @@ async function install() {
     if (!TEST) warn('没能建计划任务，改用“启动”文件夹：开机后要等几分钟才生效，这之前打开的 Antigravity 是英文的。');
   }
 
-  // 4. 启动
+  // 4. 上下文上限：默认不解锁；重装时默认保持原来的选择
+  say('');
+  sayCtxRisk();
+  const ctxOn = await askCtx(ctxEnabled());
+  writeCtx(ctxOn);
+  ok(ctxOn ? '已解锁 512K 上下文' : '上下文保持默认（不解锁）');
+  say('');
+
+  // 5. 启动
   startInjector();
   ok('后台注入程序已启动');
   if (reopen || !TEST) {
@@ -215,7 +256,7 @@ async function install() {
   say('  然后输入框上方会出现用量信息（模型、上下文、速度、5 小时和每周额度）。');
   say('  以后每次开机、每次打开 Antigravity 都会自动生效，不用再做什么。');
   say('  字太大或太小：在 Antigravity 里按 Ctrl+= 放大，Ctrl+- 缩小。');
-  say('  请保留这个文件夹，以后卸载要用里面的“一键卸载”。');
+  say('  请保留这个文件夹：以后卸载要用里面的“一键卸载”，切换上下文要用“上下文开关”。');
   say('');
 }
 
@@ -269,6 +310,36 @@ async function uninstall() {
   say('');
 }
 
+// ---------- 上下文开关 ----------
+async function context() {
+  say('');
+  say('  ===== Antigravity 中文美化包：上下文开关 =====');
+  say('');
+  if (!fs.existsSync(path.join(INSTALL, 'inject.mjs'))) {
+    warn('还没安装美化包，请先双击“一键安装.cmd”。');
+    process.exitCode = 1;
+    return;
+  }
+  sayCtxRisk();
+  say('');
+  const before = ctxEnabled();
+  const after = await askCtx(before);
+  writeCtx(after);
+  if (after === before) {
+    ok('没有改动：' + (after ? '仍然是已解锁' : '仍然是默认（不解锁）'));
+  } else if (after) {
+    ok('已解锁 512K 上下文');
+    say('  已打开的 Antigravity 窗口几秒内会自动更新，从下一条消息开始生效。');
+    say('  想确认的话，看输入框上方状态栏的上下文一项：上限显示 512k 就是生效了。');
+  } else {
+    ok('已关闭，恢复默认上下文');
+    say('  已打开的 Antigravity 窗口几秒内会自动更新，从下一条消息开始按默认上限计算。');
+    say('  已经超过 25.6 万 token 的长对话，下一轮可能会被自动压缩。');
+  }
+  say('');
+}
+
 const cmd = process.argv[2];
-(cmd === 'install' ? install() : cmd === 'uninstall' ? uninstall() : Promise.reject(new Error('用法：setup.mjs install|uninstall')))
+const actions = { install, uninstall, context };
+(actions[cmd] ? actions[cmd]() : Promise.reject(new Error('用法：setup.mjs install|uninstall|context')))
   .catch((e) => { say(''); warn('出错了：' + (e && e.message)); say('  请截图保存这个窗口，反馈问题时附上。'); process.exitCode = 1; });
