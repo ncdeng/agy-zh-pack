@@ -46,14 +46,24 @@ function agyI18n(DICT, RULES) {
     'pre', 'code', '.xterm', '.monaco-editor', '[data-agy-no-i18n]',
     USER_NAMED,
   ].join(',');
+  // 助手回复（[data-quotable]）里的界面按钮：步骤摘要“Thought for 8s”“Worked for 1m”。
+  // 回复整体被排除，这几个按钮单独放行（按钮里只有界面文字，没有回复正文）。
+  const ALLOW = [
+    '[data-testid="thinking-collapsible-trigger"]',
+    '[data-testid="worked-for-collapsible"]',
+  ].join(',');
   const ATTRS = ['placeholder', 'title', 'data-placeholder', 'aria-placeholder'];
   const HAS_LATIN = /[A-Za-z]/;
 
+  // 改了本文件的逻辑就把版本号加 1：已打开的窗口会停掉旧翻译器、换成新的，不用刷新。
+  // 版本号相同时只更新词典和规则。
+  const VERSION = 3;
   const existing = window.__agyI18n;
-  if (existing) {
+  if (existing && existing.version === VERSION) {
     existing.update(DICT, RULES);
     return;
   }
+  if (existing) existing.disable();
 
   let dict = new Map();
   let rules = [];
@@ -78,7 +88,7 @@ function agyI18n(DICT, RULES) {
   };
   // 返回译文（保留原来的首尾空白）；不需要翻译时返回 null
   const translate = (s) => {
-    if (!s || s.length > 400 || !HAS_LATIN.test(s)) return null;
+    if (!s || s.length > 1000 || !HAS_LATIN.test(s)) return null; // 内置技能说明有 400~600 字
     const t = s.trim();
     let v = lookup(t);
     // 步骤摘要这类“A, b, c”拼接文字：拆开逐段翻，全部翻得出来才用
@@ -92,7 +102,7 @@ function agyI18n(DICT, RULES) {
     return lead + v + trail;
   };
 
-  const isExcluded = (el) => !el || el.closest(EXCLUDE) !== null;
+  const isExcluded = (el) => !el || (el.closest(EXCLUDE) !== null && el.closest(ALLOW) === null);
   const isAttrExcluded = (el) => !el || el.closest(ATTR_EXCLUDE) !== null;
 
   const doText = (node, checked) => {
@@ -110,8 +120,16 @@ function agyI18n(DICT, RULES) {
     }
   };
 
-  // 翻译一棵子树；root 本身已确认不在排除区域里
+  // 翻译一棵子树；root 本身已确认不在排除区域里。
+  // 排除区域整棵跳过，所以再单独翻一遍子树里放行的按钮。
   const walk = (root) => {
+    walkTree(root);
+    if (root.nodeType === 1) walkAllowed(root);
+  };
+  const walkAllowed = (root) => {
+    for (const a of root.querySelectorAll(ALLOW)) walkTree(a);
+  };
+  const walkTree = (root) => {
     if (root.nodeType === 3) { doText(root, true); return; }
     if (root.nodeType !== 1) return;
     doAttrs(root);
@@ -137,9 +155,12 @@ function agyI18n(DICT, RULES) {
       } else if (m.type === 'childList') {
         for (const n of m.addedNodes) {
           if (n.nodeType === 3) doText(n, false);
-          else if (n.nodeType === 1 && !isAttrExcluded(n)) {
+          else if (n.nodeType === 1) {
             if (!isExcluded(n)) walk(n);
-            else doAttrs(n);
+            else {
+              if (!isAttrExcluded(n)) doAttrs(n);
+              walkAllowed(n);
+            }
           }
         }
       } else if (m.type === 'attributes') {
@@ -166,6 +187,7 @@ function agyI18n(DICT, RULES) {
   document.addEventListener('DOMContentLoaded', () => { start(); walk(document.body); }, { once: true });
 
   window.__agyI18n = {
+    version: VERSION,
     update(d, r) { load(d, r); if (document.body) walk(document.body); },
     disable() { observer.disconnect(); started = false; delete window.__agyI18n; },
     get size() { return dict.size; },

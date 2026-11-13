@@ -25,7 +25,7 @@ Antigravity 桌面版（Windows）的非官方中文美化包：界面汉化、�
 - 汉化、字体、配色只改本机的界面显示。状态栏只读取本机数据。
 - **512K 上下文风险最高，所以默认关闭。** 打开后，发给 Google 服务器的请求内容会改变：Gemini 和 Claude 模型的压缩线从 256K 提高到 512K（和 agy CLI 选 512K 时发的字段一样）。上下文越长，每一轮消耗的额度越多。要打开，把 `statusbar.js` 里的 `CTX_LIMIT` 改成 `512000`。
 - 本项目依赖 Antigravity 内部的页面结构和接口。Antigravity 更新后，部分功能可能失效。
-- 测试过的版本：Antigravity 桌面版 2.29.0，Windows 11。
+- 测试过的版本：Antigravity 桌面版 2.29.0，Windows 11；2.31.2 已补齐汉化词典。
 
 ## 安装（一键安装包）
 
