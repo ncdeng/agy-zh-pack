@@ -1,5 +1,5 @@
 // Antigravity 桌面版注入器：
-//   - 样式：助手回复用 Anthropic 官方字体（同目录 style.css）；
+//   - 样式（可选）：同目录有 style.css 才注入，没有就不改任何样式。公开的安装包不带 style.css；
 //   - 汉化：界面英文换成中文（i18n\ 下的 translator.js + zh-CN.json 词典 + zh-CN.rules.json 规则）；
 //   - 状态栏：输入框上方显示模型、上下文、token、首字时间、速度、额度（statusbar.js）。
 //   - 可选：上下文上限。同目录 config.json 里的 contextLimit（默认没有这个文件 = 0 = 关闭）传给状态栏，
@@ -105,6 +105,7 @@ function pageScript() {
     const CSS = ${JSON.stringify(assets.css)};
     const put = () => {
       let s = document.getElementById(ID);
+      if (!CSS) { if (s) s.remove(); return; } // 没有 style.css：不加样式（以前加过的也去掉）
       if (!s) {
         s = document.createElement('style');
         s.id = ID;

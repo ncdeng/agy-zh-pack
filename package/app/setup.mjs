@@ -1,21 +1,26 @@
-// Antigravity 中文美化包：安装 / 卸载 / 上下文开关脚本。由“一键安装.cmd / 一键卸载.cmd / 上下文开关.cmd”调用：
+// Antigravity 中文美化包：安装 / 卸载 / 上下文开关 / 配色开关脚本。
+// 由“一键安装.cmd / 一键卸载.cmd / 上下文开关.cmd / 配色开关.cmd”调用：
 //   node.exe setup.mjs install
 //   node.exe setup.mjs uninstall
 //   node.exe setup.mjs context
+//   node.exe setup.mjs theme
 //
-// 安装做的事：
-//   1. 把注入器和样式、汉化、状态栏文件复制到 %LOCALAPPDATA%\AgyZhPack\；
-//   2. 改 Antigravity 的外观设置（缩放 131%、强对比度、系统字体、Claude 配色、上下文指示器），
-//      改之前把原来的值记在 AgyZhPack\originals.json，卸载时按它恢复；
-//   3. 开机自启：建一个登录时触发的计划任务 AgyZhPack（当前用户、普通权限），运行安装目录里的
+// 安装做的事（缩放、字体、对比度一律不改；配色只在用户选择时才改）：
+//   1. 把注入器、汉化、状态栏文件复制到 %LOCALAPPDATA%\AgyZhPack\；
+//   2. 开机自启：建一个登录时触发的计划任务 AgyZhPack（当前用户、普通权限），运行安装目录里的
 //      agy-zh-pack.vbs，在后台隐藏启动注入器。不用“启动”文件夹，因为 Windows 会把那里的程序延后约 7 分钟，
 //      这段时间打开的 Antigravity 是英文的；计划任务建不了时才退回“启动”文件夹；
+//   3. 问用户要不要用作者的配色（默认不用）。要换颜色时才请用户关闭 Antigravity，原值记进 originals.json；
 //   4. 问用户要不要解锁 512K 上下文（默认不解锁），结果写进 AgyZhPack\config.json；
-//   5. 立即启动注入器，并重新打开 Antigravity。
-// 外观设置只能在 Antigravity 关闭时写入，所以安装和卸载时会先提示关闭它。
+//   5. 立即启动注入器。Antigravity 开着就提示按 Ctrl+R 刷新，没开（或刚为换配色关掉）就打开它。
 // 上下文开关（context）只改 config.json，注入器发现文件变了会自动更新已打开的窗口，不用关 Antigravity。
+// 配色开关（theme）改 Antigravity 自己的设置文件，只能在它关闭时改，所以会提示关闭、改完再打开。
+//
+// originals.json：换上作者配色前的原值；装过旧版（v1.0.0）的还有旧版改缩放、对比度、字体前的原值。
+// 新版安装不动旧版记的那部分；卸载时如果有这个文件，问要不要恢复。
 //
 // 测试用：设环境变量 AGY_SETUP_TEST=1，跳过所有进程操作（不关、不开 Antigravity，不启动注入器），也不建计划任务；
+// 再设 AGY_SETUP_TEST_RUNNING=1 就假装 Antigravity 正开着；
 // 再设 AGY_SETUP_TEST_TASK=1 就真的建一个名叫 AgyZhPack-test 的计划任务（卸载时删掉），用来测建任务这一步。
 
 import fs from 'node:fs';
@@ -37,22 +42,12 @@ const TASK = TEST_TASK ? 'AgyZhPack-test' : 'AgyZhPack';
 const AGY_EXE = path.join(LOCAL, 'Programs', 'antigravity', 'Antigravity.exe');
 const APP_STORAGE = path.join(ROAMING, 'Antigravity', 'app_storage.json');
 const CONFIG = path.join(os.homedir(), '.gemini', 'config', 'config.json');
-const ORIGINALS = path.join(INSTALL, 'originals.json');
+const ORIGINALS = path.join(INSTALL, 'originals.json'); // 只有旧版（v1.0.0）装过才有：当时改外观前的原值
 const USER_CONFIG = path.join(INSTALL, 'config.json'); // 用户设置：目前只有 contextLimit
 const CTX_ON = 512000; // 解锁后的上下文上限，和 agy CLI 在 /model 里选 512K 时一样
 
-// 要写入的外观设置
-const APP_STORAGE_SET = {
-  zoomLevel: '1.5', // 缩放约 131%
-  'jetski.contrast': '2', // 对比度：强
-  'jetski.typeface': 'system', // 字体：系统字体
-  contextUsageIndicatorEnabled: 'true', // 发送按钮旁的上下文和额度指示器
-};
-const USER_SETTINGS_SET = {
-  customThemeSeedsLight: { background: '#FAF9F5', foregroundOverride: '#141413', primary: '#D97757' },
-  customThemeSeedsDark: { background: '#262624', foregroundOverride: '#FAF9F5', primary: '#D97757' },
-};
-const FILES = ['node.exe', 'inject.mjs', 'style.css', 'statusbar.js', 'i18n/translator.js', 'i18n/zh-CN.json', 'i18n/zh-CN.rules.json'];
+const FILES = ['node.exe', 'inject.mjs', 'statusbar.js', 'i18n/translator.js', 'i18n/zh-CN.json', 'i18n/zh-CN.rules.json'];
+const OBSOLETE = ['style.css']; // 旧版装过、新版不再带的文件：升级时删掉（回复字体随之恢复成 Antigravity 默认）
 
 const VBS = [
   "' Antigravity Chinese pack: start the injector hidden at logon.",
@@ -69,20 +64,35 @@ const ok = (s) => say('  [完成] ' + s);
 const warn = (s) => say('  [注意] ' + s);
 const readJson = (f) => JSON.parse(fs.readFileSync(f, 'utf8').replace(/^﻿/, ''));
 const writeJson = (f, o) => fs.writeFileSync(f, JSON.stringify(o, null, 2), 'utf8');
+// 整个过程共用一个读取器，按行排队：一次问好几个问题时，提前输入（或管道送进来）的行不会丢；
+// 输入结束（EOF）后的提问一律当作直接回车。
+let rl = null;
+let inputClosed = false;
+const pendingLines = [];
+const waiters = [];
 const ask = (q) => new Promise((resolve) => {
-  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-  rl.question(q, (a) => { rl.close(); resolve(a.trim()); });
-});
+  process.stdout.write(q);
+  if (!rl) {
+    rl = readline.createInterface({ input: process.stdin });
+    rl.on('line', (l) => { const w = waiters.shift(); if (w) w(l.trim()); else pendingLines.push(l.trim()); });
+    rl.on('close', () => { inputClosed = true; while (waiters.length) waiters.shift()(''); });
+  }
+  if (pendingLines.length) resolve(pendingLines.shift());
+  else if (inputClosed) resolve('');
+  else waiters.push(resolve);
+}).then((a) => { if (!process.stdin.isTTY) say(a); return a; }); // 管道输入时把答案打出来，方便看日志
+const closeInput = () => { if (rl) rl.close(); };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const ps = (cmd) => execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', cmd], { encoding: 'utf8', windowsHide: true }).trim();
 const psq = (s) => "'" + String(s).replace(/'/g, "''") + "'";
 
 // Antigravity 主程序是否在运行（按完整路径判断，不会误伤同名的其他程序）
 const agyRunning = () => {
-  if (TEST) return false;
+  if (TEST) return process.env.AGY_SETUP_TEST_RUNNING === '1';
   try { return ps(`@(Get-Process -Name Antigravity -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq ${psq(AGY_EXE)} }).Count`) !== '0'; } catch { return false; }
 };
 const closeAgy = async () => {
+  if (TEST) return true;
   ps(`Get-Process -Name Antigravity -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq ${psq(AGY_EXE)} } | ForEach-Object { [void]$_.CloseMainWindow() }`);
   for (let i = 0; i < 16 && agyRunning(); i++) await sleep(500);
   if (agyRunning()) {
@@ -92,12 +102,12 @@ const closeAgy = async () => {
   return !agyRunning();
 };
 // 需要时请用户关闭 Antigravity；返回 true 表示原来开着、稍后要重新打开
-const ensureAgyClosed = async () => {
+const ensureAgyClosed = async (what = '外观设置') => {
   if (!agyRunning()) return false;
   say('');
-  say('  Antigravity 正在运行。要改外观设置，需要先关闭它。');
+  say(`  Antigravity 正在运行。要改${what}，需要先关闭它（它运行时会把设置文件写回去）。`);
   say('  如果它正在帮你做事，请等它做完再继续。');
-  await ask('  准备好了就按回车，我会自动关闭 Antigravity，装好后再帮你打开……');
+  await ask('  准备好了就按回车，我会自动关闭 Antigravity，改好后再帮你打开……');
   if (await closeAgy()) { ok('已关闭 Antigravity'); return true; }
   warn('没能关闭 Antigravity，请手动关掉它（包括右下角托盘里的图标），再重新运行。');
   process.exit(1);
@@ -169,6 +179,79 @@ const askCtx = async (current) => {
   return /^y/i.test(a);
 };
 
+// ---------- 作者的配色（可选，默认不用） ----------
+// 只改 ~/.gemini/config/config.json 里 userSettings 的两组主题颜色，不改缩放、字体、对比度。
+// 第一次换上时把原来的值记进 originals.json，换回或卸载时按它恢复（原来没有就删掉这个键 = Antigravity 默认颜色）。
+// 这个文件由 Antigravity 后台进程维护，运行中改会被写回，所以只在 Antigravity 关闭时改。
+const AUTHOR_THEME = {
+  customThemeSeedsLight: { background: '#FAF9F5', foregroundOverride: '#141413', primary: '#D97757' },
+  customThemeSeedsDark: { background: '#262624', foregroundOverride: '#FAF9F5', primary: '#D97757' },
+};
+const SEED_KEYS = ['background', 'foregroundOverride', 'primary'];
+const sameSeed = (a, b) => !!a && SEED_KEYS.every((k) => String(a[k] || '').toLowerCase() === b[k].toLowerCase());
+const readAgyConfig = () => { try { return readJson(CONFIG); } catch { return null; } };
+// 现在用的是不是作者的配色（按实际颜色判断，装过旧版的也能认出来）
+const themeActive = () => {
+  const u = (readAgyConfig() || {}).userSettings || {};
+  return Object.entries(AUTHOR_THEME).every(([k, v]) => sameSeed(u[k], v));
+};
+const readOriginals = () => {
+  const o = fs.existsSync(ORIGINALS) ? readJson(ORIGINALS) : {};
+  return { appStorage: o.appStorage || {}, userSettings: o.userSettings || {} };
+};
+const saveOriginals = (o) => {
+  if (!Object.keys(o.appStorage).length && !Object.keys(o.userSettings).length) fs.rmSync(ORIGINALS, { force: true });
+  else writeJson(ORIGINALS, o);
+};
+// 换上（on = true）或换回原来的颜色；调用前要确保 Antigravity 已关闭。没有设置文件时返回 false。
+const applyTheme = (on) => {
+  const cfg = readAgyConfig();
+  if (!cfg) return false;
+  cfg.userSettings = cfg.userSettings || {};
+  const o = readOriginals();
+  for (const [k, v] of Object.entries(AUTHOR_THEME)) {
+    if (on) {
+      if (!(k in o.userSettings)) o.userSettings[k] = k in cfg.userSettings ? cfg.userSettings[k] : null;
+      cfg.userSettings[k] = v;
+    } else {
+      const orig = k in o.userSettings ? o.userSettings[k] : null;
+      if (orig === null) delete cfg.userSettings[k]; else cfg.userSettings[k] = orig;
+      delete o.userSettings[k];
+    }
+  }
+  writeJson(CONFIG, cfg);
+  saveOriginals(o);
+  return true;
+};
+const sayThemeInfo = () => {
+  say('  【可选】使用作者的配色（Claude 风格的暖白配色）');
+  say('  浅色主题：背景 #FAF9F5、文字 #141413、强调色 #D97757；');
+  say('  深色主题：背景 #262624、文字 #FAF9F5、强调色 #D97757。');
+  say('  只改主题颜色，不改缩放、字体和对比度。原来的颜色会记下来，换回或卸载时恢复。');
+  say('  换颜色时需要先关闭 Antigravity，改完会自动重新打开。');
+  say('  以后想改，双击“配色开关.cmd”就行。');
+};
+const askTheme = async (current) => {
+  const a = await ask(current
+    ? '  现在用的是作者的配色。输入 n 回车=换回原来的颜色，直接回车=保持：'
+    : '  现在用的是你自己的配色（默认）。输入 y 回车=换成作者的配色，直接回车=保持：');
+  if (current) return !/^n/i.test(a);
+  return /^y/i.test(a);
+};
+// 按需切换配色：要改才关 Antigravity。返回 { changed, reopen }
+const switchTheme = async (after) => {
+  const before = themeActive();
+  if (after === before) return { changed: false, reopen: false };
+  if (!readAgyConfig()) {
+    warn('没找到 Antigravity 的设置文件 ' + CONFIG + '，配色这次没改。');
+    warn('请先打开 Antigravity 登录一次，关掉后再双击“配色开关.cmd”。');
+    return { changed: false, reopen: false };
+  }
+  const reopen = await ensureAgyClosed('配色');
+  applyTheme(after);
+  return { changed: true, reopen };
+};
+
 // ---------- 安装 ----------
 async function install() {
   say('');
@@ -179,10 +262,9 @@ async function install() {
     warn('请先安装 Antigravity 并登录一次，再运行本安装程序。');
     process.exit(1);
   }
-  const reopen = await ensureAgyClosed();
   stopInjector();
 
-  // 1. 复制文件
+  // 1. 复制文件（不改 Antigravity 的任何设置）
   fs.mkdirSync(path.join(INSTALL, 'i18n'), { recursive: true });
   for (const f of FILES) {
     const dst = path.join(INSTALL, f);
@@ -193,38 +275,14 @@ async function install() {
       }
     }
   }
+  for (const f of OBSOLETE) fs.rmSync(path.join(INSTALL, f), { force: true });
   ok('文件已复制到 ' + INSTALL);
-
-  // 2. 外观设置（先记下原值）
-  const originals = fs.existsSync(ORIGINALS) ? readJson(ORIGINALS) : { appStorage: {}, userSettings: {} };
-  const firstTime = !fs.existsSync(ORIGINALS);
-
-  let store = {};
-  if (fs.existsSync(APP_STORAGE)) store = readJson(APP_STORAGE);
-  else fs.mkdirSync(path.dirname(APP_STORAGE), { recursive: true });
-  for (const [k, v] of Object.entries(APP_STORAGE_SET)) {
-    if (firstTime) originals.appStorage[k] = k in store ? store[k] : null;
-    store[k] = v;
+  if (Object.keys(readOriginals().appStorage).length) {
+    warn('旧版美化包（v1.0.0）改过 Antigravity 的缩放、对比度和字体，新版不再改这些，这次保持不动。');
+    warn('想恢复成安装旧版之前的样子：运行“一键卸载”时选择恢复，再重新安装。');
   }
-  writeJson(APP_STORAGE, store);
-  ok('缩放 131%、强对比度、系统字体、上下文指示器已设置');
 
-  if (fs.existsSync(CONFIG)) {
-    const cfg = readJson(CONFIG);
-    cfg.userSettings = cfg.userSettings || {};
-    for (const [k, v] of Object.entries(USER_SETTINGS_SET)) {
-      if (firstTime) originals.userSettings[k] = k in cfg.userSettings ? cfg.userSettings[k] : null;
-      cfg.userSettings[k] = v;
-    }
-    writeJson(CONFIG, cfg);
-    ok('Claude 配色已设置（浅色和深色主题）');
-  } else {
-    warn('没找到 ' + CONFIG + '，配色这次没设置。');
-    warn('请打开 Antigravity 登录一次，关掉后再运行一次安装。');
-  }
-  if (firstTime) writeJson(ORIGINALS, originals);
-
-  // 3. 开机自启：优先用计划任务（登录后立刻运行）；建不了才放“启动”文件夹（会延后几分钟）
+  // 2. 开机自启：优先用计划任务（登录后立刻运行）；建不了才放“启动”文件夹（会延后几分钟）
   fs.writeFileSync(VBS_PATH, VBS, 'ascii');
   if (registerTask()) {
     if (fs.existsSync(STARTUP)) fs.rmSync(STARTUP, { force: true }); // 旧版装在“启动”文件夹里的，删掉免得重复
@@ -236,6 +294,14 @@ async function install() {
     if (!TEST) warn('没能建计划任务，改用“启动”文件夹：开机后要等几分钟才生效，这之前打开的 Antigravity 是英文的。');
   }
 
+  // 3. 配色：默认不用作者的；重装时默认保持现在的样子。要改颜色才会请用户关 Antigravity
+  say('');
+  sayThemeInfo();
+  const themeWant = await askTheme(themeActive());
+  const th = await switchTheme(themeWant);
+  if (th.changed) ok(themeWant ? '已换成作者的配色' : '已换回原来的配色');
+  else ok(themeActive() ? '配色保持不变（作者的配色）' : '配色保持不变（你自己的）');
+
   // 4. 上下文上限：默认不解锁；重装时默认保持原来的选择
   say('');
   sayCtxRisk();
@@ -244,19 +310,25 @@ async function install() {
   ok(ctxOn ? '已解锁 512K 上下文' : '上下文保持默认（不解锁）');
   say('');
 
-  // 5. 启动
+  // 5. 启动（换配色时关掉的 Antigravity 在这里重新打开）
   startInjector();
   ok('后台注入程序已启动');
-  if (reopen || !TEST) {
+  const running = !th.reopen && agyRunning(); // 为换配色关掉的，现在重新打开
+  if (!running) {
     startAgy();
     ok('正在打开 Antigravity');
   }
   say('');
-  say('  安装完成！Antigravity 打开后几秒内会变成中文界面，并自动刷新一次，');
-  say('  然后输入框上方会出现用量信息（模型、上下文、速度、5 小时和每周额度）。');
+  say('  安装完成！');
+  if (running) {
+    say('  Antigravity 正开着：几秒内界面会变成中文；');
+    say('  再在 Antigravity 里按一次 Ctrl+R 刷新窗口，输入框上方就会出现用量信息。');
+  } else {
+    say('  Antigravity 打开后几秒内会变成中文界面，并自动刷新一次，');
+    say('  然后输入框上方会出现用量信息（模型、上下文、速度、5 小时和每周额度）。');
+  }
   say('  以后每次开机、每次打开 Antigravity 都会自动生效，不用再做什么。');
-  say('  字太大或太小：在 Antigravity 里按 Ctrl+= 放大，Ctrl+- 缩小。');
-  say('  请保留这个文件夹：以后卸载要用里面的“一键卸载”，切换上下文要用“上下文开关”。');
+  say('  请保留这个文件夹：以后卸载、切换配色和上下文，都要用里面的脚本。');
   say('');
 }
 
@@ -274,9 +346,13 @@ async function uninstall() {
 
   let reopen = false;
   if (fs.existsSync(ORIGINALS)) {
-    const a = await ask('  要把外观（缩放、对比度、字体、配色）恢复成安装前的样子吗？直接回车=恢复，输入 n=保留：');
+    // 用过作者的配色，或装过旧版（v1.0.0，旧版安装时改过缩放、对比度、字体、配色）才会有 originals.json
+    const o = readOriginals();
+    const what = [Object.keys(o.appStorage).length && '缩放、对比度、字体', Object.keys(o.userSettings).length && '配色'].filter(Boolean).join('和');
+    say(`  美化包改过 Antigravity 的${what}，原来的样子记下来了。`);
+    const a = await ask('  要恢复成原来的样子吗？直接回车=恢复，输入 n=保留现在的样子：');
     if (!/^n/i.test(a)) {
-      reopen = await ensureAgyClosed();
+      reopen = await ensureAgyClosed(what);
       const originals = readJson(ORIGINALS);
       if (fs.existsSync(APP_STORAGE)) {
         const store = readJson(APP_STORAGE);
@@ -293,7 +369,7 @@ async function uninstall() {
         }
         writeJson(CONFIG, cfg);
       }
-      ok('外观已恢复');
+      ok(what + '已恢复');
     }
   }
 
@@ -339,7 +415,28 @@ async function context() {
   say('');
 }
 
+// ---------- 配色开关 ----------
+async function theme() {
+  say('');
+  say('  ===== Antigravity 中文美化包：配色开关 =====');
+  say('');
+  if (!fs.existsSync(path.join(INSTALL, 'inject.mjs'))) {
+    warn('还没安装美化包，请先双击“一键安装.cmd”。');
+    process.exitCode = 1;
+    return;
+  }
+  sayThemeInfo();
+  say('');
+  const want = await askTheme(themeActive());
+  const th = await switchTheme(want);
+  if (!th.changed) ok('没有改动：' + (themeActive() ? '仍然是作者的配色' : '仍然是你自己的配色'));
+  else ok(want ? '已换成作者的配色' : '已换回原来的配色');
+  if (th.reopen) { startAgy(); ok('正在重新打开 Antigravity'); }
+  say('');
+}
+
 const cmd = process.argv[2];
-const actions = { install, uninstall, context };
-(actions[cmd] ? actions[cmd]() : Promise.reject(new Error('用法：setup.mjs install|uninstall|context')))
-  .catch((e) => { say(''); warn('出错了：' + (e && e.message)); say('  请截图保存这个窗口，反馈问题时附上。'); process.exitCode = 1; });
+const actions = { install, uninstall, context, theme };
+(actions[cmd] ? actions[cmd]() : Promise.reject(new Error('用法：setup.mjs install|uninstall|context|theme')))
+  .catch((e) => { say(''); warn('出错了：' + (e && e.message)); say('  请截图保存这个窗口，反馈问题时附上。'); process.exitCode = 1; })
+  .finally(closeInput);
