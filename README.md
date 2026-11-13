@@ -22,6 +22,7 @@ Antigravity 桌面版（Windows）的非官方中文美化包：界面汉化，�
   - 5 小时额度和每周额度：已用比例、重置时间、和匀速用完相比的快慢。
   - 子代理：在跑的子代理每个单独一行，跑完约 10 秒后收起。打开子代理窗口时，显示那个子代理自己的数据。
   - 鼠标停在任何一项上，会显示详细说明。
+  - 外观借鉴 Haleclipse（哈雷）的 [CCometixLine](https://github.com/Haleclipse/CCometixLine)（ccline，Claude Code 的状态栏工具）的 cometix 主题：两行显示、彩色图标配同色文字、`|` 分隔各项、`·` 连接同一项里的数字、额度用 10 格进度条。本项目没有用它的代码，只借鉴了显示风格，状态栏是为 Antigravity 重新写的。
 - **可选：作者的配色**。Claude 风格的暖白配色，默认不用，见下文“配色开关”。
 - **可选：解锁 512K 上下文**。默认关闭，见下文“上下文开关”。
 
@@ -155,7 +156,8 @@ node package/build.mjs
 
 ## 致谢
 
-- 状态栏外观参考 CCometixLine 的 cometix 预设；5 小时和每周额度的显示方式参考 agyline。
+- 状态栏的外观借鉴 Haleclipse（哈雷）的 [CCometixLine](https://github.com/Haleclipse/CCometixLine)（ccline）的 cometix 主题。感谢哈雷做出这么好看的状态栏。
+- 5 小时和每周额度的显示方式参考 agyline。
 - 状态栏配色：Catppuccin（浅色 Latte，深色 Mocha）。
 - 图标：Material Symbols（Apache License 2.0）。
 - 安装包自带 Node.js（MIT 许可，见 `package/third_party/node-LICENSE.txt`）。

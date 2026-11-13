@@ -62,6 +62,7 @@ const readme = `Antigravity 中文美化包（非官方）
   第二行：首字时间、生成速度、这次的 token 数、5 小时额度和每周额度（已用比例、重置时间、和匀速用完的进度差）。
   子代理在跑时，每个子代理单独一行，跑完约 10 秒后自动收起；打开子代理窗口时，显示的是那个子代理自己的数据。
   鼠标停在任何一项上，会显示详细说明。
+  状态栏的外观借鉴 Haleclipse（哈雷）的 CCometixLine（ccline）的 cometix 主题：https://github.com/Haleclipse/CCometixLine
 
 【安装】
 1. 先安装 Antigravity，并登录一次。
