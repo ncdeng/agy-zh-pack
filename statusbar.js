@@ -520,6 +520,7 @@ function agyStatusBar(CFG) {
       if (r) treeIds(r).forEach((x) => ids.add(x));
     }
     for (const [id, m] of S.casMeta) if (m.modified >= d0) ids.add(id);
+    for (const id of S.todayIds || []) ids.add(id); // 注入程序从磁盘找到的今天动过的对话（见 inject.mjs 的 todayConversations）
     for (const id of ids) {
       const c = S.costs.get(id);
       if (c && (c.busy || now - (c.askAt || 0) < 1500)) continue;
@@ -802,13 +803,37 @@ function agyStatusBar(CFG) {
   };
   // 今天花费：后台摘要里今天动过的对话，按调用时间挑出 0 点以后的调用。
   // 本地记账（localStorage）：每个对话今天的金额存下来，后台重启后摘要里没有了的对话照样算进今天；过了 0 点自动清零。
+  // 页面的本地存储按端口分开，Antigravity 每次启动都换端口，所以账本同时放在 S.costBook 里，
+  // 注入程序每 30 秒读走存进 cost-day.json，下次注入时通过 CFG.costDay 交回来。几份合并时同一个对话取较大的数。
   const DAY_KEY = 'agy.statusbar.costDay';
   const dayName = () => { const d = new Date(); return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()); };
+  const mergeBook = (into, b) => {
+    if (!b || b.day !== into.day || !b.by || typeof b.by !== 'object') return;
+    for (const [id, v] of Object.entries(b.by)) {
+      const n = Number(v);
+      if (n >= 0 && !(into.by[id] >= n)) into.by[id] = n;
+    }
+  };
+  const loadBook = () => {
+    const day = dayName();
+    if (!S.costBook || S.costBook.day !== day) {
+      const book = { day, by: {} };
+      try { mergeBook(book, JSON.parse(localStorage.getItem(DAY_KEY) || 'null')); } catch (e) {}
+      S.costBook = book;
+    }
+    mergeBook(S.costBook, CFG && CFG.costDay);
+    return S.costBook;
+  };
   const todayCost = () => {
     const d0 = dayStart();
     const by = {};
     let calls = 0, undated = 0, loading = 0;
-    for (const [id, meta] of S.casMeta) {
+    // 今天动过的对话 = 后台摘要里最后修改时间在 0 点以后的 + 注入程序从磁盘找到的（后台还没加载、摘要里暂时没有的）
+    const dayIds = new Set(S.todayIds || []);
+    for (const [id, meta] of S.casMeta) if (meta.modified >= d0) dayIds.add(id);
+    for (const id of dayIds) {
+      const meta = S.casMeta.get(id);
+      if (!meta) { loading++; continue; } // 刚让后台加载，等下一次摘要（几秒内）
       if (!(meta.modified >= d0)) continue;
       const c = S.costs.get(id);
       if (!c || !c.list.length) { loading++; continue; }
@@ -826,12 +851,9 @@ function agyStatusBar(CFG) {
       }
       by[id] = Math.round(usd * 1e6) / 1e6;
     }
-    let book = null;
-    try { book = JSON.parse(localStorage.getItem(DAY_KEY) || 'null'); } catch (e) {}
-    const day = dayName();
-    if (!book || book.day !== day || !book.by) book = { day, by: {} };
+    const book = loadBook();
     const before = JSON.stringify(book.by);
-    Object.assign(book.by, by);
+    mergeBook(book, { day: book.day, by });
     const after = JSON.stringify(book.by);
     if (after !== before) { try { localStorage.setItem(DAY_KEY, JSON.stringify(book)); } catch (e) {} }
     const vals = Object.values(book.by);

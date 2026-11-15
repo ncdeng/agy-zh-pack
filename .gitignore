@@ -10,3 +10,6 @@ inject.log
 
 # 用户设置（上下文开关），每台机器自己的
 config.json
+
+# 今天花费的账本（注入程序自动生成），每台机器自己的
+cost-day.json

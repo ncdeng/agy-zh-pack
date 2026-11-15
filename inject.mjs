@@ -62,9 +62,77 @@ const assets = { css: '', dict: null, rules: [], translator: '', statusbar: '', 
 const EMPTY = { dict: null, rules: [], config: {} };
 
 // 传给状态栏的设置。contextLimit 只接受 0（关闭）或 256001～1000000 之间的整数，其他值一律按 0 处理。
+// costDay：今天花费的账本（见下面“今天花费的账本”）。
 function barConfig() {
   const n = Math.floor(Number(assets.config && assets.config.contextLimit));
-  return { contextLimit: n > 256000 && n <= 1000000 ? n : 0 };
+  return { contextLimit: n > 256000 && n <= 1000000 ? n : 0, costDay: readCostBook() };
+}
+
+// ---------- 今天花费的账本（2026-11-16 加） ----------
+// 状态栏把每个对话今天的花费记在页面的 window.__agyStats.costBook（{ day, by: { 对话 ID: 美元 } }）。
+// 页面的本地存储按端口分开，Antigravity 每次启动都换端口，存在页面里的账本会丢；后台重启后对话摘要里也只剩打开过的对话。
+// 所以注入程序每 30 秒把页面里的账本读出来，合并进同目录的 cost-day.json（同一个对话取较大的数，换了一天就清空），
+// 注入时再交给状态栏。只存对话 ID 和金额。
+const COST_FILE = path.join(DIR, 'cost-day.json');
+const COST_SYNC_MS = 30000;
+const dayName = () => {
+  const d = new Date();
+  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+};
+let costBook = null;
+function readCostBook() {
+  if (!costBook) {
+    try { costBook = JSON.parse(fs.readFileSync(COST_FILE, 'utf8')); } catch { costBook = null; }
+  }
+  if (!costBook || costBook.day !== dayName() || !costBook.by || typeof costBook.by !== 'object') costBook = { day: dayName(), by: {} };
+  return costBook;
+}
+function mergeCostBook(b) {
+  const book = readCostBook();
+  if (!b || b.day !== book.day || !b.by || typeof b.by !== 'object') return;
+  let changed = false;
+  for (const [id, v] of Object.entries(b.by)) {
+    const n = Number(v);
+    if (!/^[0-9a-f-]{36}$/.test(id) || !(n >= 0) || book.by[id] >= n) continue;
+    book.by[id] = n;
+    changed = true;
+  }
+  if (!changed) return;
+  try { fs.writeFileSync(COST_FILE, JSON.stringify(book)); } catch (e) { log(`write cost-day.json failed: ${e.message}`); }
+}
+// 今天动过的对话：Antigravity 把每个对话存在 %USERPROFILE%\.gemini\antigravity\brain\<对话 ID>\，
+// 对话记录 .system_generated\logs\transcript.jsonl 的修改时间在本地 0 点以后，就算今天动过。
+// 交给状态栏（window.__agyStats.todayIds），它会向本机后台查这些对话的调用记录（后台没加载的会顺便加载，
+// 加载不改对话的修改时间）。这样 Antigravity 重启后，今天早些时候的对话也能算进来。
+const BRAIN_DIR = path.join(process.env.USERPROFILE || '', '.gemini', 'antigravity', 'brain');
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+function todayConversations() {
+  const d0 = new Date();
+  d0.setHours(0, 0, 0, 0);
+  let names = [];
+  try { names = fs.readdirSync(BRAIN_DIR); } catch { return []; }
+  const out = [];
+  for (const n of names) {
+    if (!UUID_RE.test(n)) continue;
+    let m = 0;
+    try { m = fs.statSync(path.join(BRAIN_DIR, n, '.system_generated', 'logs', 'transcript.jsonl')).mtimeMs; } catch {}
+    if (m >= d0.getTime()) out.push(n);
+  }
+  return out;
+}
+let costSyncAt = 0;
+async function syncCost() {
+  const ids = JSON.stringify(todayConversations());
+  for (const s of sessions.values()) {
+    try {
+      const r = await s.send('Runtime.evaluate', {
+        expression: `(() => { const S = window.__agyStats; if (!S) return null; S.todayIds = ${ids}; return JSON.stringify(S.costBook || null); })()`,
+        returnByValue: true,
+      });
+      const v = r && r.result && r.result.value;
+      if (v) mergeCostBook(JSON.parse(v));
+    } catch { /* 窗口刚关或还没注入：下次再读 */ }
+  }
 }
 const mtimes = {};
 function loadAssets() {
@@ -194,6 +262,10 @@ async function tick() {
   if (changed && sessions.size) {
     log('style/i18n/config files changed, updating open windows');
     for (const s of sessions.values()) apply(s).catch((e) => log(`update failed: ${e.message}`));
+  }
+  if (sessions.size && Date.now() - costSyncAt >= COST_SYNC_MS) {
+    costSyncAt = Date.now();
+    syncCost().catch(() => {});
   }
 
   let port;

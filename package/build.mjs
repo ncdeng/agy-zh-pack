@@ -99,7 +99,7 @@ const readme = `Antigravity 中文美化包（非官方）
 
 【说明】
 - 不修改 Antigravity 本身的文件，Antigravity 自动更新后仍然有效。
-- 安装位置：%LOCALAPPDATA%\\AgyZhPack（上下文开关的设置存在里面的 config.json，原来的配色记在 originals.json）
+- 安装位置：%LOCALAPPDATA%\\AgyZhPack（上下文开关的设置存在里面的 config.json，原来的配色记在 originals.json，今天的花费记在 cost-day.json）
 - 开机自启项：计划任务“AgyZhPack”（登录后立刻在后台运行，约占 60 MB 内存）。
   电脑不允许建计划任务时，会改用“启动”文件夹里的 agy-zh-pack.vbs（开机后要等几分钟才生效）。
 - 用量和额度是向本机的 Antigravity 后台查的。除了从 Google Fonts 在线加载状态栏的图标，不会连接其他网站。
