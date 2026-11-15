@@ -39,7 +39,7 @@ fs.writeFileSync(path.join(OUT, '上下文开关.cmd'), cmd('context'), 'ascii')
 fs.writeFileSync(path.join(OUT, '配色开关.cmd'), cmd('theme'), 'ascii');
 
 // 测试过的 Antigravity 版本（改了要同步 README.md 的“测试情况”）
-const TESTED = 'Antigravity 桌面版 2.31.2，Windows 11';
+const TESTED = 'Antigravity 桌面版 2.32.1（状态栏）、2.31.2（安装和各个开关），Windows 11';
 
 const readme = `Antigravity 中文美化包（非官方）
 
@@ -58,11 +58,13 @@ const readme = `Antigravity 中文美化包（非官方）
 【装好以后的样子】
 - 界面变成中文：菜单、设置、按钮、提示文字等。对话内容、代码、文件名不翻译。
 - 输入框上方有用量信息（两行）：
-  第一行：模型（界面上的名字 + 接口实际返回的模型名，灰测版本会标黄）、上下文用量、缓存命中；
+  第一行：模型（界面上的名字 + 接口实际返回的模型名，灰测版本会标黄）、上下文用量、缓存命中、
+          费用（这个对话累计、今天累计）；
   第二行：首字时间、生成速度、这次的 token 数、5 小时额度和每周额度（已用比例、重置时间、和匀速用完的进度差）。
   子代理在跑时，每个子代理单独一行，跑完约 10 秒后自动收起；打开子代理窗口时，显示的是那个子代理自己的数据。
-  鼠标停在任何一项上，会显示详细说明。
-  状态栏的外观借鉴 Haleclipse（哈雷）的 CCometixLine（ccline）的 cometix 主题：https://github.com/Haleclipse/CCometixLine
+  鼠标停在任何一项上，会显示中文的详细说明。
+  费用是按 Google / Anthropic 公开的 API 标准价把 token 折成美元，是折算值，不是实际扣费（订阅按额度扣）。
+  状态栏的外观和英文写法借鉴 Haleclipse（哈雷）的 CCometixLine（ccline）的 cometix 主题：https://github.com/Haleclipse/CCometixLine
 
 【安装】
 1. 先安装 Antigravity，并登录一次。
@@ -81,7 +83,7 @@ const readme = `Antigravity 中文美化包（非官方）
 - 想换上或换回：双击“配色开关.cmd”，按提示输入。换颜色时要先关闭 Antigravity，改完会自动重新打开。
 
 【上下文开关（可选，默认关闭）】
-- Antigravity 默认在对话约 25.6 万 token 时自动压缩上下文（Gemini 和 Claude 模型）。
+- Antigravity 默认在对话约 25.6 万 token 时自动压缩上下文（Gemini 和 Claude 模型，包括 Orchestrator）。
   解锁后压缩线提高到 51.2 万 token，长对话能记住更多内容。
 - 代价：会改变发给 Google 的内容（风险见上），而且上下文越长，每一轮消耗的额度越多。
 - 想打开或关闭：双击“上下文开关.cmd”，按提示输入。不用关 Antigravity，几秒内自动生效。
@@ -89,7 +91,7 @@ const readme = `Antigravity 中文美化包（非官方）
 
 【刷新】
 - 一般不用手动刷新：开机后注入程序会自动启动，Antigravity 刚打开时会自动刷新一次。
-  如果输入框上方提示“按 Ctrl+R 刷新一次窗口”，按一下就好。
+  如果输入框上方提示“Press Ctrl+R to reload this window”，按一下 Ctrl+R 就好。
 
 【卸载】
 双击“一键卸载.cmd”。用过作者的配色（或装过会改外观的旧版 v1.0.0）的，卸载时会问要不要恢复成原来的样子。

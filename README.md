@@ -133,7 +133,7 @@ node inject.mjs
 - 改了 `statusbar.js`、`config.json` 或 `i18n` 下的文件后，已打开的窗口会自动更新，不用重启。
 - 想给页面加自己的样式（比如换回复字体），在 `inject.mjs` 同目录放一个 `style.css`，注入程序会自动加载；没有这个文件就不改任何样式。
 - 改了 `i18n/translator.js` 的逻辑，要把里面的 `VERSION` 加 1，已打开的窗口才会换用新翻译器。
-- 如果注入程序在 Antigravity 打开很久以后才启动，状态栏会提示按 Ctrl+R 刷新一次窗口。
+- 如果注入程序在 Antigravity 打开很久以后才启动，状态栏会提示 `Press Ctrl+R to reload this window`，按一次 Ctrl+R 刷新窗口就好。
 
 ## 打包
 
