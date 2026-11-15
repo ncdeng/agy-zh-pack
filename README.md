@@ -20,9 +20,10 @@ Antigravity 桌面版（Windows）的非官方中文美化包：界面汉化，�
   - 模型：界面上的名字，加上接口实际返回的模型名。Gemini 模型两者对不上时标黄。
   - 上下文用量、缓存命中、首字时间、生成速度、本次 token 数。
   - 5 小时额度和每周额度：已用比例、重置时间、和匀速用完相比的快慢。
+  - 费用：这个对话的累计和今天的累计（本地 0 点起，含子代理），按 Google / Anthropic 公开的 API 标准价把 token 折成美元。这是折算值，不是实际扣费：订阅是按额度扣的。单价写在 `statusbar.js` 的 `PRICES` 里。
   - 子代理：在跑的子代理每个单独一行，跑完约 10 秒后收起。打开子代理窗口时，显示那个子代理自己的数据。
   - 鼠标停在任何一项上，会显示详细说明。
-  - 外观借鉴 Haleclipse（哈雷）的 [CCometixLine](https://github.com/Haleclipse/CCometixLine)（ccline，Claude Code 的状态栏工具）的 cometix 主题：两行显示、彩色图标配同色文字、`|` 分隔各项、`·` 连接同一项里的数字、额度用 10 格进度条。本项目没有用它的代码，只借鉴了显示风格，状态栏是为 Antigravity 重新写的。
+  - 外观借鉴 Haleclipse（哈雷）的 [CCometixLine](https://github.com/Haleclipse/CCometixLine)（ccline，Claude Code 的状态栏工具）的 cometix 主题：两行显示、彩色图标配同色文字、`|` 分隔各项、`·` 连接同一项里的数字、额度用 10 格进度条。本项目没有用它的代码，只借鉴了显示风格，状态栏是为 Antigravity 重新写的。状态栏上的字也和 ccline 一样用英文（比如 `96% hit`、`$13.94 today`、`Sat 16:08`），鼠标悬停的详细说明是中文。
 - **可选：作者的配色**。Claude 风格的暖白配色，默认不用，见下文“配色开关”。
 - **可选：解锁 512K 上下文**。默认关闭，见下文“上下文开关”。
 
@@ -52,7 +53,7 @@ Antigravity 桌面版（Windows）的非官方中文美化包：界面汉化，�
 
 ## 上下文开关（可选，默认关闭）
 
-**它做什么**：Antigravity 桌面版默认在对话约 25.6 万 token 时自动压缩上下文（Gemini 和 Claude 模型）。解锁后，压缩线提高到 51.2 万 token，长对话能记住更多内容。做法和 agy CLI 在 `/model` 里选 512K 时一样：给请求补上 `checkpointConfig.maxTokenLimit = 512000`。
+**它做什么**：Antigravity 桌面版默认在对话约 25.6 万 token 时自动压缩上下文（Gemini 和 Claude 模型，包括 Orchestrator）。解锁后，压缩线提高到 51.2 万 token，长对话能记住更多内容。做法和 agy CLI 在 `/model` 里选 512K 时一样：给请求补上 `checkpointConfig.maxTokenLimit = 512000`。
 
 **代价**：
 
@@ -98,6 +99,8 @@ Antigravity 桌面版（Windows）的非官方中文美化包：界面汉化，�
 
 | Antigravity 版本 | 测过的内容 | 日期 |
 |---|---|---|
+| 2.32.1 | Orchestrator (Carbon) 的 512K（计划阶段和执行阶段都实测）、Orchestrator 的额度分组、费用（对话累计、今天累计）、状态栏英文显示、两行布局 | 2026-11-16 |
+| 2.32.1 | **没测**：一键安装和配色开关、2.32.1 新增界面文字的汉化、跨过 0 点的对话怎么拆分今天的费用 | — |
 | 2.31.2 | 汉化（设置页各屏、对话页）、状态栏（模型、上下文、缓存、首字、速度、5 小时和每周额度）、512K 改写生效、上下文开关切换；隔离目录里测了一键安装、配色开关（换上、换回、卸载恢复、Antigravity 开着时先关再开、从 v1.0.0 升级）、上下文开关、卸载 | 2026-11-13 |
 | 2.31.2 | **没测**：子代理那几行（这次没有跑子代理） | — |
 | 2.29.0 | 汉化和状态栏全部功能，包括子代理那几行 | 2026-11-04～09 |
@@ -114,7 +117,7 @@ Antigravity 桌面版（Windows）的非官方中文美化包：界面汉化，�
 - Antigravity 主进程启动时会打开 Chromium 远程调试端口，端口号写在 `%APPDATA%\Antigravity\DevToolsActivePort`。
 - `inject.mjs` 常驻后台，每 3 秒检查一次。发现主窗口后，用 Chrome DevTools Protocol 注入翻译器和状态栏脚本。
 - 不修改 Antigravity 的安装文件，Antigravity 自动更新后仍然有效。
-- 状态栏在页面里包一层 `fetch`，旁听应用和本机后台（`language_server`）之间的 grpc-web+json 数据。另外，它向本机后台查几个只读接口：额度、实际模型名、子代理运行状态。
+- 状态栏在页面里包一层 `fetch`，旁听应用和本机后台（`language_server`）之间的 grpc-web+json 数据。另外，它向本机后台查几个只读接口：额度、实际模型名、子代理运行状态、每次调用的 token 用量和调用时间（算费用）。
 - 上下文开关打开时，同一层 `fetch` 包装给带 `cascadeConfig` 的请求补上 `checkpointConfig.maxTokenLimit`；关闭时完全不改请求。
 - 默认不写 Antigravity 的设置文件。只有两种情况会写：你选择作者的配色（或换回），会改 `%USERPROFILE%\.gemini\config\config.json` 的两组主题颜色；卸载时选择恢复，会按记下的原值改回这个文件（装过旧版 v1.0.0 的还有 `%APPDATA%\Antigravity\app_storage.json`）。
 
