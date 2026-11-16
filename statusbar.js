@@ -691,11 +691,7 @@ function agyStatusBar(CFG) {
         (thinkTok > 0 ? '有思考：从思考开始算（' + (thinkMs > 0 ? '思考 ' + (thinkMs / 1000).toFixed(1) + ' 秒' : '没有思考时长，从发出请求算') + '）'
           : '没有思考：从首字出现算起')));
     }
-    out.push(seg('tokens', 'swap_vert', [
-      'in ' + fmtK(mu.inputTokens),
-      'out ' + fmtK(mu.outputTokens),
-      Number(mu.thinkingOutputTokens) > 0 ? 'think ' + fmtK(mu.thinkingOutputTokens) : '',
-    ], '最近一次模型调用的 token 数（输出里包含思考）'));
+    // 11-16 起不再单独显示“in · out · think”这一项（用处不大还占位置）；最近一次调用的 token 数在费用项的悬停说明里
     return out;
   };
   const promptTokens = (mu) => (Number(mu.inputTokens) || 0) + (Number(mu.cacheReadTokens) || 0) + (Number(mu.cacheWriteTokens) || 0);
@@ -1048,7 +1044,7 @@ function agyStatusBar(CFG) {
   const B = '.' + BAR_CLASS;
   const style = document.createElement('style');
   style.textContent = `
-@import url("https://fonts.googleapis.com/css2?family=Material+Symbols+Rounded:opsz,wght,FILL,GRAD@20..24,400..500,0..1,0&icon_names=auto_awesome,calendar_month,check,data_usage,database,event,hourglass_top,schedule,smart_toy,speed,swap_vert,timelapse&display=block");
+@import url("https://fonts.googleapis.com/css2?family=Material+Symbols+Rounded:opsz,wght,FILL,GRAD@20..24,400..500,0..1,0&icon_names=auto_awesome,calendar_month,check,data_usage,database,event,hourglass_top,schedule,smart_toy,speed,timelapse&display=block");
 ${B}{
   --k-model:#5c64d6; --k-context:#8839ef; --k-cache:#1b8fbf; --k-timing:#c4566a; --k-tokens:#158a90;
   --k-quota:#e0620d; --k-warn:#c9800f; --k-crit:#d20f39; --k-run:#40a02b; --k-muted:#8c8fa1;
