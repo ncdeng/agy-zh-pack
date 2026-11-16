@@ -2,6 +2,8 @@
 
 # agy-zh-pack
 
+[简体中文](README.md) | [English](README.en.md)
+
 **Antigravity 桌面版（Windows）的非官方中文美化包**
 
 界面汉化 · 输入框上方的用量状态栏 · 可选配色 · 可选 512K 上下文
@@ -9,6 +11,10 @@
 [![下载](https://img.shields.io/github/v/release/ncdeng/agy-zh-pack?label=%E4%B8%8B%E8%BD%BD&color=D97757)](https://github.com/ncdeng/agy-zh-pack/releases/latest)
 [![License](https://img.shields.io/github/license/ncdeng/agy-zh-pack)](LICENSE)
 ![Windows](https://img.shields.io/badge/platform-Windows-0078D6)
+
+![输入框上方的用量状态栏](assets/statusbar.png)
+
+<sub>实际截图：一个已解锁 512K 的长对话</sub>
 
 </div>
 
@@ -42,6 +48,10 @@
 
 菜单、设置、按钮、提示文字换成中文（2824 条词典 + 56 条正则规则）。对话内容、代码、文件名不翻译。
 
+#### 只要状态栏、不要汉化
+
+删掉 `%LOCALAPPDATA%\AgyZhPack\i18n\zh-CN.json`，再在 Antigravity 里按一次 `Ctrl+R`，界面就恢复英文，状态栏照常显示。重新安装会把这个文件装回来。
+
 ### 用量状态栏
 
 输入框上方固定两行，每一项是“彩色图标 + 同色文字”。状态栏上的字和 ccline 一样用英文，鼠标停在任何一项上会显示中文的详细说明。
@@ -49,15 +59,15 @@
 | 行 | 显示示例 | 含义 |
 |---|---|---|
 | 第一行 | `gemini-flash-worker-agy` | 模型：界面上的名字，加上接口实际返回的模型名。Gemini 模型两者对不上时标黄 |
-| | `85% · 434k / 512k · compacted 3×` | 上下文：已用比例、已用 / 上限、被自动压缩过几次 |
+| | `89% · 456k / 512k · compacted 3×` | 上下文：已用比例、已用 / 上限、被自动压缩过几次 |
 | | `450k · 99% hit` | 缓存：最近一次调用从缓存读取的 token 和命中率 |
 | | `$17.81` | 这个对话累计花费（含子代理）。悬停可以看最近一次调用的输入、缓存、输出 token 数和各自的金额 |
 | | `$17.85 today` | 今天累计花费（本地 0 点起，所有对话） |
 | | `running` | 正在生成 |
 | 第二行 | `6.9s` | 首字时间 |
 | | `169 tok/s` | 生成速度 |
-| | `19% · 05:22` | 5 小时额度：已用比例（10 格进度条）、重置时间 |
-| | `41% · Sat 16:08 · ↑20%` | 每周额度：已用比例、重置时间、比匀速用完快（↑）或慢（↓）多少 |
+| | `0% · 16:44` | 5 小时额度：已用比例（10 格进度条）、重置时间 |
+| | `41% · Sat 16:08 · ↑15%` | 每周额度：已用比例、重置时间、比匀速用完快（↑）或慢（↓）多少 |
 | 子代理 | `self · … · running` | 每个在跑的子代理单独一行，跑完约 10 秒后收起。打开子代理窗口时，显示那个子代理自己的数据 |
 
 外观借鉴 Haleclipse（哈雷）的 [CCometixLine](https://github.com/Haleclipse/CCometixLine)（ccline，Claude Code 的状态栏工具）的 cometix 主题：两行显示、彩色图标配同色文字、`|` 分隔各项、`·` 连接同一项里的数字、额度用 10 格进度条。本项目没有用它的代码，状态栏是为 Antigravity 重新写的。
@@ -206,6 +216,7 @@ node package/build.mjs
 | `package/app/setup.mjs` | 一键安装、卸载、配色开关、上下文开关 |
 | `package/build.mjs` | 生成安装包 |
 | `package/third_party/node-LICENSE.txt` | 安装包自带的 Node.js 的许可证 |
+| `assets/statusbar.png` | 本页顶部的截图 |
 
 </details>
 

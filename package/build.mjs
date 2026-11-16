@@ -38,7 +38,7 @@ fs.writeFileSync(path.join(OUT, '一键卸载.cmd'), cmd('uninstall'), 'ascii');
 fs.writeFileSync(path.join(OUT, '上下文开关.cmd'), cmd('context'), 'ascii');
 fs.writeFileSync(path.join(OUT, '配色开关.cmd'), cmd('theme'), 'ascii');
 
-// 测试过的 Antigravity 版本（改了要同步 README.md 的“测试情况”）
+// 测试过的 Antigravity 版本（改了要同步 README.md 的“测试情况”和 README.en.md 的“Tested versions”）
 const TESTED = 'Antigravity 桌面版 2.32.1（状态栏）、2.31.2（安装和各个开关），Windows 11';
 
 const readme = `Antigravity 中文美化包（非官方）
