@@ -218,14 +218,14 @@ Known gaps in the translation:
 <details>
 <summary>Run from source and build the package</summary>
 
-You need Windows and Node.js 22 or later (it uses the built-in `WebSocket` and `fetch`).
+You need Node.js 22 or later (it uses the built-in `WebSocket` and `fetch`). Running from source works on both Windows and macOS (see [macos/README.md](macos/README.md) for macOS setup and LaunchAgent scripts).
 
 ```bash
 node inject.mjs
 ```
 
 - The injector stays in the background. If one is already running, a new one exits.
-- From Antigravity 2.33.0, start Antigravity with `--remote-debugging-port=0`. Run `powershell -ExecutionPolicy Bypass -File debug-port.ps1` once to add the flag to the shortcuts, then open Antigravity from a shortcut.
+- From Antigravity 2.33.0, start Antigravity with `--remote-debugging-port=0`. On Windows, run `powershell -ExecutionPolicy Bypass -File debug-port.ps1` once to add the flag to the shortcuts, then open Antigravity from a shortcut. On macOS, run `./macos/launch-agy.command` (or `open -a Antigravity --args --remote-debugging-port=0`).
 - After you change `statusbar.js` or a file in `i18n`, open windows update automatically. You do not need to restart. After you change `inject.mjs`, restart the injector.
 - To add your own styles to the page (for example, a different reply font), put a `style.css` next to `inject.mjs`. The injector loads it automatically. Without this file, no styles are changed.
 - If you change the logic in `i18n/translator.js`, add 1 to its `VERSION`. Open windows then switch to the new translator.
@@ -257,6 +257,9 @@ This creates `dist/Antigravity中文美化包/` and a zip with the same name. Wh
 | `package/app/setup.mjs` | Install, uninstall, color toggle |
 | `package/build.mjs` | Builds the package |
 | `package/third_party/node-LICENSE.txt` | License of the Node.js included in the package |
+| `macos/manage.mjs` | macOS helper CLI (LaunchAgent auto-start, start/stop, theme toggle, debug-port launcher) |
+| `macos/launch-agy.command` | macOS launcher (auto-detects Node.js and starts Antigravity with `--remote-debugging-port=0`) |
+| `macos/README.md` | macOS usage guide |
 | `assets/statusbar.png` | The screenshot at the top of this page |
 
 </details>

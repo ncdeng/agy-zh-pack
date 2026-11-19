@@ -14,3 +14,8 @@ config.json
 # 今天花费的账本和每天用量的历史（注入程序自动生成），每台机器自己的
 cost-day.json
 usage-history.json
+
+# macOS 本地配色备份与 LaunchAgent 日志
+originals.json
+launchd.out.log
+launchd.err.log
