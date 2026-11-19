@@ -10,9 +10,13 @@
 //   2. 开机自启：建一个登录时触发的计划任务 AgyZhPack（当前用户、普通权限），运行安装目录里的
 //      agy-zh-pack.vbs，在后台隐藏启动注入器。不用“启动”文件夹，因为 Windows 会把那里的程序延后约 7 分钟，
 //      这段时间打开的 Antigravity 是英文的；计划任务建不了时才退回“启动”文件夹；
-//   3. 问用户要不要用作者的配色（默认不用）。要换颜色时才请用户关闭 Antigravity，原值记进 originals.json；
-//   4. 问用户要不要解锁 512K 上下文（默认不解锁），结果写进 AgyZhPack\config.json；
-//   5. 立即启动注入器。Antigravity 开着就提示按 Ctrl+R 刷新，没开（或刚为换配色关掉）就打开它。
+//   3. 给 Antigravity 的快捷方式（开始菜单、桌面、任务栏固定）加上启动参数 --remote-debugging-port=0
+//      （debug-port.ps1）。Antigravity 2.33.0 起不带这个参数就不开调试端口，注入器连不上；
+//   4. 问用户要不要用作者的配色（默认不用）。要换颜色时才请用户关闭 Antigravity，原值记进 originals.json；
+//   5. 问用户要不要解锁 512K 上下文（默认不解锁），结果写进 AgyZhPack\config.json；
+//   6. 立即启动注入器。Antigravity 开着就提示按 Ctrl+R 刷新（开着但没带调试端口参数的，问过用户后重开一次），
+//      没开（或刚为换配色关掉）就带参数打开它。
+// 卸载时把快捷方式上的参数去掉。
 // 上下文开关（context）只改 config.json，注入器发现文件变了会自动更新已打开的窗口，不用关 Antigravity。
 // 配色开关（theme）改 Antigravity 自己的设置文件，只能在它关闭时改，所以会提示关闭、改完再打开。
 //
@@ -45,8 +49,10 @@ const CONFIG = path.join(os.homedir(), '.gemini', 'config', 'config.json');
 const ORIGINALS = path.join(INSTALL, 'originals.json'); // 只有旧版（v1.0.0）装过才有：当时改外观前的原值
 const USER_CONFIG = path.join(INSTALL, 'config.json'); // 用户设置：目前只有 contextLimit
 const CTX_ON = 512000; // 解锁后的上下文上限，和 agy CLI 在 /model 里选 512K 时一样
+const PORT_FILE = path.join(ROAMING, 'Antigravity', 'DevToolsActivePort'); // 带调试端口启动时才有（2.33.0 起不带参数启动会删掉它）
+const DEBUG_ARG = '--remote-debugging-port=0';
 
-const FILES = ['node.exe', 'inject.mjs', 'statusbar.js', 'i18n/translator.js', 'i18n/zh-CN.json', 'i18n/zh-CN.rules.json'];
+const FILES = ['node.exe', 'inject.mjs', 'statusbar.js', 'debug-port.ps1', 'i18n/translator.js', 'i18n/zh-CN.json', 'i18n/zh-CN.rules.json'];
 const OBSOLETE = ['style.css']; // 旧版装过、新版不再带的文件：升级时删掉（回复字体随之恢复成 Antigravity 默认）
 
 const VBS = [
@@ -146,10 +152,26 @@ const unregisterTask = () => {
     return /removed/.test(ps(`if (Get-ScheduledTask -TaskName ${psq(TASK)} -ErrorAction SilentlyContinue) { Unregister-ScheduledTask -TaskName ${psq(TASK)} -Confirm:$false; 'removed' }`));
   } catch { return false; }
 };
-const startAgy = () => {
+const startAgy = (withDebugPort = true) => { // 卸载后重开时不带调试端口参数
   if (TEST || !fs.existsSync(AGY_EXE)) return;
-  spawn(AGY_EXE, [], { detached: true, stdio: 'ignore' }).unref();
+  spawn(AGY_EXE, withDebugPort ? [DEBUG_ARG] : [], { detached: true, stdio: 'ignore' }).unref();
 };
+
+// ---------- 快捷方式上的调试端口参数（Antigravity 2.33.0 起需要） ----------
+// mode：add 加上 / remove 去掉。返回 { found, changed }；脚本不在或出错返回 null。
+// 测试模式下 debug-port.ps1 只看 %USERPROFILE%\Desktop，不会碰真桌面。
+const shortcuts = (mode) => {
+  const script = path.join(INSTALL, 'debug-port.ps1');
+  if (!fs.existsSync(script)) return null;
+  try {
+    const out = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', script, '-Mode', mode],
+      { encoding: 'utf8', windowsHide: true });
+    const m = /found=(\d+) changed=(\d+)/.exec(out);
+    return m ? { found: +m[1], changed: +m[2] } : null;
+  } catch { return null; }
+};
+// Antigravity 开着时，这次启动有没有带调试端口
+const debugPortOpen = () => fs.existsSync(PORT_FILE);
 
 // ---------- 上下文上限（可选，默认关闭） ----------
 const readUserConfig = () => { try { return readJson(USER_CONFIG); } catch { return {}; } };
@@ -294,7 +316,13 @@ async function install() {
     if (!TEST) warn('没能建计划任务，改用“启动”文件夹：开机后要等几分钟才生效，这之前打开的 Antigravity 是英文的。');
   }
 
-  // 3. 配色：默认不用作者的；重装时默认保持现在的样子。要改颜色才会请用户关 Antigravity
+  // 3. 快捷方式加调试端口参数（Antigravity 2.33.0 起不加就连不上）
+  const sc = shortcuts('add');
+  if (!sc) warn('没能给快捷方式加启动参数。请手动给 Antigravity 的快捷方式加上参数 ' + DEBUG_ARG + '，否则界面不会变成中文。');
+  else if (!sc.found) warn('没找到 Antigravity 的开始菜单或桌面快捷方式。Antigravity 要带参数 ' + DEBUG_ARG + ' 启动，界面才会变成中文。');
+  else ok(`已给 ${sc.found} 个 Antigravity 快捷方式加上启动参数 ${DEBUG_ARG}` + (sc.changed < sc.found ? `（其中 ${sc.found - sc.changed} 个原来就有）` : ''));
+
+  // 4. 配色：默认不用作者的；重装时默认保持现在的样子。要改颜色才会请用户关 Antigravity
   say('');
   sayThemeInfo();
   const themeWant = await askTheme(themeActive());
@@ -302,7 +330,7 @@ async function install() {
   if (th.changed) ok(themeWant ? '已换成作者的配色' : '已换回原来的配色');
   else ok(themeActive() ? '配色保持不变（作者的配色）' : '配色保持不变（你自己的）');
 
-  // 4. 上下文上限：默认不解锁；重装时默认保持原来的选择
+  // 5. 上下文上限：默认不解锁；重装时默认保持原来的选择
   say('');
   sayCtxRisk();
   const ctxOn = await askCtx(ctxEnabled());
@@ -310,24 +338,39 @@ async function install() {
   ok(ctxOn ? '已解锁 512K 上下文' : '上下文保持默认（不解锁）');
   say('');
 
-  // 5. 启动（换配色时关掉的 Antigravity 在这里重新打开）
+  // 6. 启动（换配色时关掉的 Antigravity 在这里重新打开）
+  // Antigravity 开着但这次启动没带调试端口参数：问过用户后关掉，下面带参数重新打开
+  let reopen = th.reopen;
+  if (!reopen && agyRunning() && !debugPortOpen()) {
+    say('  Antigravity 正开着，但这次启动时没带调试端口参数（Antigravity 2.33.0 起需要），要重新打开一次才会变成中文。');
+    say('  如果它正在帮你做事，请等它做完再继续。');
+    const a = await ask('  直接回车=我来关闭并重新打开 Antigravity，输入 n=跳过（以后自己从开始菜单或桌面图标重新打开）：');
+    if (!/^n/i.test(a)) {
+      if (await closeAgy()) { ok('已关闭 Antigravity'); reopen = true; }
+      else warn('没能关闭 Antigravity，请手动关掉它，再从开始菜单或桌面图标打开。');
+    }
+    say('');
+  }
   startInjector();
   ok('后台注入程序已启动');
-  const running = !th.reopen && agyRunning(); // 为换配色关掉的，现在重新打开
+  const running = !reopen && agyRunning(); // 为换配色或补参数关掉的，现在重新打开
   if (!running) {
     startAgy();
     ok('正在打开 Antigravity');
   }
   say('');
   say('  安装完成！');
-  if (running) {
+  if (running && debugPortOpen()) {
     say('  Antigravity 正开着：几秒内界面会变成中文；');
     say('  再在 Antigravity 里按一次 Ctrl+R 刷新窗口，输入框上方就会出现用量信息。');
+  } else if (running) {
+    say('  Antigravity 还开着、没带调试端口参数，现在还是英文。关掉它，再从开始菜单或桌面图标打开就好。');
   } else {
     say('  Antigravity 打开后几秒内会变成中文界面，并自动刷新一次，');
     say('  然后输入框上方会出现用量信息（模型、上下文、速度、5 小时和每周额度）。');
   }
-  say('  以后每次开机、每次打开 Antigravity 都会自动生效，不用再做什么。');
+  say('  以后每次开机、每次从开始菜单或桌面图标打开 Antigravity，都会自动生效。');
+  say('  如果 Antigravity 自动更新后自己重新启动，界面可能暂时是英文，右下角会弹出提醒，照提醒重新打开一次即可。');
   say('  请保留这个文件夹：以后卸载、切换配色和上下文，都要用里面的脚本。');
   say('');
 }
@@ -343,6 +386,8 @@ async function uninstall() {
   const hadStartup = fs.existsSync(STARTUP);
   if (hadStartup) fs.rmSync(STARTUP, { force: true });
   if (hadTask || hadStartup) ok('已取消开机自动启动');
+  const sc = shortcuts('remove'); // 要在删安装目录之前做（脚本在里面）
+  if (sc && sc.changed) ok(`已去掉 ${sc.changed} 个快捷方式上的启动参数 ${DEBUG_ARG}`);
 
   let reopen = false;
   if (fs.existsSync(ORIGINALS)) {
@@ -380,7 +425,7 @@ async function uninstall() {
     }
   }
   if (!fs.existsSync(INSTALL)) ok('已删除 ' + INSTALL);
-  if (reopen) { startAgy(); ok('正在重新打开 Antigravity'); }
+  if (reopen) { startAgy(false); ok('正在重新打开 Antigravity'); }
   say('');
   say('  卸载完成。如果 Antigravity 还开着，按 Ctrl+R 刷新一下就会变回英文界面。');
   say('');

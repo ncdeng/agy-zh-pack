@@ -132,7 +132,7 @@
     "是，在此对话中为“$1”保存规则"
   ],
   [
-    "^Rules: (\\d+) tokens$",
+    "^Rules: ([\\d,]+) tokens$",
     "规则：$1 个 token"
   ],
   [
@@ -222,5 +222,21 @@
   [
     "^Send feedback as (.+)$",
     "反馈身份：$1"
+  ],
+  [
+    "^Hey (.+), what should we build today\\?$",
+    "嗨，$1，今天我们做点什么？"
+  ],
+  [
+    "^Welcome back, (.+)\\. Where should we pick up\\?$",
+    "欢迎回来，$1。我们从哪儿接着做？"
+  ],
+  [
+    "^Good to see you, (.+)\\. What's next\\?$",
+    "很高兴见到你，$1。接下来做什么？"
+  ],
+  [
+    "^See all \\((\\d+)\\)$",
+    "查看全部（$1）"
   ]
 ]

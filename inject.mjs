@@ -5,8 +5,9 @@
 //   - 可选：上下文上限。同目录 config.json 里的 contextLimit（默认没有这个文件 = 0 = 关闭）传给状态栏，
 //     见 statusbar.js 开头的说明。一键安装包在安装时问一次，以后用“上下文开关.cmd”改。
 //
-// 原理：Antigravity 主进程启动时总会打开 Chromium 远程调试端口（端口号写在
-// %APPDATA%\Antigravity\DevToolsActivePort）。本脚本常驻后台，每 3 秒检查一次：
+// 原理：Antigravity 主进程打开 Chromium 远程调试端口（端口号写在 %APPDATA%\Antigravity\DevToolsActivePort）。
+// 2.33.0 以前它总会打开；2.33.0 起只有带 --remote-debugging-port 启动才打开，所以要给快捷方式加这个参数
+// （同目录 debug-port.ps1，见下面“调试端口参数”）。本脚本常驻后台，每 3 秒检查一次：
 //   - 发现主窗口页面后连上去，用 Page.addScriptToEvaluateOnNewDocument 登记注入脚本
 //     （刷新、跳转都会自动重新加样式），并立刻在当前页面加上样式；
 //   - style.css、statusbar.js、config.json 或 i18n\ 下的文件改动后，自动更新所有已连接的窗口；
@@ -24,6 +25,7 @@
 import fs from 'node:fs';
 import net from 'node:net';
 import path from 'node:path';
+import { execFile, spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -256,6 +258,39 @@ async function apply(sess) {
   await sess.send('Runtime.evaluate', { expression: source });
 }
 
+// ---------- 调试端口参数（2026-11-19 加，Antigravity 2.33.0 起需要） ----------
+// 2.33.0 起不带 --remote-debugging-port 启动就没有调试端口，本脚本连不上，汉化和状态栏都不出现。
+// 安装时已给快捷方式加了参数（debug-port.ps1 add）。Antigravity 自动更新可能重写快捷方式，
+// 所以找不到可用的端口时，每 2 分钟跑一次 debug-port.ps1 watch：参数没了就补回；
+// Antigravity 正开着却没带参数（例如更新后自动重启，或从别的入口打开），就弹一次系统通知，每个进程只弹一次。
+const PORT_SCRIPT = path.join(DIR, 'debug-port.ps1');
+const WATCH_MS = 2 * 60 * 1000;
+let watchAt = 0;
+let watching = false;
+const notified = new Set();
+const psArgs = (...a) => ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', PORT_SCRIPT, ...a];
+function watchDebugPort() {
+  if (process.env.AGY_PORT_FILE || watching || Date.now() - watchAt < WATCH_MS || !fs.existsSync(PORT_SCRIPT)) return;
+  watching = true;
+  watchAt = Date.now();
+  execFile('powershell.exe', psArgs('-Mode', 'watch'), { windowsHide: true, timeout: 60000 }, (err, out) => {
+    watching = false;
+    if (err) { log(`debug-port watch failed: ${String(err.message).split('\n')[0]}`); return; }
+    const lines = String(out).split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+    const added = lines.filter((s) => s.startsWith('added'));
+    if (added.length) log(`shortcut flag re-added: ${added.join(' | ')}`);
+    for (const l of lines) {
+      const m = /^nodebug=(\d+)$/.exec(l);
+      if (!m || notified.has(m[1])) continue;
+      notified.add(m[1]);
+      log(`Antigravity pid=${m[1]} was started without --remote-debugging-port, showing a notification`);
+      spawn('powershell.exe', psArgs('-Mode', 'notify', '-Title', 'Antigravity 汉化暂时没生效',
+        '-Text', '这次 Antigravity 启动时没带调试端口参数（多半是刚自动更新过）。关掉 Antigravity，再从开始菜单或桌面图标打开一次就好。'),
+      { detached: true, stdio: 'ignore', windowsHide: true }).unref();
+    }
+  });
+}
+
 // ---------- 主循环 ----------
 async function tick() {
   const changed = loadAssets();
@@ -271,14 +306,14 @@ async function tick() {
   let port;
   try {
     port = fs.readFileSync(PORT_FILE, 'utf8').split(/\r?\n/)[0].trim();
-  } catch { return; } // 应用没在运行
+  } catch { watchDebugPort(); return; } // 应用没在运行，或这次启动没带调试端口参数
   if (!/^\d+$/.test(port)) return;
 
   let targets;
   try {
     const res = await fetch(`http://127.0.0.1:${port}/json/list`, { signal: AbortSignal.timeout(1500) });
     targets = await res.json();
-  } catch { return; } // 端口文件是旧的，应用已退出
+  } catch { watchDebugPort(); return; } // 端口文件是旧的，应用已退出
 
   for (const t of targets) {
     if (t.type !== 'page' || !t.url.startsWith(URL_PREFIX) || sessions.has(t.id)) continue;

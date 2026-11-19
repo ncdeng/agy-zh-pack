@@ -380,20 +380,24 @@ function agyStatusBar(CFG) {
   // 但只给按量付费的企业版填，额度制账号收不到（11-16 实测 60 条更新都没有）。所以这里自己算：
   // token 数 × Google / Anthropic 公开的 API 标准价。订阅按额度扣，不按这个收钱，只是参考。
   // 单价：美元 / 百万 token。in 输入（不含缓存），cache 缓存读取，cw 缓存写入（只有 Claude 有，按 5 分钟缓存 = 输入价 × 1.25），
-  // out 输出（含思考）。出处：Gemini = aistudio.google.com/docs/pricing 标准档（2026-11-16 读）；
+  // out 输出（含思考）。出处：Gemini = aistudio.google.com/docs/pricing 标准档（2026-11-16 读；Neon 2026-11-19 读）；
   // Claude = Anthropic 官方价（2026-11-03）。和 agyline 0.3.1 内置的价格对过：Argon 2 / 0.1 / 10、3.8 Flash 0.75 / 0.075 / 3.75，一致。
   // 换价时间按美国太平洋时间零点（UTC 08:00），按每次调用开始的时间选价（不知道时间就按现在）。
   const PT0 = (d) => Date.parse(d + 'T08:00:00Z');
   const P_CA = [[PT0('2026-12-01'), { in: 2, cache: 0.1, out: 10 }], [Infinity, { in: 4, cache: 0.2, out: 20 }]];
+  // Gemini 4 Neon（agy 2.33.0 起有，modelId gemini-4-neon-low/medium/high/xhigh）：3 / 0.15 / 15，价格页没写以后调价。
+  const P_NE = [[Infinity, { in: 3, cache: 0.15, out: 15 }]];
   const P_H = [[Infinity, { in: 1.5, cache: 0.075, out: 7.5 }]];
   const P_F38 = [[PT0('2027-01-01'), { in: 0.75, cache: 0.075, out: 3.75 }], [Infinity, { in: 1.5, cache: 0.15, out: 7.5 }]];
-  // 按顺序匹配，先中先用。Orchestrator 的两个内部模型没有公开价：规划按 Carbon（Argon 版按 Argon），
+  // 按顺序匹配，先中先用。Orchestrator 的两个内部模型没有公开价：规划按 Carbon（Argon 版按 Argon，Neon 版按 Neon），
   // 执行模型 gemini-flash-worker-agy 按 Hydrogen：后台给它的显示名是 “Gemini 4 Hydrogen (Orchestrator)”（modelDisplayName，11-16 查），
   // 模型菜单的官方说明也写 Carbon “may offload routine steps to Hydrogen”。
   const PRICES = [
+    { re: /orchestrator-neon/i, name: 'Neon', note: 'Orchestrator (Neon) 的规划调用，按 Gemini 4 Neon 价', t: P_NE },
     { re: /orchestrator-argon/i, name: 'Argon', note: 'Orchestrator (Argon) 的规划调用，按 Gemini 4 Argon 价', t: P_CA },
     { re: /orchestrator/i, name: 'Carbon', note: 'Orchestrator 的规划调用，按 Gemini 4 Carbon 价', t: P_CA },
     { re: /flash-worker/i, name: 'Hydrogen', note: '执行模型 gemini-flash-worker-agy（后台显示名 Gemini 4 Hydrogen (Orchestrator)），按 Gemini 4 Hydrogen 价', t: P_H },
+    { re: /gemini-4-neon/i, name: 'Neon', t: P_NE },
     { re: /gemini-4-carbon/i, name: 'Carbon', t: P_CA },
     { re: /gemini-4-argon/i, name: 'Argon', t: P_CA },
     { re: /gemini-4-hydrogen/i, name: 'Hydrogen', t: P_H },

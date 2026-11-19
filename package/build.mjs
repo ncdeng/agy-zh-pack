@@ -19,7 +19,7 @@ const copy = (from, to) => fs.copyFileSync(from, path.join(OUT, 'app', to));
 copy(NODE, 'node.exe');
 copy(path.join(HERE, 'app', 'setup.mjs'), 'setup.mjs');
 // 公开版只带汉化和状态栏：不带 style.css（回复字体）；安装时不改缩放、字体、对比度，配色由用户选择要不要用作者的
-for (const f of ['inject.mjs', 'statusbar.js']) copy(path.join(SRC, f), f);
+for (const f of ['inject.mjs', 'statusbar.js', 'debug-port.ps1']) copy(path.join(SRC, f), f);
 for (const f of ['translator.js', 'zh-CN.json', 'zh-CN.rules.json']) copy(path.join(SRC, 'i18n', f), path.join('i18n', f));
 
 // node.exe 是 Node.js 官方程序（MIT 许可）。Node.js 的 LICENSE 放在 package\third_party\node-LICENSE.txt
@@ -39,7 +39,7 @@ fs.writeFileSync(path.join(OUT, '上下文开关.cmd'), cmd('context'), 'ascii')
 fs.writeFileSync(path.join(OUT, '配色开关.cmd'), cmd('theme'), 'ascii');
 
 // 测试过的 Antigravity 版本（改了要同步 README.md 的“测试情况”和 README.en.md 的“Tested versions”）
-const TESTED = 'Antigravity 桌面版 2.32.1（状态栏）、2.31.2（安装和各个开关），Windows 11';
+const TESTED = 'Antigravity 桌面版 2.33.0（汉化、状态栏、快捷方式参数）、2.31.2（各个开关），Windows 11';
 
 const readme = `Antigravity 中文美化包（非官方）
 
@@ -75,6 +75,16 @@ const readme = `Antigravity 中文美化包（非官方）
    选了作者的配色时，安装程序会请你关闭 Antigravity，改完再自动打开。
 5. 看到“安装完成”，按任意键关掉窗口就行。
 6. Antigravity 原来就开着的话，不用关；装好后在 Antigravity 里按一次 Ctrl+R 刷新窗口，用量信息就会出现。
+   （Antigravity 2.33.0 及以后：如果它这次启动没带调试端口参数，安装程序会问你，回车后自动重开一次。）
+
+【快捷方式参数（Antigravity 2.33.0 起需要）】
+- Antigravity 2.33.0 起，只有带启动参数 --remote-debugging-port=0 打开时，本工具才能连上它的窗口。
+  安装程序会自动给开始菜单、桌面、任务栏上的 Antigravity 快捷方式加上这个参数，卸载时去掉。
+- 请从这些快捷方式打开 Antigravity。直接双击 Antigravity.exe 打开时，界面会是英文。
+- Antigravity 自动更新后可能重写快捷方式、或自己重新启动：注入程序会自动把参数补回去；
+  如果 Antigravity 正开着但没带参数，右下角会弹出提醒，关掉 Antigravity 再从快捷方式打开即可。
+- 这个参数会在本机 127.0.0.1 上打开一个调试端口（2.33.0 以前的 Antigravity 本来就默认打开）。
+  本机上的其他程序可以通过它控制 Antigravity 窗口。介意的话不要使用本工具。
 
 【配色开关（可选，默认不用）】
 - 作者的配色是 Claude 风格的暖白配色：
