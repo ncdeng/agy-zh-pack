@@ -217,14 +217,14 @@ v1.0.0 安装时直接改了外观（缩放 131%、强对比度、系统字体�
 <details>
 <summary>从源码运行和打包</summary>
 
-需要 Windows 和 Node.js 22 或更高版本（用到内置的 `WebSocket` 和 `fetch`）。
+需要 Node.js 22 或更高版本（用到内置的 `WebSocket` 和 `fetch`）。Windows 与 macOS 均支持从源码运行（macOS 详细步骤和登录自启脚本见 [macos/README.md](macos/README.md)）。
 
 ```bash
 node inject.mjs
 ```
 
 - 注入程序常驻后台。已经有一个在跑时，新启动的会自动退出。
-- Antigravity 2.33.0 起要带 `--remote-debugging-port=0` 启动。先运行一次 `powershell -ExecutionPolicy Bypass -File debug-port.ps1` 给快捷方式加上参数，再从快捷方式打开 Antigravity。
+- Antigravity 2.33.0 起要带 `--remote-debugging-port=0` 启动。Windows 先运行一次 `powershell -ExecutionPolicy Bypass -File debug-port.ps1` 给快捷方式加上参数，再从快捷方式打开 Antigravity；macOS 运行 `./macos/launch-agy.command`（或 `open -a Antigravity --args --remote-debugging-port=0`）。
 - 改了 `statusbar.js` 或 `i18n` 下的文件后，已打开的窗口会自动更新，不用重启。改了 `inject.mjs` 要重启注入程序。
 - 想给页面加自己的样式（比如换回复字体），在 `inject.mjs` 同目录放一个 `style.css`，注入程序会自动加载；没有这个文件就不改任何样式。
 - 改了 `i18n/translator.js` 的逻辑，要把里面的 `VERSION` 加 1，已打开的窗口才会换用新翻译器。
@@ -256,6 +256,9 @@ node package/build.mjs
 | `package/app/setup.mjs` | 一键安装、卸载、配色开关 |
 | `package/build.mjs` | 生成安装包 |
 | `package/third_party/node-LICENSE.txt` | 安装包自带的 Node.js 的许可证 |
+| `macos/manage.mjs` | macOS 管理脚本（LaunchAgent 登录自启、启停、配色开关、调试端口启动） |
+| `macos/launch-agy.command` | macOS 启动器（自动查找 Node.js 并带 `--remote-debugging-port=0` 启动 Antigravity） |
+| `macos/README.md` | macOS 使用说明 |
 | `assets/statusbar.png` | 本页顶部的截图 |
 
 </details>

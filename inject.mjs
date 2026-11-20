@@ -24,16 +24,27 @@
 
 import fs from 'node:fs';
 import net from 'node:net';
+import os from 'node:os';
 import path from 'node:path';
 import { execFile, spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
+const IS_WIN = process.platform === 'win32';
+const IS_MAC = process.platform === 'darwin';
 const DIR = path.dirname(fileURLToPath(import.meta.url));
 const CSS_FILE = path.join(DIR, 'style.css');
 const LOG_FILE = path.join(DIR, 'inject.log');
-const PORT_FILE = process.env.AGY_PORT_FILE || path.join(process.env.APPDATA || '', 'Antigravity', 'DevToolsActivePort');
+const DEFAULT_PORT_FILE = IS_WIN
+  ? path.join(process.env.APPDATA || '', 'Antigravity', 'DevToolsActivePort')
+  : IS_MAC
+    ? path.join(os.homedir(), 'Library', 'Application Support', 'Antigravity', 'DevToolsActivePort')
+    : path.join(process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config'), 'Antigravity', 'DevToolsActivePort');
+const PORT_FILE = process.env.AGY_PORT_FILE || DEFAULT_PORT_FILE;
 const URL_PREFIX = process.env.AGY_URL_PREFIX || 'https://127.0.0.1:';
-const PIPE = '\\\\.\\pipe\\agy-claude-style' + (process.env.AGY_PORT_FILE ? '-test' : '');
+const PIPE_UID = typeof process.getuid === 'function' ? process.getuid() : 'user';
+const PIPE = IS_WIN
+  ? '\\\\.\\pipe\\agy-claude-style' + (process.env.AGY_PORT_FILE ? '-test' : '')
+  : path.join('/tmp', `agy-zh-pack-${PIPE_UID}${process.env.AGY_PORT_FILE ? '-test' : ''}.sock`);
 const POLL_MS = 3000;
 const STYLE_ID = 'agy-claude-style';
 
@@ -44,10 +55,45 @@ function log(msg) {
   try { fs.appendFileSync(LOG_FILE, line); } catch {}
 }
 
-// ---------- 单实例：占用一个命名管道，占不到说明已有实例在跑 ----------
+// ---------- 单实例：占用命名管道（Windows）或 Unix Socket（macOS/Linux），占不到说明已有实例在跑 ----------
 const lock = net.createServer();
-lock.on('error', () => process.exit(0));
-lock.listen(PIPE, () => { log(`started pid=${process.pid}`); main(); });
+function onListening() {
+  log(`started pid=${process.pid} platform=${process.platform}`);
+  if (!IS_WIN) {
+    const cleanup = () => {
+      try { lock.close(); } catch {}
+      try { fs.rmSync(PIPE, { force: true }); } catch {}
+      process.exit(0);
+    };
+    process.on('SIGINT', cleanup);
+    process.on('SIGTERM', cleanup);
+  }
+  main();
+}
+if (IS_WIN) {
+  lock.on('error', () => process.exit(0));
+  lock.listen(PIPE, onListening);
+} else {
+  let retried = false;
+  lock.on('error', (err) => {
+    if (err.code === 'EADDRINUSE' && !retried) {
+      retried = true;
+      const probe = net.createConnection(PIPE);
+      probe.once('connect', () => { probe.destroy(); process.exit(0); });
+      probe.once('error', (pe) => {
+        if (pe.code === 'ECONNREFUSED' || pe.code === 'ENOENT') {
+          try { fs.rmSync(PIPE, { force: true }); } catch {}
+          lock.listen(PIPE, onListening);
+        } else {
+          process.exit(0);
+        }
+      });
+      return;
+    }
+    process.exit(0);
+  });
+  lock.listen(PIPE, onListening);
+}
 
 // ---------- 要注入的文件：样式 + 汉化（词典、规则、翻译器） ----------
 // 删掉或改名 i18n\zh-CN.json 就关闭汉化（已打开的窗口刷新后恢复英文）。
@@ -117,7 +163,7 @@ function mergeCostBook(b) {
 // 对话记录 .system_generated\logs\transcript.jsonl 的修改时间在本地 0 点以后，就算今天动过。
 // 交给状态栏（window.__agyStats.todayIds），它会向本机后台查这些对话的调用记录（后台没加载的会顺便加载，
 // 加载不改对话的修改时间）。这样 Antigravity 重启后，今天早些时候的对话也能算进来。
-const BRAIN_DIR = path.join(process.env.USERPROFILE || '', '.gemini', 'antigravity', 'brain');
+const BRAIN_DIR = path.join(os.homedir(), '.gemini', 'antigravity', 'brain');
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 function todayConversations() {
   const d0 = new Date();
@@ -279,7 +325,7 @@ function recentHistory() {
 // 钱由状态栏按它的价目表算（价目表只放在 statusbar.js 一处）。只跑一次，结果记在 history.bf；删掉 bf 再重启注入程序会重新补算。
 // 字段号是 2026-11-20 对着 Antigravity 2.33.0 的数据和状态栏算出的数核对出来的；存储格式变了就补不出来，不影响其他功能。
 // 需要 Node.js 22.5 以上（node:sqlite）；安装包自带的 node.exe 满足。
-const CONV_DIR = path.join(process.env.USERPROFILE || '', '.gemini', 'antigravity', 'conversations');
+const CONV_DIR = path.join(os.homedir(), '.gemini', 'antigravity', 'conversations');
 // 最小的 protobuf 读取：返回第一个字段号为 f 的值（varint → 数字，长度型 → Buffer 片段），没有返回 undefined
 function pbGet(buf, f) {
   let i = 0;
@@ -514,8 +560,32 @@ let watching = false;
 let agySeen = null;
 const notified = new Set();
 const psArgs = (...a) => ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', PORT_SCRIPT, ...a];
+function watchDebugPortMac() {
+  watching = true;
+  watchAt = Date.now();
+  execFile('ps', ['-axo', 'pid=,args='], { timeout: 10000 }, (err, out) => {
+    watching = false;
+    if (err) { log(`debug-port watch (macOS) failed: ${String(err.message).split('\n')[0]}`); return; }
+    const lines = String(out).split(/\r?\n/);
+    for (const line of lines) {
+      const m = /^\s*(\d+)\s+(.+)$/.exec(line);
+      if (!m) continue;
+      const [, pid, cmd] = m;
+      if (!cmd.includes('/Antigravity.app/Contents/MacOS/Antigravity')) continue;
+      if (cmd.includes('--type=')) continue;
+      if (/--remote-debugging-port(=|\s|$)/.test(cmd)) continue;
+      if (notified.has(pid)) continue;
+      notified.add(pid);
+      log(`Antigravity pid=${pid} was started without --remote-debugging-port, showing a macOS notification`);
+      const script = 'display notification "这次 Antigravity 启动时没带调试端口参数，请关闭后使用 macos/launch-agy.command 重新打开。" with title "Antigravity 汉化暂时没生效"';
+      spawn('osascript', ['-e', script], { detached: true, stdio: 'ignore' }).unref();
+    }
+  });
+}
 function watchDebugPort() {
-  if (process.env.AGY_PORT_FILE || watching || Date.now() - watchAt < WATCH_MS || !fs.existsSync(PORT_SCRIPT)) return;
+  if (process.env.AGY_PORT_FILE || watching || Date.now() - watchAt < WATCH_MS) return;
+  if (IS_MAC) { watchDebugPortMac(); return; }
+  if (!IS_WIN || !fs.existsSync(PORT_SCRIPT)) return;
   const running = fs.existsSync(LOCK_FILE);
   if (running !== agySeen) { agySeen = running; log(running ? 'Antigravity lockfile present, debug-port watch on' : 'Antigravity not running (no lockfile), debug-port watch paused'); }
   if (!running) return;

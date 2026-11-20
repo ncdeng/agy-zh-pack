@@ -1332,7 +1332,8 @@ function agyStatusBar(CFG) {
     const lines = toLines([line1, line2]).concat(toLines(subRows, 'sub'));
     // fetch 包装晚到（注入器在窗口打开很久后才连上，没有自动刷新）：用量不生效，提示手动刷新
     if (S.early === false) {
-      lines.push(...toLines([[seg('warn', '', ['Press Ctrl+R to reload this window and enable usage stats'],
+      const reloadKey = typeof navigator !== 'undefined' && /Mac/i.test(navigator.platform || '') ? 'Cmd+R' : 'Ctrl+R';
+      lines.push(...toLines([[seg('warn', '', ['Press ' + reloadKey + ' to reload this window and enable usage stats'],
         '注入程序是在这个窗口打开之后才启动的，需要刷新一次窗口')]]));
     }
     if (!lines.length) {
