@@ -1002,35 +1002,77 @@ function agyStatusBar(CFG) {
   };
   const pctTx = (f) => (f * 100 < 10 ? (f * 100).toFixed(1) : String(Math.round(f * 100))) + '%';
   const dayLabel = (name) => { const d = new Date(name + 'T12:00:00'); return { wd: WEEKDAY[d.getDay()], md: (d.getMonth() + 1) + '-' + d.getDate(), d: String(d.getDate()) }; };
-  const dayTip = (name, r) => {
+  // ---------- 面板里的悬停卡片（2026-11-20 改）：代替系统提示框，立即弹出、跟着鼠标、带模型颜色 ----------
+  // tips：元素 → 生成卡片内容的函数（返回节点数组）。只用在柱子、图例和表格日期上，其余地方仍用 title。
+  const fmtUsdShort = (v) => (v < 0.01 ? '<$0.01' : v < 10 ? '$' + v.toFixed(2) : v < 100 ? '$' + v.toFixed(1) : '$' + Math.round(v));
+  const cardRow = (name, value, note) => {
+    const row = el('div', 'row k-' + (MODEL_COLOR[name] || 'muted'));
+    row.append(el('i'), el('span', 'n', name), el('span', 'v', value));
+    if (note) row.append(el('span', 'dim', note));
+    return row;
+  };
+  const dayCard = (name, r) => {
     const lb = dayLabel(name);
-    if (!r) return lb.md + ' ' + lb.wd + '：没有记录';
-    const models = Object.entries(r.models || {}).sort((a, b) => b[1][0] - a[1][0]);
+    const out = [el('div', 't', lb.wd + ' ' + lb.md + (name === dayName() ? ' · today' : ''))];
+    if (!r || !(r.usd > 0 || recTokens(r)[0] > 0)) { out.push(el('div', 'dim', '没有用量记录')); return out; }
+    const t = recTokens(r);
+    out.push(el('div', 'sum', fmtUsd(r.usd || 0) + ' · ' + (r.convs || 0) + ' 个对话 · ' + t[0] + ' 次调用'));
     let shown = 0;
-    let s = lb.md + ' ' + lb.wd + '：' + fmtUsd(r.usd || 0) + '（按 API 标准价折算），' + (r.convs || 0) + ' 个对话' +
-      (r.bf ? '\n这一天是从 Antigravity 的对话库补算的，没有额度记录' : '');
-    for (const [n, m] of models) { shown += m[0]; s += '\n  ' + n + '：' + fmtUsd(m[0]) + '（' + m[1] + ' 次调用）'; }
-    if ((r.usd || 0) - shown > 0.0005) s += '\n  没有按模型拆开的部分：' + fmtUsd(r.usd - shown);
+    for (const [n, m] of Object.entries(r.models || {}).filter(([, m]) => m[0] > 0 || m[1] > 0).sort((a, b) => b[1][0] - a[1][0])) {
+      shown += m[0];
+      out.push(cardRow(n, fmtUsd(m[0]), r.usd > 0 ? Math.round(m[0] / r.usd * 100) + '%' : ''));
+    }
+    if ((r.usd || 0) - shown > 0.0005) out.push(cardRow('Other', fmtUsd(r.usd - shown), '没按模型拆开'));
+    if (t[1] + t[2] > 0) out.push(el('div', 'dim', 'token：输入 ' + fmtK(t[1]) + ' · 缓存 ' + fmtK(t[2]) + ' · 输出 ' + fmtK(t[4]) + ' · 命中 ' + Math.round(t[2] / (t[1] + t[2]) * 100) + '%'));
     for (const [grp, label] of GROUPS) {
       const q = groupQuota(r, grp);
-      if (q.wk != null) s += '\n' + (q.name || label) + '：当天用掉每周额度 ' + pctTx(q.wk) + (q.peak != null ? '，5 小时额度最高到 ' + pctTx(q.peak) : '');
+      if (q.wk != null) out.push(el('div', 'q', label + ' 每周额度 +' + pctTx(q.wk) + (q.peak != null ? ' · 5 小时最高 ' + pctTx(q.peak) : '')));
     }
-    return s;
+    if (r.bf) out.push(el('div', 'dim', '从 Antigravity 对话库补算，没有额度记录'));
+    out.push(el('div', 'dim', '钱按 API 标准价折算，不是实际扣费'));
+    return out;
+  };
+  const partCard = (name, model, m, dayUsd) => {
+    const lb = dayLabel(name);
+    const head = el('div', 't row k-' + (MODEL_COLOR[model] || 'muted'));
+    head.append(el('i'), el('span', '', model + ' · ' + lb.wd + ' ' + lb.md));
+    const out = [head, el('div', 'sum', fmtUsd(m[0]) + (dayUsd > 0 ? '（占当天 ' + Math.round(m[0] / dayUsd * 100) + '%）' : '') + (m[1] ? ' · ' + m[1] + ' 次调用' : ''))];
+    if (m[2] || m[3] || m[5]) out.push(el('div', 'dim', '输入 ' + fmtK(m[2]) + ' · 缓存 ' + fmtK(m[3]) + (m[4] ? ' · 缓存写 ' + fmtK(m[4]) : '') + ' · 输出 ' + fmtK(m[5])));
+    if (m[2] + m[3] > 0) out.push(el('div', 'dim', '缓存命中 ' + Math.round(m[3] / (m[2] + m[3]) * 100) + '%'));
+    return out;
+  };
+  const attachCard = (panel, tips) => {
+    const card = el('div', 'p-card');
+    card.hidden = true;
+    panel.append(card);
+    let owner = null;
+    panel.onmousemove = (ev) => {
+      let t = ev.target;
+      let f = null;
+      while (t && t !== panel) { f = tips.get(t); if (f) break; t = t.parentElement; }
+      if (!f) { card.hidden = true; owner = null; return; }
+      if (owner !== t) { card.replaceChildren(...f()); owner = t; }
+      card.hidden = false;
+      const pr = panel.getBoundingClientRect();
+      const w = card.offsetWidth, h = card.offsetHeight;
+      let x = ev.clientX - pr.left + 14, y = ev.clientY - pr.top + 16;
+      if (x + w > panel.clientWidth - 6) x = ev.clientX - pr.left - w - 12;
+      if (y + h > panel.clientHeight - 6) y = ev.clientY - pr.top - h - 10;
+      card.style.left = Math.max(4, x + panel.scrollLeft) + 'px';
+      card.style.top = Math.max(4, y + panel.scrollTop) + 'px';
+    };
+    panel.onmouseleave = () => { card.hidden = true; owner = null; };
   };
 
-  // 柱子里一段（一个模型在一天里）的悬停说明
-  const partTip = (nm, name, m, dayUsd) => {
-    const lb = dayLabel(nm);
-    let s = lb.md + ' ' + lb.wd + ' · ' + name + '\n' + fmtUsd(m[0]) + (dayUsd > 0 ? '（占当天 ' + Math.round(m[0] / dayUsd * 100) + '%）' : '');
-    if (m[1]) s += '，' + m[1] + ' 次调用';
-    if (m[2] || m[3] || m[5]) s += '\n输入 ' + fmtK(m[2]) + ' · 缓存读取 ' + fmtK(m[3]) + (m[4] ? ' · 缓存写入 ' + fmtK(m[4]) : '') + ' · 输出 ' + fmtK(m[5]);
-    if (m[2] + m[3] > 0) s += '\n缓存命中 ' + Math.round(m[3] / (m[2] + m[3]) * 100) + '%';
-    return s;
-  };
   const renderPanel = (panel) => {
     const n = S.panelDays;
     const recs = lastDays(n).map((nm) => ({ nm, r: dayRecord(nm) }));
+    const tips = new WeakMap();
     panel.replaceChildren();
+
+    // 标题行：名字、7d / 30d、日期范围和合计、关闭
+    const usedDays = recs.filter(({ r }) => r && r.usd > 0);
+    const total = usedDays.reduce((a, { r }) => a + r.usd, 0);
     const head = el('div', 'p-head');
     const title = el('span', 'p-title', 'Daily usage');
     title.title = '每天的用量：钱按 API 标准价折算（不是实际扣费），额度是当天用掉的每周额度';
@@ -1041,64 +1083,103 @@ function agyStatusBar(CFG) {
       b.addEventListener('click', () => { S.panelDays = k; renderPanel(panel); });
       head.append(b);
     }
+    const first = dayLabel(recs[recs.length - 1].nm), last = dayLabel(recs[0].nm);
+    head.append(el('span', 'p-range', first.md + ' – ' + last.md + ' · ' + fmtUsd(total)));
     const x = el('button', 'p-btn p-x', '×');
     x.title = '关闭（Esc）';
     x.addEventListener('click', closePanel);
     head.append(el('span', 'p-fill'), x);
     panel.append(head);
 
-    // 柱状图：左旧右新，按模型分颜色叠起来
+    // 柱状图：左旧右新，按模型分颜色叠起来（金额大的在下面）；柱顶标金额，虚线是有用量的天的日均
     const max = Math.max(1e-6, ...recs.map(({ r }) => (r && r.usd) || 0));
     const chart = el('div', 'p-chart');
-    const labels = el('div', 'p-labels');
-    const seen = new Set();
+    const bars = el('div', 'p-bars');
+    const labels = el('div', 'p-labels' + (n > 7 ? ' dense' : ''));
+    const cols = new Map();
+    const totals = new Map(); // 价目名 → [美元, 调用数]
+    const maxDay = recs.reduce((a, b) => ((b.r && b.r.usd) || 0) > ((a.r && a.r.usd) || 0) ? b : a, recs[0]).nm;
     for (const { nm, r } of recs.slice().reverse()) {
       const col = el('div', 'p-col');
-      col.title = dayTip(nm, r);
-      const stack = el('div', 'p-stack');
+      col.dataset.day = nm;
+      tips.set(col, () => dayCard(nm, r));
+      cols.set(nm, col);
       let shown = 0;
-      for (const [name, m] of Object.entries((r && r.models) || {}).filter(([, m]) => m[0] > 0).sort((a, b) => b[1][0] - a[1][0])) {
-        const part = el('div', 'p-part k-' + (MODEL_COLOR[name] || 'muted'));
+      let top = null;
+      for (const [model, m] of Object.entries((r && r.models) || {}).filter(([, m]) => m[0] > 0).sort((a, b) => b[1][0] - a[1][0])) {
+        const part = el('div', 'p-part k-' + (MODEL_COLOR[model] || 'muted'));
         part.style.height = (m[0] / max * 100) + '%';
-        part.dataset.m = name;
-        part.title = partTip(nm, name, m, r.usd);
-        stack.append(part);
+        part.dataset.m = model;
+        tips.set(part, () => partCard(nm, model, m, r.usd));
+        col.append(part);
+        top = part;
         shown += m[0];
-        seen.add(name);
+        const tt = totals.get(model) || [0, 0];
+        tt[0] += m[0]; tt[1] += m[1];
+        totals.set(model, tt);
       }
       const rest = ((r && r.usd) || 0) - shown;
       if (rest > 0.0005) {
         const part = el('div', 'p-part k-muted');
         part.style.height = (rest / max * 100) + '%';
         part.dataset.m = 'Other';
-        part.title = dayLabel(nm).md + ' ' + dayLabel(nm).wd + ' · 没有按模型拆开的部分\n' + fmtUsd(rest);
-        stack.append(part);
-        seen.add('Other');
+        tips.set(part, () => [el('div', 't', dayLabel(nm).wd + ' ' + dayLabel(nm).md + ' · 没按模型拆开的部分'), el('div', 'sum', fmtUsd(rest))]);
+        col.append(part);
+        top = part;
+        const tt = totals.get('Other') || [0, 0];
+        tt[0] += rest;
+        totals.set('Other', tt);
       }
-      col.append(stack);
-      chart.append(col);
+      if (top) top.classList.add('top');
+      const usd = (r && r.usd) || 0;
+      if (usd > 0 && (n <= 7 || nm === maxDay || nm === dayName())) col.append(el('span', 'p-val', fmtUsdShort(usd)));
+      // 点柱子：表格里对应的那一行滚到眼前并闪一下
+      col.addEventListener('click', () => {
+        const tr = panel.querySelector('tr[data-day="' + nm + '"]');
+        if (!tr) return;
+        tr.scrollIntoView({ block: 'nearest' });
+        tr.classList.remove('flash');
+        void tr.offsetWidth;
+        tr.classList.add('flash');
+      });
+      bars.append(col);
       const lb = dayLabel(nm);
-      labels.append(el('span', nm === dayName() ? 'today' : '', n <= 7 ? lb.wd : lb.d));
+      const isToday = nm === dayName();
+      const lab = el('span', isToday ? 'today' : '');
+      if (n <= 7) lab.append(el('b', '', lb.wd), el('i', '', lb.md));
+      else if (isToday || new Date(nm + 'T12:00:00').getDay() === 1) lab.append(el('i', '', lb.md));
+      labels.append(lab);
     }
+    if (usedDays.length >= 2) {
+      const avg = total / usedDays.length;
+      const line = el('div', 'p-avg');
+      line.style.bottom = (avg / max * 100) + '%';
+      line.append(el('span', '', 'avg ' + fmtUsdShort(avg)));
+      line.title = '有用量的 ' + usedDays.length + ' 天平均每天 ' + fmtUsd(avg);
+      bars.append(line);
+    }
+    chart.append(bars);
     panel.append(chart, labels);
-    if (seen.size) {
+
+    // 图例：每个模型这段时间的合计，按金额从高到低；鼠标停上去，每一天里这个模型的那一段都高亮
+    if (totals.size) {
       const legend = el('div', 'p-legend');
-      // 鼠标停在图例上：每一天里这个模型的那一段都高亮，其他段变淡
-      for (const name of [...Object.keys(MODEL_COLOR), 'Other'].filter((x) => seen.has(x))) {
-        const it = el('span', 'k-' + (MODEL_COLOR[name] || 'muted'));
-        it.append(el('i'), el('span', '', name));
-        it.title = '这段时间里 ' + name + ' 的花费在柱子里高亮';
+      for (const [model, tt] of [...totals].sort((a, b) => b[1][0] - a[1][0])) {
+        const it = el('span', 'k-' + (MODEL_COLOR[model] || 'muted'));
+        it.append(el('i'), el('span', '', model), el('span', 'v', fmtUsdShort(tt[0])));
+        tips.set(it, () => [el('div', 't', model + ' · 最近 ' + n + ' 天'),
+          el('div', 'sum', fmtUsd(tt[0]) + (total > 0 ? '（占 ' + Math.round(tt[0] / total * 100) + '%）' : '') + (tt[1] ? ' · ' + tt[1] + ' 次调用' : ''))]);
         it.addEventListener('mouseenter', () => {
-          chart.classList.add('focus');
-          for (const p of chart.querySelectorAll('.p-part')) p.classList.toggle('hl', p.dataset.m === name);
+          bars.classList.add('focus');
+          for (const p of bars.querySelectorAll('.p-part')) p.classList.toggle('hl', p.dataset.m === model);
         });
-        it.addEventListener('mouseleave', () => chart.classList.remove('focus'));
+        it.addEventListener('mouseleave', () => bars.classList.remove('focus'));
         legend.append(it);
       }
       panel.append(legend);
     }
 
-    // 表格：有记录的天，今天在最上面
+    // 表格：有记录的天，今天在最上面；表头固定，太长就在表格里滚动。鼠标停在某一行，对应的柱子高亮
     const rows = recs.filter(({ r }) => r && ((r.usd || 0) > 0 || recTokens(r)[0] > 0 || GROUPS.some(([g]) => groupQuota(r, g).wk != null)));
     if (!rows.length) {
       const empty = el('div', 'p-empty', 'no usage recorded yet');
@@ -1106,18 +1187,21 @@ function agyStatusBar(CFG) {
       panel.append(empty);
     } else {
       const table = el('table');
+      const thead = el('thead');
       const hr = el('tr');
       const heads = [['Date', ''], ['Cost', '按 API 标准价折算的花费（不是实际扣费）'], ['Convs', '当天动过的对话数（含子代理）'], ['Calls', '模型调用次数'],
         ['In', '输入 token（不含缓存）'], ['Cache', '缓存读取 token'], ['Out', '输出 token（含思考）'], ['Hit', '缓存命中率 = 缓存读取 ÷（缓存读取 + 输入）'],
         ...GROUPS.map(([, label]) => [label + ' wk', '当天用掉了多少个百分点的' + label + '每周额度'])];
       for (const [h, tip] of heads) { const th = el('th', '', h); if (tip) th.title = tip; hr.append(th); }
-      table.append(hr);
+      thead.append(hr);
+      const tbody = el('tbody');
       for (const { nm, r } of rows) {
         const t = recTokens(r);
-        const tr = el('tr', nm === dayName() ? 'today' : '');
+        const tr = el('tr', (nm === dayName() ? 'today' : '') + (r.bf ? ' bf' : ''));
+        tr.dataset.day = nm;
         const lb = dayLabel(nm);
         const td0 = el('td', '', lb.md + ' ' + lb.wd);
-        td0.title = dayTip(nm, r);
+        tips.set(td0, () => dayCard(nm, r));
         const hit = t[1] + t[2] > 0 ? Math.round(t[2] / (t[1] + t[2]) * 100) + '%' : '—';
         tr.append(td0, el('td', 'c', fmtUsd(r.usd || 0)), el('td', '', String(r.convs || 0)), el('td', '', String(t[0])),
           el('td', '', fmtK(t[1])), el('td', '', fmtK(t[2])), el('td', '', fmtK(t[4])), el('td', 'h', hit));
@@ -1125,10 +1209,17 @@ function agyStatusBar(CFG) {
           const q = groupQuota(r, grp);
           const td = el('td', 'q', q.wk == null ? '—' : '+' + pctTx(q.wk));
           if (q.peak != null) td.title = '5 小时额度当天最高 ' + pctTx(q.peak);
+          else if (r.bf) td.title = '补算的天没有额度记录';
           tr.append(td);
         }
-        table.append(tr);
+        const col = cols.get(nm);
+        if (col) {
+          tr.addEventListener('mouseenter', () => col.classList.add('sel'));
+          tr.addEventListener('mouseleave', () => col.classList.remove('sel'));
+        }
+        tbody.append(tr);
       }
+      table.append(thead, tbody);
       const wrap = el('div', 'p-table');
       wrap.append(table);
       panel.append(wrap);
@@ -1136,8 +1227,6 @@ function agyStatusBar(CFG) {
 
     // 底部：这段时间的合计；每组额度：现在用了多少、这段时间用掉多少、折算下来 1% 每周额度大约值多少钱
     const foot = el('div', 'p-foot');
-    const usedDays = recs.filter(({ r }) => r && r.usd > 0);
-    const total = usedDays.reduce((a, { r }) => a + r.usd, 0);
     const l1 = el('div', 'k-cost', 'last ' + n + 'd ' + fmtUsd(total) + (usedDays.length ? ' · avg ' + fmtUsd(total / usedDays.length) + '/day · ' + usedDays.length + ' days' : ''));
     l1.title = '最近 ' + n + ' 天合计（按 API 标准价折算）；平均值只算有用量的天';
     foot.append(l1);
@@ -1164,6 +1253,7 @@ function agyStatusBar(CFG) {
       foot.append(line);
     }
     panel.append(foot);
+    attachCard(panel, tips);
   };
   // 背景色取输入框一带不透明的颜色，和当前主题一致；取不到用 CSS 里的默认色
   const solidBg = (start) => {
@@ -1177,13 +1267,13 @@ function agyStatusBar(CFG) {
     const bar = S.panelBar && S.panelBar.isConnected ? S.panelBar : document.querySelector(B);
     if (!bar) return;
     const r = bar.getBoundingClientRect();
-    const w = Math.min(760, Math.max(r.width, 520), window.innerWidth - 24);
+    const w = Math.min(780, Math.max(r.width, 560), window.innerWidth - 24);
     panel.style.width = w + 'px';
     panel.style.left = Math.max(12, Math.min(r.left, window.innerWidth - w - 12)) + 'px';
     panel.style.bottom = Math.max(8, window.innerHeight - r.top + 6) + 'px';
     panel.style.maxHeight = Math.max(180, r.top - 24) + 'px';
     const bg = solidBg(bar.nextElementSibling) || solidBg(bar);
-    if (bg) panel.style.background = bg;
+    if (bg) { panel.style.background = bg; panel.style.setProperty('--p-bg-live', bg); } // 固定表头、悬停卡片、日均标签也用这个底色
   };
   const closePanel = () => {
     document.querySelectorAll(P).forEach((p) => p.remove());
@@ -1355,7 +1445,7 @@ ${B}, ${P}{
   --k-model:#5c64d6; --k-context:#8839ef; --k-cache:#1b8fbf; --k-timing:#c4566a; --k-tokens:#158a90;
   --k-quota:#e0620d; --k-warn:#c9800f; --k-crit:#d20f39; --k-run:#40a02b; --k-muted:#8c8fa1;
   --k-agent:#df8e1d; --k-cost:#c03d8e; --k-argon:#1e66f5;
-  --sep:#c9c6bc; --cell-off:#e6e2d8; --p-bg:#fffefb;
+  --sep:#c9c6bc; --cell-off:#e6e2d8; --p-bg:#fffefb; --k-text:#4c4f69;
 }
 ${B}{
   display:flex; flex-direction:column; gap:1px; padding:0 .9rem .35rem;
@@ -1366,7 +1456,7 @@ ${B}{
 body.theme-dark ${B}, :root[style*="color-scheme: dark"] ${B}, body.theme-dark ${P}, :root[style*="color-scheme: dark"] ${P}{
   --k-model:#b4befe; --k-context:#cba6f7; --k-cache:#89dceb; --k-timing:#f2cdcd; --k-tokens:#94e2d5;
   --k-quota:#fab387; --k-warn:#f9e2af; --k-crit:#f38ba8; --k-run:#a6e3a1; --k-muted:#7f849c;
-  --k-agent:#f9e2af; --k-cost:#f5c2e7; --k-argon:#89b4fa; --p-bg:#1e1e2e;
+  --k-agent:#f9e2af; --k-cost:#f5c2e7; --k-argon:#89b4fa; --p-bg:#1e1e2e; --k-text:#cdd6f4;
   --sep:#585b70; --cell-off:#45475a;
 }
 /* 分隔符：每项左边留 1.6em，竖线画在这段空隙里；整行左移 1.6em 并把左边 1.6em 裁掉，
@@ -1409,32 +1499,59 @@ ${P} .p-fill{flex:1}
 ${P} .p-btn{font:inherit; color:var(--k-muted); background:transparent; border:1px solid var(--sep); border-radius:6px; padding:0 .45em; cursor:pointer; line-height:1.5}
 ${P} .p-btn.on{color:var(--k-cost); border-color:var(--k-cost)}
 ${P} .p-x{border:none; font-size:16px; padding:0 .25em}
-${P} .p-chart{display:flex; align-items:stretch; gap:3px; height:92px; border-bottom:1px solid var(--sep)}
-${P} .p-col{flex:1; min-width:0; display:flex}
-${P} .p-col:hover{background:color-mix(in srgb, var(--sep) 25%, transparent)}
-${P} .p-stack{flex:1; display:flex; flex-direction:column-reverse}
+${P} .p-range{color:var(--k-muted); margin-left:.35rem}
+/* 柱状图：上面留 16px 给柱顶的金额；每根柱子从下往上叠（column-reverse），柱顶那段圆角 */
+${P} .p-chart{height:122px; padding-top:16px; box-sizing:border-box; border-bottom:1px solid var(--sep)}
+${P} .p-bars{position:relative; display:flex; align-items:stretch; gap:3px; height:100%}
+${P} .p-col{position:relative; flex:1; min-width:0; display:flex; flex-direction:column-reverse; border-radius:3px 3px 0 0; cursor:pointer}
+${P} .p-col:hover, ${P} .p-col.sel{background:color-mix(in srgb, var(--sep) 28%, transparent)}
 ${P} .p-part{background:var(--kc); flex:none; transition:opacity .12s, filter .12s}
+${P} .p-part.top{border-radius:2px 2px 0 0}
 /* 悬停：停在哪一段就高亮哪一段，同一天的其他段变淡；停在图例上，每一天里这个模型的那一段高亮 */
-${P} .p-stack:has(.p-part:hover) .p-part:not(:hover){opacity:.35}
+${P} .p-col:has(.p-part:hover) .p-part:not(:hover){opacity:.35}
 ${P} .p-part:hover{filter:brightness(1.12) saturate(1.15); box-shadow:inset 0 0 0 1.5px color-mix(in srgb, #fff 60%, transparent)}
-${P} .p-chart.focus .p-part{opacity:.2}
-${P} .p-chart.focus .p-part.hl{opacity:1; filter:brightness(1.08)}
-${P} .p-labels{display:flex; gap:3px; margin:.15rem 0 .4rem}
-${P} .p-labels span{flex:1; min-width:0; overflow:hidden; text-align:center; font-size:10.5px}
+${P} .p-bars.focus .p-part{opacity:.2}
+${P} .p-bars.focus .p-part.hl{opacity:1; filter:brightness(1.08)}
+${P} .p-val{flex:none; align-self:center; font-size:10px; line-height:14px; color:var(--k-cost); white-space:nowrap; pointer-events:none}
+${P} .p-avg{position:absolute; left:0; right:0; height:0; border-top:1px dashed color-mix(in srgb, var(--k-cost) 55%, transparent); pointer-events:none}
+${P} .p-avg span{position:absolute; right:0; bottom:2px; padding:0 3px; font-size:10px; line-height:1.2; color:var(--k-cost); background:var(--p-bg-live, var(--p-bg)); border-radius:3px}
+${P} .p-labels{display:flex; gap:3px; margin:.2rem 0 .45rem}
+${P} .p-labels span{flex:1; min-width:0; display:flex; flex-direction:column; align-items:center; font-size:10.5px; line-height:1.25; white-space:nowrap}
+${P} .p-labels b{font-weight:500}
+${P} .p-labels i{font-style:normal; opacity:.7}
+${P} .p-labels.dense i{opacity:1}
 ${P} .p-labels span.today{color:var(--k-cost); font-weight:600}
-${P} .p-legend{display:flex; flex-wrap:wrap; gap:.15rem .9rem; margin-bottom:.45rem}
-${P} .p-legend span{color:var(--kc); display:inline-flex; align-items:center}
+${P} .p-legend{display:flex; flex-wrap:wrap; gap:.15rem 1rem; margin-bottom:.45rem}
+${P} .p-legend > span{color:var(--kc); display:inline-flex; align-items:center; cursor:default}
 ${P} .p-legend i{display:inline-block; width:8px; height:8px; border-radius:2px; background:var(--kc); margin-right:.35em}
-${P} .p-table{overflow-x:auto}
+${P} .p-legend .v{margin-left:.45em; opacity:.75}
+/* 表格：限高滚动，表头固定；鼠标停在某一行，对应的柱子高亮；点柱子时对应的行闪一下 */
+${P} .p-table{overflow:auto; max-height:12.5em}
 ${P} table{width:100%; border-collapse:collapse}
-${P} th{font-weight:500; text-align:right; padding:.05rem .5rem; border-bottom:1px solid var(--sep); white-space:nowrap}
+${P} th{position:sticky; top:0; z-index:1; background:var(--p-bg-live, var(--p-bg)); font-weight:500; text-align:right; padding:.05rem .5rem; border-bottom:1px solid var(--sep); white-space:nowrap}
 ${P} td{text-align:right; padding:.05rem .5rem; white-space:nowrap}
 ${P} th:first-child, ${P} td:first-child{text-align:left; padding-left:0}
 ${P} td.c{color:var(--k-cost)} ${P} td.h{color:var(--k-cache)} ${P} td.q{color:var(--k-quota)}
+${P} tbody tr:hover td{background:color-mix(in srgb, var(--sep) 22%, transparent)}
 ${P} tr.today td{font-weight:600}
+${P} tr.flash td{animation:agyFlash 1.2s ease-out}
+@keyframes agyFlash{0%{background:color-mix(in srgb, var(--k-cost) 24%, transparent)}100%{background:transparent}}
 ${P} .p-empty{padding:.4rem 0}
 ${P} .p-foot{margin-top:.5rem; display:flex; flex-direction:column; gap:.05rem}
 ${P} .p-foot div{color:var(--kc)}
+/* 悬停卡片（代替系统提示框）：跟着鼠标，不挡鼠标事件 */
+${P} .p-card{position:absolute; z-index:3; pointer-events:none; min-width:170px; max-width:320px; padding:.4rem .6rem .45rem;
+  border:1px solid var(--sep); border-radius:8px; background:var(--p-bg-live, var(--p-bg)); box-shadow:0 6px 20px rgba(0,0,0,.16);
+  font-size:11.5px; line-height:1.55; color:var(--k-text)}
+${P} .p-card .t{font-weight:600; margin-bottom:.1rem}
+${P} .p-card .sum{color:var(--k-cost)}
+${P} .p-card .row{display:flex; align-items:center; gap:.45em}
+${P} .p-card .row i{display:inline-block; flex:none; width:8px; height:8px; border-radius:2px; background:var(--kc)}
+${P} .p-card .row .n{color:var(--kc)}
+${P} .p-card .row .v{margin-left:auto; padding-left:1em}
+${P} .p-card .row .dim{min-width:2.8em; text-align:right}
+${P} .p-card .dim{color:var(--k-muted)}
+${P} .p-card .q{color:var(--k-quota)}
 ${P} .k-model{--kc:var(--k-model)} ${P} .k-context{--kc:var(--k-context)} ${P} .k-cache{--kc:var(--k-cache)} ${P} .k-tokens{--kc:var(--k-tokens)}
 ${P} .k-quota{--kc:var(--k-quota)} ${P} .k-cost{--kc:var(--k-cost)} ${P} .k-run{--kc:var(--k-run)} ${P} .k-argon{--kc:var(--k-argon)} ${P} .k-muted{--kc:var(--k-muted)}
 `;
