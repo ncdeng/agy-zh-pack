@@ -387,14 +387,22 @@ async function apply(sess) {
 // 安装时已给快捷方式加了参数（debug-port.ps1 add）。Antigravity 自动更新可能重写快捷方式，
 // 所以找不到可用的端口时，每 2 分钟跑一次 debug-port.ps1 watch：参数没了就补回；
 // Antigravity 正开着却没带参数（例如更新后自动重启，或从别的入口打开），就弹一次系统通知，每个进程只弹一次。
+// 2026-11-20：Antigravity 没在运行时不再跑（原来关着时也每 2 分钟拉起一次 PowerShell，一次约 16 秒）。
+// 判断依据：主进程开着时 %APPDATA%\Antigravity\lockfile 一直存在（Chromium 的单实例锁，被独占写打开）。
+// 只看文件在不在，不去打开它，免得 Antigravity 启动的那一刻和它抢锁。
 const PORT_SCRIPT = path.join(DIR, 'debug-port.ps1');
+const LOCK_FILE = path.join(path.dirname(PORT_FILE), 'lockfile');
 const WATCH_MS = 2 * 60 * 1000;
 let watchAt = 0;
 let watching = false;
+let agySeen = null;
 const notified = new Set();
 const psArgs = (...a) => ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', PORT_SCRIPT, ...a];
 function watchDebugPort() {
   if (process.env.AGY_PORT_FILE || watching || Date.now() - watchAt < WATCH_MS || !fs.existsSync(PORT_SCRIPT)) return;
+  const running = fs.existsSync(LOCK_FILE);
+  if (running !== agySeen) { agySeen = running; log(running ? 'Antigravity lockfile present, debug-port watch on' : 'Antigravity not running (no lockfile), debug-port watch paused'); }
+  if (!running) return;
   watching = true;
   watchAt = Date.now();
   execFile('powershell.exe', psArgs('-Mode', 'watch'), { windowsHide: true, timeout: 60000 }, (err, out) => {

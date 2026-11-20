@@ -48,7 +48,14 @@ $sh = New-Object -ComObject WScript.Shell
 $found = 0; $changed = 0
 foreach ($r in $roots) {
   if (-not $r -or -not (Test-Path -LiteralPath $r)) { continue }
-  foreach ($f in Get-ChildItem -LiteralPath $r -Recurse -Filter *.lnk -ErrorAction SilentlyContinue) {
+  # watch runs every 2 minutes, so it looks only at the top level of the desktop (a full walk took 8.5 s on one PC);
+  # add / remove / check (installer, uninstaller) still walk the whole tree.
+  if ($Mode -eq 'watch' -and $r -eq $desktop) {
+    $files = Get-ChildItem -LiteralPath $r -Filter *.lnk -ErrorAction SilentlyContinue
+  } else {
+    $files = Get-ChildItem -LiteralPath $r -Recurse -Filter *.lnk -ErrorAction SilentlyContinue
+  }
+  foreach ($f in $files) {
     try { $l = $sh.CreateShortcut($f.FullName) } catch { continue }
     if ($l.TargetPath -ne $exe) { continue }
     $found++

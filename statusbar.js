@@ -160,20 +160,49 @@ function agyStatusBar(CFG) {
     S.render();
   };
 
+  // 2026-11-20：收到的数据块先排队，凑够一整帧才拼一次。原来每来一块就把已收到的全部重新拷贝一遍，
+  // 打开长对话时第一帧有好几 MB、分几十块到，拷贝量是平方级的。
   S.tap = (method, stream) => {
     const reader = stream.getReader();
     const dec = new TextDecoder();
-    let buf = new Uint8Array(0);
+    const chunks = [];
+    let have = 0;
+    const take = (n) => { // 从队头取出 n 个字节：在第一块里就直接切，跨块才拷贝
+      const c0 = chunks[0];
+      if (c0.length >= n) {
+        if (c0.length === n) chunks.shift(); else chunks[0] = c0.subarray(n);
+        have -= n;
+        return c0.subarray(0, n);
+      }
+      const out = new Uint8Array(n);
+      let off = 0;
+      while (off < n) {
+        const c = chunks[0];
+        const k = Math.min(c.length, n - off);
+        out.set(c.subarray(0, k), off);
+        off += k;
+        if (k === c.length) chunks.shift(); else chunks[0] = c.subarray(k);
+      }
+      have -= n;
+      return out;
+    };
+    const head = () => { // 帧头 5 字节（可能跨块），不取出
+      let h = chunks[0];
+      if (h.length < 5) {
+        h = new Uint8Array(5);
+        let off = 0;
+        for (const c of chunks) { const k = Math.min(c.length, 5 - off); h.set(c.subarray(0, k), off); off += k; if (off === 5) break; }
+      }
+      return { flag: h[0], len: new DataView(h.buffer, h.byteOffset + 1, 4).getUint32(0) };
+    };
     const pump = () => reader.read().then(({ value, done }) => {
       if (done) return;
-      const nb = new Uint8Array(buf.length + value.length);
-      nb.set(buf); nb.set(value, buf.length); buf = nb;
-      while (buf.length >= 5) {
-        const flag = buf[0];
-        const len = new DataView(buf.buffer, buf.byteOffset + 1, 4).getUint32(0);
-        if (buf.length < 5 + len) break;
-        const body = buf.subarray(5, 5 + len);
-        buf = buf.slice(5 + len);
+      if (value && value.length) { chunks.push(value); have += value.length; }
+      while (have >= 5) {
+        const { flag, len } = head();
+        if (have < 5 + len) break;
+        take(5);
+        const body = take(len);
         if (flag & 0x80) continue; // 结尾的 trailers 帧
         try { S.onMessage(method, JSON.parse(dec.decode(body))); } catch (e) { /* 数据格式变了就忽略 */ }
       }
@@ -821,6 +850,14 @@ function agyStatusBar(CFG) {
     const vals = Object.values(book.by);
     return { usd: vals.reduce((a, b) => a + b, 0), convs: vals.filter((v) => v > 0).length, calls, undated, loading };
   };
+  // 今天花费要把今天所有对话的调用都算一遍，生成回复时状态栏一秒重画好几次，2 秒内的重画共用一次结果
+  let dayCache = null;
+  const todayCostCached = () => {
+    const now = Date.now();
+    const day = dayName();
+    if (!dayCache || now - dayCache.at >= 2000 || dayCache.day !== day) dayCache = { at: now, day, v: todayCost() };
+    return dayCache.v;
+  };
   // md：最近一次调用的元数据（状态流）；ids：算累计的对话（根对话 + 子代理，或子代理窗格里只算它自己）
   const costSeg = (md, ids) => {
     const mu = md && md.modelUsage;
@@ -831,7 +868,7 @@ function agyStatusBar(CFG) {
     //   [气泡$] $13.67  |  [日历] $13.70 today
     // 第一项是这个对话累计（没有就显示最近一次调用），第二项是今天花费；明细放在各自的悬停说明里。只占两项，状态栏仍是两行。
     const shown = tot && tot.calls ? tot.usd : last && last.usd != null ? last.usd : null;
-    const day = todayCost();
+    const day = todayCostCached();
     const out = [];
     let tip = shown == null ? '' : (tot && tot.calls ? '这个对话累计 ' : '最近一次调用 ') + fmtUsd(shown) + '（按 API 标准价）';
     if (last && last.usd != null) {
@@ -1373,13 +1410,19 @@ ${P} .k-quota{--kc:var(--k-quota)} ${P} .k-cost{--kc:var(--k-cost)} ${P} .k-run{
       if (force || fresh) bar.replaceChildren(...build(paneConvId(box)));
     }
   };
+  // 2026-11-20：窗口在后台（最小化或被别的窗口挡住）时不重画，记一笔，回到前台再画一次；
+  // 生成回复时数据来得很密，最短 300 毫秒画一次（原来 150 毫秒）。数据照常接收，只是不画。
   let scheduled = false;
+  let dirty = false;
+  const hidden = () => document.visibilityState === 'hidden';
   const render = () => {
+    if (hidden()) { dirty = true; return; }
     if (scheduled) return;
     scheduled = true;
-    setTimeout(() => { scheduled = false; ensure(true); }, 150);
+    setTimeout(() => { scheduled = false; ensure(true); }, 300);
   };
   S.render = render;
+  const onVisible = () => { if (!hidden() && dirty) { dirty = false; render(); refreshPanel(); } };
 
   // 每秒检查一次：输入框被重新创建就补上状态栏，切换了对话就重画；每 30 秒重画一次（额度重置时间会变）；
   // 按需查后台对话摘要（子代理是否还在跑，见 S.fetchCascades）
@@ -1390,6 +1433,9 @@ ${P} .k-quota{--kc:var(--k-quota)} ${P} .k-cost{--kc:var(--k-cost)} ${P} .k-run{
     S.styleEl = style;
     document.querySelectorAll('.' + BAR_CLASS).forEach((b) => b.remove());
     closePanel(); // 旧版本开着的面板和它的监听也一起去掉
+    if (S.visHandler) document.removeEventListener('visibilitychange', S.visHandler);
+    S.visHandler = onVisible;
+    document.addEventListener('visibilitychange', onVisible);
     let path = location.pathname;
     let sel = selectedLabel();
     if (!S.navAt) S.navAt = Date.now();
@@ -1403,9 +1449,10 @@ ${P} .k-quota{--kc:var(--k-quota)} ${P} .k-cost{--kc:var(--k-cost)} ${P} .k-run{
       if (S.lsHeaders && document.visibilityState !== 'hidden') { try { S.refreshCosts(); } catch (e) { /* 费用估算出错不影响其他显示 */ } }
       const nowSel = selectedLabel();
       if (location.pathname !== path) { path = location.pathname; S.navAt = Date.now(); sel = nowSel; ensure(true); }
+      else if (hidden()) { if (ticks % 30 === 0) dirty = true; ensure(false); } // 后台：只保证状态栏还在，回到前台再重画
       else if (nowSel !== sel || ticks % 30 === 0) { sel = nowSel; ensure(true); } // 换了模型也重画
       else ensure(false);
-      if (ticks % 30 === 0) refreshPanel(); // 面板开着时每 30 秒刷新一次（注入程序也是每 30 秒推一次历史）
+      if (ticks % 30 === 0 && !hidden()) refreshPanel(); // 面板开着时每 30 秒刷新一次（注入程序也是每 30 秒推一次历史）
     }, 1000);
     render();
   };

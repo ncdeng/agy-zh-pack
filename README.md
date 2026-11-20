@@ -149,7 +149,7 @@ Antigravity 2.33.0 以前，主程序启动时总会打开 Chromium 远程调试
 
 - 安装程序给开始菜单、桌面、任务栏上的 Antigravity 快捷方式加上 `--remote-debugging-port=0`（`0` = 随机端口），卸载时去掉。只改目标是 `%LOCALAPPDATA%\Programs\antigravity\Antigravity.exe` 的快捷方式。
 - 请从这些快捷方式打开 Antigravity。直接双击 `Antigravity.exe`、或用别的方式打开时，界面会是英文。
-- Antigravity 自动更新后可能重写快捷方式，或者自己重新启动（不带参数）。注入程序找不到端口时，每 2 分钟检查一次：快捷方式上的参数没了就补回去；Antigravity 正开着但没带参数，就在右下角弹一次提醒。照提醒关掉 Antigravity、再从快捷方式打开即可。
+- Antigravity 自动更新后可能重写快捷方式，或者自己重新启动（不带参数）。注入程序找不到端口、而 Antigravity 正开着时，每 2 分钟检查一次：快捷方式上的参数没了就补回去；Antigravity 正开着但没带参数，就在右下角弹一次提醒。照提醒关掉 Antigravity、再从快捷方式打开即可。Antigravity 没开时不检查（看 `%APPDATA%\Antigravity\lockfile` 在不在），不会在后台反复启动 PowerShell。
 - 加参数、去参数、检查都由 `debug-port.ps1` 完成。手动检查：`powershell -ExecutionPolicy Bypass -File %LOCALAPPDATA%\AgyZhPack\debug-port.ps1 -Mode check`。
 
 ## 风险

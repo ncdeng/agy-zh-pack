@@ -152,7 +152,7 @@ Before Antigravity 2.33.0, the main process always opened a Chromium remote debu
 
 - The installer adds `--remote-debugging-port=0` (`0` = a random port) to the Antigravity shortcuts in the Start menu, on the desktop and on the taskbar. The uninstaller removes it. Only shortcuts whose target is `%LOCALAPPDATA%\Programs\antigravity\Antigravity.exe` are changed.
 - Open Antigravity from these shortcuts. If you double-click `Antigravity.exe` directly, or open it in another way, the UI stays in English.
-- After an automatic update, Antigravity can rewrite its shortcuts, or restart by itself without the flag. When the injector cannot find the port, it checks every 2 minutes: if a shortcut lost the flag, it adds the flag again; if Antigravity is open without the flag, it shows one notification in the lower-right corner. Then close Antigravity and open it again from a shortcut.
+- After an automatic update, Antigravity can rewrite its shortcuts, or restart by itself without the flag. When the injector cannot find the port while Antigravity is open, it checks every 2 minutes: if a shortcut lost the flag, it adds the flag again; if Antigravity is open without the flag, it shows one notification in the lower-right corner. Then close Antigravity and open it again from a shortcut. When Antigravity is closed, it does not check (it looks for `%APPDATA%\Antigravity\lockfile`), so it does not start PowerShell again and again in the background.
 - `debug-port.ps1` adds, removes and checks the flag. To check by hand: `powershell -ExecutionPolicy Bypass -File %LOCALAPPDATA%\AgyZhPack\debug-port.ps1 -Mode check`.
 
 ## Risks
