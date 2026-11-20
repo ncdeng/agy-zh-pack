@@ -88,7 +88,7 @@
 
 数据存在安装目录的 `usage-history.json`，保留 90 天，只存金额、调用数、token 数和额度比例，不存对话内容。每周额度按注入程序观察到的变化累计：Antigravity 没开着时用掉的额度（比如用 agy CLI），会算到下次观察到的那一天。
 
-装上以后，注入程序会补算以前的天数，只补一次：只读打开 Antigravity 自己的对话库（`%USERPROFILE%\.gemini\antigravity\conversations\*.db`），读出每次调用的时间、模型和 token 数，按日期归到每一天，钱按状态栏的单价表算。补算的天没有额度记录（以前没人记过）。补算需要 Node.js 22.5 或更高版本（用到内置的 `node:sqlite`），安装包自带的 `node.exe` 满足。补算用的是 Antigravity 内部的存储格式，它改了格式就补不出来，不影响其他功能。
+装上以后，注入程序会补算以前的天数，只补一次：只读打开 Antigravity 自己的对话库（Windows 是 `%USERPROFILE%\.gemini\antigravity\conversations\*.db`，macOS 是 `~/.gemini/antigravity/conversations/*.db`），读出每次调用的时间、模型和 token 数，按日期归到每一天，钱按状态栏的单价表算。补算的天没有额度记录（以前没人记过）。补算需要 Node.js 22.13 / 23.4 或更高版本（用到内置的 `node:sqlite`，22.5～22.12 要加启动参数才能用）。Windows 安装包自带的 `node.exe` 满足；macOS 用系统装的 Node。版本不够时只跳过补算，面板和每天的实时记录照常工作。补算用的是 Antigravity 内部的存储格式，它改了格式就补不出来，不影响其他功能。
 
 #### 费用怎么算
 
@@ -210,7 +210,7 @@ v1.0.0 安装时直接改了外观（缩放 131%、强对比度、系统字体�
 - Antigravity 主进程打开 Chromium 远程调试端口，端口号写在 `%APPDATA%\Antigravity\DevToolsActivePort`。2.33.0 起要带启动参数才打开，见 [快捷方式参数](#快捷方式参数)。
 - `inject.mjs` 常驻后台，每 3 秒检查一次。发现主窗口后，用 Chrome DevTools Protocol 注入翻译器和状态栏脚本。不修改 Antigravity 的安装文件，Antigravity 自动更新后仍然有效。
 - 状态栏在页面里包一层 `fetch`，旁听应用和本机后台（`language_server`）之间的 grpc-web+json 数据，不改应用发出的请求。另外，它向本机后台查几个只读接口：额度、实际模型名、子代理运行状态、每次调用的 token 用量和调用时间（算费用）。
-- 注入程序每 30 秒把页面里今天的花费存进 `cost-day.json`，并从 `%USERPROFILE%\.gemini\antigravity\brain\` 找出今天动过的对话交给状态栏，所以 Antigravity 重启后今天的金额不会丢。只存对话 ID、金额和按模型的调用数、token 数。同时把当天的汇总和额度变化写进 `usage-history.json`，再把最近 31 天交给状态栏的每日用量面板。
+- 注入程序每 30 秒把页面里今天的花费存进 `cost-day.json`，并从 `%USERPROFILE%\.gemini\antigravity\brain\`（macOS 是 `~/.gemini/antigravity/brain/`）找出今天动过的对话交给状态栏，所以 Antigravity 重启后今天的金额不会丢。只存对话 ID、金额和按模型的调用数、token 数。同时把当天的汇总和额度变化写进 `usage-history.json`，再把最近 31 天交给状态栏的每日用量面板。
 - 默认不写 Antigravity 的设置文件。只有两种情况会写：你选择作者的配色（或换回），会改 `%USERPROFILE%\.gemini\config\config.json` 的两组主题颜色；卸载时选择恢复，会按记下的原值改回这个文件（装过旧版 v1.0.0 的还有 `%APPDATA%\Antigravity\app_storage.json`）。
 - 除了从 Google Fonts 在线加载状态栏的图标，不连接其他网站。
 

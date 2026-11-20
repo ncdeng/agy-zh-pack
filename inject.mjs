@@ -323,15 +323,17 @@ function recentHistory() {
 
 // ---------- 补算以前的用量（2026-11-20 加） ----------
 // 实时记录从 liveFrom 那天才开始。更早的天数从 Antigravity 自己的对话库补算（只读打开，不写）：
-//   %USERPROFILE%\.gemini\antigravity\conversations\<对话 ID>.db，每个对话一个 SQLite 库。
+//   ~/.gemini/antigravity/conversations/<对话 ID>.db（Windows 是 %USERPROFILE%\.gemini\...，macOS 是 /Users/<用户名>/.gemini/...），每个对话一个 SQLite 库。
 //   gen_metadata 表每行是一次模型调用（protobuf）：字段 4 = executionId，1.19 = 模型名，
-//     1.4 = token 用量（1.4.2 输入、1.4.3 输出含思考、1.4.4 缓存写入、1.4.5 缓存读取、1.4.9 思考、1.4.10 回复）；
+//     1.4 = token 用量（1.4.2 输入、1.4.3 输出含思考、1.4.4 缓存写入、1.4.5 缓存读取、1.4.9 思考、1.4.10 回复、1.4.11 请求 ID）；
 //   steps 表的 metadata（protobuf）：字段 1 = 创建时间（Timestamp，1 = 秒），12 = executionId。
-//   两张表按 executionId 对上，得到每次调用的时间、模型和 token。同一个 executionId 只算一次（子代理的调用可能在两个库里都有）。
+//   两张表按 executionId 对上，得到每次调用的时间、模型和 token。一个 executionId 里可能调用好几次，所以按请求 ID 去重
+//   （子代理的调用可能在两个库里都有），没有请求 ID 才用 executionId + token 数。
 // 按本地日期归到 liveFrom 之前的每一天，存成那一天的 raw = { 模型名: [调用数, 输入, 缓存读, 缓存写, 输出] }，
 // 钱由状态栏按它的价目表算（价目表只放在 statusbar.js 一处）。只跑一次，结果记在 history.bf；删掉 bf 再重启注入程序会重新补算。
 // 字段号是 2026-11-20 对着 Antigravity 2.33.0 的数据和状态栏算出的数核对出来的；存储格式变了就补不出来，不影响其他功能。
-// 需要 Node.js 22.5 以上（node:sqlite）；安装包自带的 node.exe 满足。
+// 需要 Node.js 22.13 / 23.4 以上（node:sqlite 从这两个版本起不用加 --experimental-sqlite；22.5～22.12 要加参数才有）。
+// Windows 安装包自带的 node.exe 满足；macOS 用系统装的 Node。版本不够时 import 失败，只跳过补算（history.bf.err 记原因）。
 const CONV_DIR = path.join(os.homedir(), '.gemini', 'antigravity', 'conversations');
 // 最小的 protobuf 读取：返回第一个字段号为 f 的值（varint → 数字，长度型 → Buffer 片段），没有返回 undefined
 function pbGet(buf, f) {
