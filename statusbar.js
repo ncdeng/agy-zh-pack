@@ -940,8 +940,25 @@ function agyStatusBar(CFG) {
     }
     return models;
   };
+  // 补算的天（注入程序从 Antigravity 对话库补的，bf = 1）只有 raw = { 模型名: [调用数, 输入, 缓存读, 缓存写, 输出] }，
+  // 在这里按价目表算钱（按那天中午的价），算成和实时记录一样的 models / usd
+  const priceRaw = (rec, name) => {
+    if (!rec || !rec.raw || rec.models) return rec;
+    const at = new Date(name + 'T12:00:00').getTime();
+    const models = {};
+    let usd = 0;
+    for (const [mid, r] of Object.entries(rec.raw)) {
+      if (!Array.isArray(r)) continue;
+      const cc = callCost({ inputTokens: r[1], cacheReadTokens: r[2], cacheWriteTokens: r[3], outputTokens: r[4] }, mid, at);
+      const pname = cc && cc.pr ? cc.pr.name : 'Other';
+      const m = models[pname] || (models[pname] = [0, 0, 0, 0, 0, 0]);
+      if (cc && cc.usd != null) { m[0] += cc.usd; usd += cc.usd; }
+      m[1] += +r[0] || 0; m[2] += +r[1] || 0; m[3] += +r[2] || 0; m[4] += +r[3] || 0; m[5] += +r[4] || 0;
+    }
+    return Object.assign({}, rec, { models, usd });
+  };
   const dayRecord = (name) => {
-    const h = (S.history && S.history.days && S.history.days[name]) || null;
+    const h = priceRaw((S.history && S.history.days && S.history.days[name]) || null, name);
     if (name !== dayName()) return h;
     const book = loadBook();
     const vals = Object.values(book.by || {}).map(Number).filter((v) => v >= 0);
@@ -988,7 +1005,8 @@ function agyStatusBar(CFG) {
     if (!r) return lb.md + ' ' + lb.wd + '：没有记录';
     const models = Object.entries(r.models || {}).sort((a, b) => b[1][0] - a[1][0]);
     let shown = 0;
-    let s = lb.md + ' ' + lb.wd + '：' + fmtUsd(r.usd || 0) + '（按 API 标准价折算），' + (r.convs || 0) + ' 个对话';
+    let s = lb.md + ' ' + lb.wd + '：' + fmtUsd(r.usd || 0) + '（按 API 标准价折算），' + (r.convs || 0) + ' 个对话' +
+      (r.bf ? '\n这一天是从 Antigravity 的对话库补算的，没有额度记录' : '');
     for (const [n, m] of models) { shown += m[0]; s += '\n  ' + n + '：' + fmtUsd(m[0]) + '（' + m[1] + ' 次调用）'; }
     if ((r.usd || 0) - shown > 0.0005) s += '\n  没有按模型拆开的部分：' + fmtUsd(r.usd - shown);
     for (const [grp, label] of GROUPS) {
@@ -1082,7 +1100,7 @@ function agyStatusBar(CFG) {
     const rows = recs.filter(({ r }) => r && ((r.usd || 0) > 0 || recTokens(r)[0] > 0 || GROUPS.some(([g]) => groupQuota(r, g).wk != null)));
     if (!rows.length) {
       const empty = el('div', 'p-empty', 'no usage recorded yet');
-      empty.title = '从装上这一版起开始记录，以前的天数没有数据';
+      empty.title = '这段时间没有用量记录（以前的天数由注入程序从 Antigravity 对话库补算，补算完会自动出现）';
       panel.append(empty);
     } else {
       const table = el('table');

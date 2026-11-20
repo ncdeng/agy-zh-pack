@@ -62,7 +62,7 @@ const readme = `Antigravity 中文美化包（非官方）
   子代理在跑时，每个子代理单独一行，跑完约 10 秒后自动收起；打开子代理窗口时，显示的是那个子代理自己的数据。
   鼠标停在任何一项上，会显示中文的详细说明。
   点“$x today”会打开每日用量面板：最近 7 天或 30 天每天的折算花费、token、缓存命中率、当天用掉的每周额度。
-  从装上这一版那天开始记录，以前的天数没有数据。
+  装好后会从 Antigravity 自己的对话库（只读）补算以前每天的花费和 token，只补一次；以前的天数没有额度记录。
   费用是按 Google / Anthropic 公开的 API 标准价把 token 折成美元，是折算值，不是实际扣费（订阅按额度扣）。
   状态栏的外观和英文写法借鉴 Haleclipse（哈雷）的 CCometixLine（ccline）的 cometix 主题：https://github.com/Haleclipse/CCometixLine
 

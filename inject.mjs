@@ -174,9 +174,17 @@ function readHistory() {
   if (!history) {
     try { history = JSON.parse(fs.readFileSync(HISTORY_FILE, 'utf8')); } catch { history = null; }
     if (!history || !history.days || typeof history.days !== 'object') history = { v: 1, days: {} };
+    // liveFrom：从哪一天起是注入程序实时记的；更早的天数只能补算（见下面“补算以前的用量”）
+    if (!history.liveFrom) history.liveFrom = Object.keys(history.days).filter((k) => !history.days[k].bf).sort()[0] || dayName();
     historyJson = JSON.stringify(history);
   }
   return history;
+}
+function saveHistory() {
+  const json = JSON.stringify(history);
+  if (json === historyJson) return;
+  historyJson = json;
+  try { fs.writeFileSync(HISTORY_FILE, json); } catch (e) { log(`write usage-history.json failed: ${e.message}`); }
 }
 const r4 = (x) => Math.round(x * 1e4) / 1e4;
 function summarizeBook(book) {
@@ -251,16 +259,124 @@ function updateHistory(book, buckets) {
   if (buckets && buckets.length) noteQuota(day, buckets, (id) => prevQuota(h, today, id));
   const keys = Object.keys(h.days).sort();
   for (const k of keys.slice(0, Math.max(0, keys.length - HISTORY_KEEP_DAYS))) delete h.days[k];
-  const json = JSON.stringify(h);
-  if (json === historyJson) return;
-  historyJson = json;
-  try { fs.writeFileSync(HISTORY_FILE, json); } catch (e) { log(`write usage-history.json failed: ${e.message}`); }
+  saveHistory();
 }
 function recentHistory() {
   const h = readHistory();
   const days = {};
   for (const k of Object.keys(h.days).sort().slice(-HISTORY_PUSH_DAYS)) days[k] = h.days[k];
   return { at: Date.now(), days };
+}
+
+// ---------- 补算以前的用量（2026-11-20 加） ----------
+// 实时记录从 liveFrom 那天才开始。更早的天数从 Antigravity 自己的对话库补算（只读打开，不写）：
+//   %USERPROFILE%\.gemini\antigravity\conversations\<对话 ID>.db，每个对话一个 SQLite 库。
+//   gen_metadata 表每行是一次模型调用（protobuf）：字段 4 = executionId，1.19 = 模型名，
+//     1.4 = token 用量（1.4.2 输入、1.4.3 输出含思考、1.4.4 缓存写入、1.4.5 缓存读取、1.4.9 思考、1.4.10 回复）；
+//   steps 表的 metadata（protobuf）：字段 1 = 创建时间（Timestamp，1 = 秒），12 = executionId。
+//   两张表按 executionId 对上，得到每次调用的时间、模型和 token。同一个 executionId 只算一次（子代理的调用可能在两个库里都有）。
+// 按本地日期归到 liveFrom 之前的每一天，存成那一天的 raw = { 模型名: [调用数, 输入, 缓存读, 缓存写, 输出] }，
+// 钱由状态栏按它的价目表算（价目表只放在 statusbar.js 一处）。只跑一次，结果记在 history.bf；删掉 bf 再重启注入程序会重新补算。
+// 字段号是 2026-11-20 对着 Antigravity 2.33.0 的数据和状态栏算出的数核对出来的；存储格式变了就补不出来，不影响其他功能。
+// 需要 Node.js 22.5 以上（node:sqlite）；安装包自带的 node.exe 满足。
+const CONV_DIR = path.join(process.env.USERPROFILE || '', '.gemini', 'antigravity', 'conversations');
+// 最小的 protobuf 读取：返回第一个字段号为 f 的值（varint → 数字，长度型 → Buffer 片段），没有返回 undefined
+function pbGet(buf, f) {
+  let i = 0;
+  const vi = () => { let x = 0, m = 1, c; do { c = buf[i++]; x += (c & 0x7f) * m; m *= 128; } while (c & 0x80 && i < buf.length); return x; };
+  while (i < buf.length) {
+    const key = vi();
+    const k = Math.floor(key / 8), wt = key % 8;
+    if (k === 0) return undefined;
+    let v;
+    if (wt === 0) v = vi();
+    else if (wt === 2) { const n = vi(); v = buf.subarray(i, i + n); i += n; }
+    else if (wt === 1) i += 8;
+    else if (wt === 5) i += 4;
+    else return undefined;
+    if (k === f && v !== undefined) return v;
+  }
+  return undefined;
+}
+const dayOf = (ms) => {
+  const d = new Date(ms);
+  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+};
+// 读一个对话库，把 before（不含）之前的调用加进 acc：{ 日期: { raw, convs: Set } }；返回 { calls, nodate }
+function readConvDb(DatabaseSync, file, before, seen, acc) {
+  const db = new DatabaseSync(file, { readOnly: true });
+  let calls = 0, nodate = 0;
+  try {
+    const when = new Map();
+    for (const r of db.prepare('select metadata from steps').iterate()) {
+      if (!r.metadata) continue;
+      const m = Buffer.from(r.metadata);
+      const exec = pbGet(m, 12), ts = pbGet(m, 1);
+      if (!Buffer.isBuffer(exec) || !Buffer.isBuffer(ts)) continue;
+      const id = exec.toString('utf8');
+      const sec = pbGet(ts, 1);
+      if (!when.has(id) && sec > 0) when.set(id, sec * 1000);
+    }
+    const conv = path.basename(file, '.db');
+    for (const r of db.prepare('select data from gen_metadata').iterate()) {
+      if (!r.data) continue;
+      const g = Buffer.from(r.data);
+      const exec = pbGet(g, 4), cm = pbGet(g, 1);
+      if (!Buffer.isBuffer(exec) || !Buffer.isBuffer(cm)) continue;
+      const id = exec.toString('utf8');
+      const u = pbGet(cm, 4);
+      if (!Buffer.isBuffer(u)) continue;
+      const inp = pbGet(u, 2) || 0, cw = pbGet(u, 4) || 0, cr = pbGet(u, 5) || 0;
+      const out = Math.max(pbGet(u, 3) || 0, (pbGet(u, 9) || 0) + (pbGet(u, 10) || 0));
+      if (!inp && !cr && !cw && !out) continue; // token 全是 0：多半是失败的请求
+      // 去重：一轮（一个 executionId）里可能调用模型好几次，所以用每次调用自己的请求 ID（1.4.11），没有才用 executionId + token 数
+      const rid = pbGet(u, 11);
+      const key = Buffer.isBuffer(rid) && rid.length ? rid.toString('utf8') : id + ':' + inp + ':' + cr + ':' + out;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const at = when.get(id);
+      if (!(at > 0)) { nodate++; continue; }
+      const day = dayOf(at);
+      if (before && day >= before) continue;
+      const model = Buffer.isBuffer(pbGet(cm, 19)) ? pbGet(cm, 19).toString('utf8').slice(0, 60) : 'unknown';
+      const d = acc[day] || (acc[day] = { raw: {}, convs: new Set() });
+      const x = d.raw[model] || (d.raw[model] = [0, 0, 0, 0, 0]);
+      x[0]++; x[1] += inp; x[2] += cr; x[3] += cw; x[4] += out;
+      d.convs.add(conv);
+      calls++;
+    }
+  } finally { db.close(); }
+  return { calls, nodate };
+}
+async function backfillHistory() {
+  const h = readHistory();
+  if (h.bf) return;
+  let DatabaseSync;
+  try { ({ DatabaseSync } = await import('node:sqlite')); } catch { h.bf = { at: Date.now(), err: 'node:sqlite not available' }; saveHistory(); return; }
+  let names = [];
+  try { names = fs.readdirSync(CONV_DIR).filter((n) => /^[0-9a-f-]{36}\.db$/.test(n)); } catch {}
+  const seen = new Set();
+  const acc = {};
+  let dbs = 0, calls = 0, nodate = 0, errors = 0;
+  for (const n of names) {
+    try {
+      const r = readConvDb(DatabaseSync, path.join(CONV_DIR, n), h.liveFrom, seen, acc);
+      calls += r.calls; nodate += r.nodate; dbs++;
+    } catch { errors++; }
+    await new Promise((r) => setImmediate(r)); // 每读完一个库让出一下，别长时间占住事件循环
+  }
+  let daysAdded = 0;
+  for (const [day, d] of Object.entries(acc)) {
+    if (day >= h.liveFrom || (h.days[day] && !h.days[day].bf)) continue;
+    h.days[day] = { bf: 1, convs: d.convs.size, raw: d.raw };
+    daysAdded++;
+  }
+  h.bf = { at: Date.now(), dbs, calls, nodate, errors, days: daysAdded };
+  log(`usage backfill: ${dbs}/${names.length} conversation dbs, ${calls} calls before ${h.liveFrom}, ${daysAdded} days` +
+    (nodate ? `, ${nodate} calls without time` : '') + (errors ? `, ${errors} dbs failed` : ''));
+  const keys = Object.keys(h.days).sort();
+  for (const k of keys.slice(0, Math.max(0, keys.length - HISTORY_KEEP_DAYS))) delete h.days[k];
+  saveHistory();
 }
 const mtimes = {};
 function loadAssets() {
@@ -455,6 +571,7 @@ async function tick() {
 
 function main() {
   loadAssets();
+  setTimeout(() => { backfillHistory().catch((e) => log(`usage backfill failed: ${e.message}`)); }, 15000); // 启动 15 秒后补算一次（只跑一次）
   const loop = async () => {
     try { await tick(); } catch (e) { log(`tick error: ${e.message}`); }
     setTimeout(loop, POLL_MS);
