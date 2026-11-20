@@ -9,9 +9,8 @@
 // （GetCascadeTrajectoryGeneratorMetadata）、子代理是否还在跑（GetAllCascadeTrajectories）。
 // 计算：首字 = viewableAt − createdAt；速度 = 输出 token ÷（finishedGeneratingAt − viewableAt）。
 //
-// 唯一会改内容的地方：上下文上限（默认关闭）。打开后，应用发给后台的请求里如果带 cascadeConfig，
-// 就补上 checkpointConfig.maxTokenLimit，把压缩线从默认的 256K 提高。关闭时完全不改请求。
-// 开关在注入器同目录的 config.json（{"contextLimit": 512000}），由注入器作为参数 CFG 传进来。
+// 不改应用发出的任何请求。2026-11-09～11-20 曾有一个可选的“解锁 512K 上下文”（给请求补
+// checkpointConfig.maxTokenLimit），11-20 删掉了，原因见下面“上下文上限”一节。
 //
 // 旁听要在应用脚本运行前装好（注入器用 addScriptToEvaluateOnNewDocument 保证），
 // 所以第一次装上后要刷新一次窗口（Ctrl+R）或重启 Antigravity 才有数据。
@@ -22,69 +21,20 @@ function agyStatusBar(CFG) {
   const FIRST = !S.tapped;
   S.tapped = true;
   // early：fetch 包装是不是在应用脚本之前装好的（addScriptToEvaluateOnNewDocument 注入时页面还在 loading）。
-  // 晚到的包装接不住应用已经建好的连接，用量（和打开时的 512K）都不生效；注入器看到 early=false 且窗口刚打开，会自动刷新一次。
+  // 晚到的包装接不住应用已经建好的连接，用量不生效；注入器看到 early=false 且窗口刚打开，会自动刷新一次。
   if (FIRST) S.early = document.readyState === 'loading';
   const WATCH = /LanguageServerService\/(StreamAgentStateUpdates|GetUserStatus|RetrieveUserQuotaSummary)\b/;
 
-  // ---------- 上下文上限（2026-11-09 加） ----------
-  // 后台（language_server.exe 的 utils.GetCheckpointConfig）默认把 Gemini / Claude 的上下文预算压到 256,000，
-  // 超过就压缩。请求的 cascadeConfig.checkpointConfig.maxTokenLimit 可以改这个预算：
-  // agy CLI 在 /model 里选 512K 时发的就是 maxTokenLimit = 512000（CLI 的 buildCascadeConfigInternal）。
-  // 这里照着做：只改 Gemini / Claude 模型（GPT-OSS 等上下文小的模型不动），应用自己已经设了值就不动。
-  // 2026-11-16：原来按界面名匹配，漏了 Orchestrator (Carbon/Argon)（modelId gemini-pro-orchestrator*，
-  // 后台内置默认同样是 256,000）。改成按 modelId 匹配，界面名作后备。
-  // 开关或改写逻辑变了不用刷新窗口（fetch 包装每次都调最新的 S.rewrite 和 S.ctxLimit）；
-  // 但旧版状态栏装的 fetch 包装不会调 S.rewrite，所以第一次升级到这一版要刷新一次窗口。
-  //
-  // 默认关闭（0）。打开后，Antigravity 发给 Google 服务器的上下文会变长，和官方桌面端的默认行为不同。
-  // Antigravity 的服务条款第 6 条禁止干扰服务，可能导致账号被暂停；而且上下文越长，每一轮消耗的额度越多。
-  // 只有用户在 config.json 里自己写了 contextLimit（安装时选“开启”或用“上下文开关.cmd”）才会打开。
-  const CTX_LIMIT = (CFG && CFG.contextLimit) > 0 ? CFG.contextLimit : 0; // 0 = 关闭，不改任何请求；512000 = 和 agy CLI 选 512K 时一样
-  const CTX_IDS = /^(gemini|claude)-/i;       // modelId：gemini-4-carbon-high、gemini-pro-orchestrator、claude-opus-5-5-high……
-  const CTX_LABELS = /^(Gemini|Claude)\b/;    // 界面名（后备）
-  const ctxModel = (m) => !!m && (CTX_IDS.test(m.modelId || '') || CTX_LABELS.test(m.label || ''));
-  S.ctxLimit = CTX_LIMIT;
-  const enc = new TextEncoder();
+  // ---------- 上下文上限：2026-11-20 删掉 ----------
+  // 11-09～11-20 这里可以给 Gemini / Claude 的请求补 cascadeConfig.checkpointConfig.maxTokenLimit = 512000，
+  // 把后台默认 256K 的压缩线提高到 512K。11-20 关掉开关实测（Antigravity 2.33.0）：官方默认已经提高，
+  // Gemini 4 Neon / Carbon 是 512k，Claude Opus 5.5 是 840k；再补 512000 反而把 Claude 压低，所以整段删掉。
+  // 已打开的窗口热更新到这一版后，fetch 包装调的是新的 S.beforeFetch（不再改请求）；这里顺便清掉旧版留下的字段。
+  delete S.rewrite;
+  delete S.ctxLimit;
+  delete S.ctxApplied;
+  const enc = new TextEncoder(); // 自己查额度时拼 grpc-web 帧用
   const dec8 = new TextDecoder();
-  const toBytes = (b) => (b instanceof Uint8Array ? b
-    : b instanceof ArrayBuffer ? new Uint8Array(b)
-    : ArrayBuffer.isView(b) ? new Uint8Array(b.buffer, b.byteOffset, b.byteLength) : null);
-  // 输入请求体（字符串，或 grpc-web 帧：1 字节标志 + 4 字节长度 + JSON），返回改好的新请求体；不用改就返回 null
-  S.rewrite = (body) => {
-    const limit = S.ctxLimit;
-    if (!(limit > 0) || body == null) return null;
-    let text;
-    let framed = false;
-    if (typeof body === 'string') text = body;
-    else {
-      const u = toBytes(body);
-      if (!u || u.length < 2) return null;
-      if (u[0] === 0 && u.length >= 5 && new DataView(u.buffer, u.byteOffset + 1, 4).getUint32(0) === u.length - 5) {
-        framed = true;
-        text = dec8.decode(u.subarray(5));
-      } else if (u[0] === 0x7b) text = dec8.decode(u); // 不带帧头的 JSON
-      else return null;
-    }
-    if (text.indexOf('"cascadeConfig"') < 0) return null;
-    let j;
-    try { j = JSON.parse(text); } catch (e) { return null; }
-    const cc = j && j.cascadeConfig;
-    const pc = cc && cc.plannerConfig;
-    if (!pc || pc.customModelInfoOverride) return null; // 自定义模型不动（CLI 也是这样）
-    const model = S.models.get(pc.planModel);
-    if (!ctxModel(model)) return null;
-    const ck = cc.checkpointConfig || {};
-    if (ck.maxTokenLimit) return null;
-    cc.checkpointConfig = Object.assign({}, ck, { maxTokenLimit: limit });
-    S.ctxApplied = { at: new Date().toISOString(), model: model.label, limit };
-    const out = JSON.stringify(j);
-    if (!framed) return typeof body === 'string' ? out : enc.encode(out);
-    const p = enc.encode(out);
-    const f = new Uint8Array(5 + p.length);
-    new DataView(f.buffer).setUint32(1, p.length);
-    f.set(p, 5);
-    return f;
-  };
 
   // ---------- 数据：解析 grpc-web+json 帧 ----------
   // 旁听和解析都挂在 S 上（S.onResponse / S.tap / S.onMessage），fetch 包装每次调最新版本，
@@ -241,7 +191,7 @@ function agyStatusBar(CFG) {
     return new Response(a, { status: res.status, statusText: res.statusText, headers: res.headers });
   };
 
-  // 请求发出前：记下应用访问后台用的地址和请求头（自己查额度时照用），再按需改写请求体（上下文上限）
+  // 请求发出前：记下应用访问后台用的地址和请求头（自己查额度时照用）。请求本身原样发出。
   S.beforeFetch = (url, init) => {
     if (!init) return init;
     try {
@@ -254,10 +204,6 @@ function agyStatusBar(CFG) {
         if (first && typeof S.fetchQuota === 'function') setTimeout(() => S.fetchQuota(), 1500);
       }
     } catch (e) {}
-    if (init.body != null && typeof S.rewrite === 'function') {
-      const nb = S.rewrite(init.body);
-      if (nb) return Object.assign({}, init, { body: nb });
-    }
     return init;
   };
 
@@ -711,8 +657,6 @@ function agyStatusBar(CFG) {
       const max = Number(ctx.maxContextTokens);
       const pct = Math.round((used / max) * 100);
       const detail = '上下文 ' + used.toLocaleString() + ' / ' + max.toLocaleString() + ' token' + sentTip + compTip + '\n' +
-        (S.ctxLimit > 0 ? '注入器把 Gemini / Claude（含 Orchestrator）的压缩上限设为 ' + S.ctxLimit.toLocaleString() +
-          (S.ctxApplied ? '（最近一次：' + S.ctxApplied.model + '）' : '（这个窗口还没发过消息）') + '\n' : '') +
         (ctx.tokenGroups || []).map((g) => g.name + '：' + Number(g.numTokens).toLocaleString()).join('\n');
       return seg('context', 'data_usage', [pct + '%', fmtK(used) + ' / ' + fmtK(max), compPiece], detail, level(pct, 70, 90, 'context'));
     }
@@ -1031,9 +975,9 @@ function agyStatusBar(CFG) {
     if (subs.length > MAX_SUBS) subRows.push([seg('muted', '', ['+' + (subs.length - MAX_SUBS) + ' more subagents'])]);
 
     const lines = toLines([line1, line2]).concat(toLines(subRows, 'sub'));
-    // fetch 包装晚到（注入器在窗口打开很久后才连上，没有自动刷新）：用量（和打开时的 512K）都不生效，提示手动刷新
+    // fetch 包装晚到（注入器在窗口打开很久后才连上，没有自动刷新）：用量不生效，提示手动刷新
     if (S.early === false) {
-      lines.push(...toLines([[seg('warn', '', ['Press Ctrl+R to reload this window and enable usage stats' + (S.ctxLimit > 0 ? ' and ' + Math.round(S.ctxLimit / 1000) + 'K context' : '')],
+      lines.push(...toLines([[seg('warn', '', ['Press Ctrl+R to reload this window and enable usage stats'],
         '注入程序是在这个窗口打开之后才启动的，需要刷新一次窗口')]]));
     }
     if (!lines.length) {

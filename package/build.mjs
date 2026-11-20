@@ -35,11 +35,10 @@ copy(NODE_LICENSE, 'node-LICENSE.txt');
 const cmd = (action) => ['@echo off', 'chcp 65001 >nul', `"%~dp0app\\node.exe" "%~dp0app\\setup.mjs" ${action}`, 'echo.', 'pause', ''].join('\r\n');
 fs.writeFileSync(path.join(OUT, '一键安装.cmd'), cmd('install'), 'ascii');
 fs.writeFileSync(path.join(OUT, '一键卸载.cmd'), cmd('uninstall'), 'ascii');
-fs.writeFileSync(path.join(OUT, '上下文开关.cmd'), cmd('context'), 'ascii');
 fs.writeFileSync(path.join(OUT, '配色开关.cmd'), cmd('theme'), 'ascii');
 
 // 测试过的 Antigravity 版本（改了要同步 README.md 的“测试情况”和 README.en.md 的“Tested versions”）
-const TESTED = 'Antigravity 桌面版 2.33.0（汉化、状态栏、快捷方式参数）、2.31.2（各个开关），Windows 11';
+const TESTED = 'Antigravity 桌面版 2.33.0（汉化、状态栏、快捷方式参数）、2.31.2（配色开关），Windows 11';
 
 const readme = `Antigravity 中文美化包（非官方）
 
@@ -49,9 +48,8 @@ const readme = `Antigravity 中文美化包（非官方）
 - Antigravity 附加服务条款第 6 条：不得滥用、损害、干扰服务，包括
   “using the Service in connection with products not provided by us”（和非 Google 提供的产品一起使用服务）。
   违反条款可能导致 Antigravity 和 Gemini CLI 账号被暂停或终止。作者不能保证使用本工具不违反条款。
-- 默认情况下，本工具只在本机界面上加汉化和用量状态栏，不改发给 Google 的内容，
-  也不改 Antigravity 的设置（缩放、配色、字体都保持你自己的）。作者的配色是可选项，见下面“配色开关”。
-- 可选的“解锁 512K 上下文”会改变发给 Google 的内容，风险更高，默认不开启，见下面“上下文开关”。
+- 本工具只在本机界面上加汉化和用量状态栏，不改发给 Google 的内容，
+  默认也不改 Antigravity 的设置（缩放、配色、字体都保持你自己的）。作者的配色是可选项，见下面“配色开关”。
 - 本工具依赖 Antigravity 内部的页面结构。Antigravity 更新后，部分功能可能失效或显示英文。
   测试过的版本：${TESTED}。
 
@@ -71,7 +69,7 @@ const readme = `Antigravity 中文美化包（非官方）
 2. 把压缩包解压到任意位置（不要在压缩包里直接双击运行）。
 3. 双击“一键安装.cmd”。
    如果弹出“Windows 已保护你的电脑”，点“更多信息”，再点“仍要运行”。
-4. 安装中会问两个可选项：要不要用作者的配色、要不要解锁 512K 上下文。不确定就直接按回车（都不用）。
+4. 安装中会问一个可选项：要不要用作者的配色。不确定就直接按回车（不用）。
    选了作者的配色时，安装程序会请你关闭 Antigravity，改完再自动打开。
 5. 看到“安装完成”，按任意键关掉窗口就行。
 6. Antigravity 原来就开着的话，不用关；装好后在 Antigravity 里按一次 Ctrl+R 刷新窗口，用量信息就会出现。
@@ -92,12 +90,10 @@ const readme = `Antigravity 中文美化包（非官方）
 - 只改主题颜色，不改缩放、字体和对比度。换上前会记下你原来的颜色，换回或卸载时恢复。
 - 想换上或换回：双击“配色开关.cmd”，按提示输入。换颜色时要先关闭 Antigravity，改完会自动重新打开。
 
-【上下文开关（可选，默认关闭）】
-- Antigravity 默认在对话约 25.6 万 token 时自动压缩上下文（Gemini 和 Claude 模型，包括 Orchestrator）。
-  解锁后压缩线提高到 51.2 万 token，长对话能记住更多内容。
-- 代价：会改变发给 Google 的内容（风险见上），而且上下文越长，每一轮消耗的额度越多。
-- 想打开或关闭：双击“上下文开关.cmd”，按提示输入。不用关 Antigravity，几秒内自动生效。
-- 确认有没有生效：看输入框上方状态栏的上下文一项，上限显示 512k 就是已解锁，256k 就是默认。
+【以前的“上下文开关”已经去掉】
+- 旧版有一个可选的“解锁 512K 上下文”。2026 年 11 月起，Antigravity 官方默认的上下文上限已经提高
+  （实测 Gemini 约 51.2 万 token，Claude Opus 5.5 约 84 万 token），再解锁反而会把 Claude 的上限压低，所以去掉了。
+- 装过旧版的，用新版的“一键安装.cmd”装一次就会删掉旧设置。升级以后，旧文件夹里的“上下文开关.cmd”就不起作用了。
 
 【刷新】
 - 一般不用手动刷新：开机后注入程序会自动启动，Antigravity 刚打开时会自动刷新一次。
@@ -105,11 +101,11 @@ const readme = `Antigravity 中文美化包（非官方）
 
 【卸载】
 双击“一键卸载.cmd”。用过作者的配色（或装过会改外观的旧版 v1.0.0）的，卸载时会问要不要恢复成原来的样子。
-请保留这个文件夹，卸载、切换配色和上下文时都要用。
+请保留这个文件夹，卸载、切换配色时都要用。
 
 【说明】
 - 不修改 Antigravity 本身的文件，Antigravity 自动更新后仍然有效。
-- 安装位置：%LOCALAPPDATA%\\AgyZhPack（上下文开关的设置存在里面的 config.json，原来的配色记在 originals.json，今天的花费记在 cost-day.json）
+- 安装位置：%LOCALAPPDATA%\\AgyZhPack（原来的配色记在 originals.json，今天的花费记在 cost-day.json）
 - 开机自启项：计划任务“AgyZhPack”（登录后立刻在后台运行，约占 60 MB 内存）。
   电脑不允许建计划任务时，会改用“启动”文件夹里的 agy-zh-pack.vbs（开机后要等几分钟才生效）。
 - 用量和额度是向本机的 Antigravity 后台查的。除了从 Google Fonts 在线加载状态栏的图标，不会连接其他网站。

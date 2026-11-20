@@ -6,7 +6,7 @@
 
 **An unofficial Simplified Chinese pack for Antigravity Desktop (Windows)**
 
-Chinese UI translation · usage status bar above the input box · optional color theme · optional 512K context
+Chinese UI translation · usage status bar above the input box · optional color theme
 
 [![Download](https://img.shields.io/github/v/release/ncdeng/agy-zh-pack?label=download&color=D97757)](https://github.com/ncdeng/agy-zh-pack/releases/latest)
 [![License](https://img.shields.io/github/license/ncdeng/agy-zh-pack)](LICENSE)
@@ -14,7 +14,7 @@ Chinese UI translation · usage status bar above the input box · optional color
 
 ![The usage status bar above the input box](assets/statusbar.png)
 
-<sub>Real screenshot: a long conversation with 512K unlocked</sub>
+<sub>Real screenshot: a long conversation</sub>
 
 </div>
 
@@ -25,6 +25,9 @@ Chinese UI translation · usage status bar above the input box · optional color
 > **From Antigravity 2.33.0, old versions of this pack (v1.2.1 and earlier) stop working**: the UI goes back to English and the status bar does not show. The cause: 2.33.0 no longer opens its debugging port by default. Download v1.3.0 or later and run `一键安装.cmd` (install) again. See [Shortcut flag](#shortcut-flag).
 
 > [!NOTE]
+> **"Unlock 512K context" was removed (2026-11-20)**: the official default context limit of Antigravity is now higher, and the unlock would lower the limit for Claude. If you installed an old version and turned the unlock on, download the latest version and run `一键安装.cmd` (install) again. See [Context limit](#context-limit).
+
+> [!NOTE]
 > This pack is made for Chinese users. It translates the Antigravity UI into Simplified Chinese. The status bar text is in English, but its hover tooltips, the installer prompts and the file names in the download are in Chinese. If you only want the status bar, see [Status bar only](#status-bar-only-no-translation).
 
 ## Quick start
@@ -32,11 +35,11 @@ Chinese UI translation · usage status bar above the input box · optional color
 1. Install Antigravity and sign in once.
 2. Download the latest `agy-zh-pack-v<version>.zip` from [Releases](https://github.com/ncdeng/agy-zh-pack/releases/latest). Extract it to any folder. Do not run it from inside the zip.
 3. Double-click `一键安装.cmd` (install). If Windows shows "Windows protected your PC", click "More info", then click "Run anyway".
-4. The installer asks two optional questions: use the author's color theme, and unlock 512K context. If you are not sure, press Enter for both (the answer is "no").
+4. The installer asks one optional question: use the author's color theme. If you are not sure, press Enter (the answer is "no").
 5. You do not need to close Antigravity. After the install, press `Ctrl+R` once in Antigravity. The status bar appears. If Antigravity was started without the debugging port flag this time, the installer asks you, and after Enter it restarts Antigravity once.
 6. From now on, open Antigravity from the Start menu, desktop or taskbar icon. The installer added a start flag to these shortcuts.
 
-To change your choices later, double-click `配色开关.cmd` (color toggle) or `上下文开关.cmd` (context toggle). To uninstall, double-click `一键卸载.cmd` (uninstall).
+To change the color theme later, double-click `配色开关.cmd` (color toggle). To uninstall, double-click `一键卸载.cmd` (uninstall).
 
 ## Defaults
 
@@ -45,7 +48,6 @@ To change your choices later, double-click `配色开关.cmd` (color toggle) or 
 | Chinese UI translation | On | No. It only changes the local display |
 | Usage status bar | On | No. It only reads local data |
 | Author's color theme | Off | No. It only changes the theme colors of your local Antigravity |
-| Unlock 512K context | **Off** | **Yes**, so you must turn it on yourself |
 
 Zoom, font and contrast are never changed.
 
@@ -117,15 +119,22 @@ A warm white color theme in the Claude style. Off by default.
 - The installer asks once (Enter = no). After the install, double-click `配色开关.cmd` (color toggle) to switch it on or off.
 - The colors are stored in Antigravity's own settings file (`customThemeSeedsLight` / `customThemeSeedsDark` in `%USERPROFILE%\.gemini\config\config.json`). Antigravity writes this file back while it runs, so the toggle closes Antigravity first, changes the colors, and opens it again.
 
-### Optional: unlock 512K context
+### Context limit
 
-By default, Antigravity Desktop auto-compacts the context at about 256K tokens (Gemini and Claude models, Orchestrator included). With the unlock, the limit goes up to 512K tokens, so long conversations keep more of their history. It does the same thing as choosing 512K in `/model` in the agy CLI: it adds `checkpointConfig.maxTokenLimit = 512000` to the request.
+v1.1.0 to v1.3.0 had an optional "unlock 512K context". At that time, Antigravity Desktop auto-compacted the context at about 256K tokens. The unlock added `checkpointConfig.maxTokenLimit = 512000` to the request, which raised the limit to 512K tokens.
 
-- **Cost**: what is sent to Google changes, and it is different from what the official desktop app does by default (see [Risks](#risks)). A longer context uses more quota on each turn.
-- **On or off**: the installer asks once (Enter = no). After the install, double-click `上下文开关.cmd` (context toggle). You do not need to close Antigravity. It takes effect in a few seconds, from your next message.
-- **From source**: create `config.json` next to `inject.mjs` with `{"contextLimit": 512000}`. Delete the file or write `0` to turn it off. If the file has an error, it is treated as off.
-- **How to check**: look at the context item in the status bar. A limit of `512k` means unlocked. `256k` means the default.
-- **After you turn it off**: a long conversation that is already above 256K tokens may be compacted on the next turn.
+This feature was removed on 2026-11-20 because the official default limit is now higher. On Antigravity 2.33.0, with the unlock off, a new conversation shows these limits in the status bar:
+
+| Model | Official default limit |
+|---|---|
+| Gemini 4 Neon | 512k |
+| Gemini 4 Carbon | 512k |
+| Claude Opus 5.5 | 840k |
+
+With these defaults, adding 512000 does nothing for Gemini, and it lowers the limit for Claude from 840k to 512k.
+
+- **If you installed an old version and turned the unlock on**: download the latest version and run `一键安装.cmd` (install) again. The installer deletes the old setting (`config.json` in the install folder). After the upgrade, `上下文开关.cmd` (context toggle) in the old folder has no effect.
+- **If you run from source**: `inject.mjs` no longer reads `config.json`. You can delete that file.
 
 ## Shortcut flag
 
@@ -141,22 +150,21 @@ Before Antigravity 2.33.0, the main process always opened a Chromium remote debu
 Read this section before you decide to use the pack.
 
 - Section 6 of the Antigravity additional terms of service says you must not abuse, harm or interfere with the service, including "using the Service in connection with products not provided by us". A breach can get your Antigravity and Gemini CLI accounts suspended or terminated. This project is a third-party tool. The author cannot promise that using it does not break the terms.
-- By default, this project only changes the local UI. The status bar only reads local data and does not change what is sent to Google.
-- Unlocking 512K context changes what is sent to Google. It has the highest risk, so it is off by default and only turns on if you choose it.
+- This project only changes the local UI. The status bar only reads local data and does not change what is sent to Google.
 - This project depends on the internal page structure and APIs of Antigravity. After an Antigravity update, some features can stop working, and new UI text shows in English until the dictionary is updated.
 - The shortcut flag opens a debugging port on `127.0.0.1` on your computer (Antigravity before 2.33.0 opened it by default). Other programs on your computer can use this port to control the Antigravity window. If you do not accept this, do not use this project.
 
 ## What the installer does
 
 - It copies the files to `%LOCALAPPDATA%\AgyZhPack`. The pack includes `node.exe` (the official Node.js program; its license is in `app\node-LICENSE.txt`), so you do not need to install Node.js.
-- It writes your context choice to `%LOCALAPPDATA%\AgyZhPack\config.json`.
+- When you upgrade, it deletes the `config.json` left by an old version (the old "unlock 512K context" setting).
 - It does not change zoom, font or contrast. It changes colors only if you choose the author's color theme, and it saves the old colors in `originals.json`.
 - It creates the scheduled task `AgyZhPack`, which starts the injector in the background when you sign in (normal user rights, about 60 MB of memory). If it cannot create the task, it uses the Startup folder.
 - It adds the start flag `--remote-debugging-port=0` to the Antigravity shortcuts (see [Shortcut flag](#shortcut-flag)). If Antigravity is open without the flag, it asks you before it restarts Antigravity once.
 
 ## Uninstall
 
-Double-click `一键卸载.cmd` (uninstall). It removes the start flag from the shortcuts. If you used the author's color theme, it asks whether to restore your old colors. Keep the extracted folder: you need it to uninstall and to use the color and context toggles.
+Double-click `一键卸载.cmd` (uninstall). It removes the start flag from the shortcuts. If you used the author's color theme, it asks whether to restore your old colors. Keep the extracted folder: you need it to uninstall and to use the color toggle.
 
 <details>
 <summary>If you installed the old v1.0.0</summary>
@@ -172,8 +180,9 @@ v1.0.0 changed the look directly at install time (131% zoom, strong contrast, sy
 
 | Antigravity version | What was tested | Date |
 |---|---|---|
+| 2.33.0 | Official default limits with the unlock off: 512k for Gemini 4 Neon and Gemini 4 Carbon, 840k for Claude Opus 5.5; cost shows in a real Neon conversation (amount not checked); after the unlock was removed, the injector on a real computer restarted and injected again, translation and the status bar work, and Claude Opus 5.5 shows 840k after a new message; in an isolated folder: upgrade from an old version with the unlock on (old setting deleted, with a message), reinstall, uninstall | 2026-11-20 |
 | 2.33.0 | Translation (home page, all settings screens, model menu; added 301 new UI strings from 2.32 and 2.33 and 4 rules); prices for Neon and Orchestrator (Neon) (checked offline); shortcut flag: on a real computer, injection works after a restart from the shortcut, and a start without the flag shows the notification in about 20 seconds; in an isolated folder: install, reinstall, flag removal on uninstall, restart or skip when Antigravity is open, no shortcuts | 2026-11-19 |
-| 2.33.0 | **Not tested**: cost display and 512K in a real Neon conversation; whether the next automatic update rewrites the shortcuts or restarts Antigravity without the flag; color toggle and context toggle (no code change this time) | — |
+| 2.33.0 | **Not tested**: whether the next automatic update rewrites the shortcuts or restarts Antigravity without the flag; color toggle (no code change this time) | — |
 | 2.32.1 | 512K for Orchestrator (Carbon) (tested in both the planning and execution phases), Orchestrator quota groups, cost (per conversation and today, including today's amount after an Antigravity restart), English status bar text, two-line layout | 2026-11-16 |
 | 2.32.1 | **Not tested**: install and color toggle, translation of new UI text in 2.32.1, how today's cost is split for a conversation that runs past midnight | — |
 | 2.31.2 | Translation (all settings screens, conversation page), status bar (model, context, cache, first token, speed, 5-hour and weekly limits), 512K request change, context toggle; in an isolated folder: install, color toggle (switch on, switch back, restore on uninstall, close and reopen Antigravity when it is open, upgrade from v1.0.0), context toggle, uninstall | 2026-11-13 |
@@ -191,9 +200,8 @@ Known gaps in the translation:
 
 - The Antigravity main process opens a Chromium remote debugging port. The port number is in `%APPDATA%\Antigravity\DevToolsActivePort`. From 2.33.0, it opens only with a start flag; see [Shortcut flag](#shortcut-flag).
 - `inject.mjs` runs in the background and checks every 3 seconds. When it finds the main window, it injects the translator and the status bar script through the Chrome DevTools Protocol. It does not change the Antigravity install files, so it keeps working after Antigravity updates itself.
-- The status bar wraps `fetch` in the page and listens to the grpc-web+json data between the app and the local backend (`language_server`). It also calls a few read-only local APIs: quota, the actual model name, subagent status, and the token usage and time of each call (for the cost).
+- The status bar wraps `fetch` in the page and listens to the grpc-web+json data between the app and the local backend (`language_server`). It does not change the requests that the app sends. It also calls a few read-only local APIs: quota, the actual model name, subagent status, and the token usage and time of each call (for the cost).
 - Every 30 seconds, the injector saves today's cost from the page into `cost-day.json`. It also finds the conversations you used today in `%USERPROFILE%\.gemini\antigravity\brain\` and gives them to the status bar, so today's amount is kept when Antigravity restarts. Only conversation IDs and amounts are saved.
-- When the context toggle is on, the same `fetch` wrapper adds `checkpointConfig.maxTokenLimit` to requests that have `cascadeConfig`. When it is off, requests are not changed at all.
 - By default, it does not write Antigravity's settings files. It writes them only in two cases: you choose the author's color theme (or switch back), which changes the two theme color groups in `%USERPROFILE%\.gemini\config\config.json`; or you choose to restore on uninstall, which writes the saved values back to that file (and to `%APPDATA%\Antigravity\app_storage.json` if you installed the old v1.0.0).
 - It does not connect to any website, except Google Fonts for the status bar icons.
 
@@ -208,7 +216,7 @@ node inject.mjs
 
 - The injector stays in the background. If one is already running, a new one exits.
 - From Antigravity 2.33.0, start Antigravity with `--remote-debugging-port=0`. Run `powershell -ExecutionPolicy Bypass -File debug-port.ps1` once to add the flag to the shortcuts, then open Antigravity from a shortcut.
-- After you change `statusbar.js`, `config.json` or a file in `i18n`, open windows update automatically. You do not need to restart. After you change `inject.mjs`, restart the injector.
+- After you change `statusbar.js` or a file in `i18n`, open windows update automatically. You do not need to restart. After you change `inject.mjs`, restart the injector.
 - To add your own styles to the page (for example, a different reply font), put a `style.css` next to `inject.mjs`. The injector loads it automatically. Without this file, no styles are changed.
 - If you change the logic in `i18n/translator.js`, add 1 to its `VERSION`. Open windows then switch to the new translator.
 - If the injector starts long after Antigravity opened, the status bar shows `Press Ctrl+R to reload this window`. Press Ctrl+R once to reload the window.
@@ -230,13 +238,12 @@ This creates `dist/Antigravity中文美化包/` and a zip with the same name. Wh
 |---|---|
 | `inject.mjs` | Injector: connects to the Antigravity debugging port and injects the files below; keeps the ledger for today's cost |
 | `debug-port.ps1` | Adds and removes the start flag `--remote-debugging-port=0` on the Antigravity shortcuts, finds an Antigravity that runs without the flag, shows the notification |
-| `statusbar.js` | Usage status bar, cost estimate and the request change for the context toggle (runs in the page) |
+| `statusbar.js` | Usage status bar and cost estimate (runs in the page) |
 | `i18n/translator.js` | Translator (runs in the page) |
 | `i18n/zh-CN.json` | Dictionary: English UI text → Chinese |
 | `i18n/zh-CN.rules.json` | Regex rules: relative times, thinking time and other text with numbers |
-| `config.json` | Context toggle setting (not in the repo; created by the installer or by you) |
 | `cost-day.json` | Ledger for today's cost (not in the repo; created by the injector) |
-| `package/app/setup.mjs` | Install, uninstall, color toggle, context toggle |
+| `package/app/setup.mjs` | Install, uninstall, color toggle |
 | `package/build.mjs` | Builds the package |
 | `package/third_party/node-LICENSE.txt` | License of the Node.js included in the package |
 | `assets/statusbar.png` | The screenshot at the top of this page |

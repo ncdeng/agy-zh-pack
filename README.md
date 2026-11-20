@@ -6,7 +6,7 @@
 
 **Antigravity 桌面版（Windows）的非官方中文美化包**
 
-界面汉化 · 输入框上方的用量状态栏 · 可选配色 · 可选 512K 上下文
+界面汉化 · 输入框上方的用量状态栏 · 可选配色
 
 [![下载](https://img.shields.io/github/v/release/ncdeng/agy-zh-pack?label=%E4%B8%8B%E8%BD%BD&color=D97757)](https://github.com/ncdeng/agy-zh-pack/releases/latest)
 [![License](https://img.shields.io/github/license/ncdeng/agy-zh-pack)](LICENSE)
@@ -14,7 +14,7 @@
 
 ![输入框上方的用量状态栏](assets/statusbar.png)
 
-<sub>实际截图：一个已解锁 512K 的长对话</sub>
+<sub>实际截图：一个长对话</sub>
 
 </div>
 
@@ -24,16 +24,19 @@
 > [!IMPORTANT]
 > **Antigravity 2.33.0 起，旧版美化包（v1.2.1 及以前）会失效**：界面变回英文，状态栏也不出现。原因是 2.33.0 不再默认打开调试端口。请下载 v1.3.0 或更新的版本，重新运行一次 `一键安装.cmd`。详见 [快捷方式参数](#快捷方式参数)。
 
+> [!NOTE]
+> **“解锁 512K 上下文”已经去掉（2026-11-20）**：Antigravity 官方默认的上下文上限已经提高，再解锁反而会把 Claude 的上限压低。装过旧版并打开过解锁的，请下载最新版重新运行一次 `一键安装.cmd`。详见 [上下文上限](#上下文上限)。
+
 ## 快速开始
 
 1. 安装 Antigravity，并登录一次。
 2. 从 [Releases](https://github.com/ncdeng/agy-zh-pack/releases/latest) 下载最新的 `agy-zh-pack-v<版本>.zip`，解压到任意位置（不要在压缩包里直接运行）。
 3. 双击 `一键安装.cmd`。弹出“Windows 已保护你的电脑”时，点“更多信息”，再点“仍要运行”。
-4. 安装中会问两个可选项：要不要用作者的配色、要不要解锁 512K 上下文。不确定就直接按回车（都不用）。
+4. 安装中会问一个可选项：要不要用作者的配色。不确定就直接按回车（不用）。
 5. Antigravity 开着的话不用关。装好后在 Antigravity 里按一次 `Ctrl+R`，状态栏就会出现。如果它这次启动时没带调试端口参数，安装程序会问你，回车后自动重开一次。
 6. 以后请从开始菜单、桌面或任务栏的图标打开 Antigravity。安装程序给这些快捷方式加了启动参数。
 
-以后想改：双击 `配色开关.cmd` 或 `上下文开关.cmd`。卸载：双击 `一键卸载.cmd`。
+以后想换配色：双击 `配色开关.cmd`。卸载：双击 `一键卸载.cmd`。
 
 ## 默认状态
 
@@ -42,7 +45,6 @@
 | 界面汉化 | 开 | 不会，只改本机显示 |
 | 用量状态栏 | 开 | 不会，只读本机数据 |
 | 作者的配色 | 关 | 不会，只改本机 Antigravity 的主题颜色 |
-| 解锁 512K 上下文 | **关** | **会**，所以要你自己选择打开 |
 
 缩放、字体、对比度一律不改。
 
@@ -114,15 +116,22 @@ Claude 风格的暖白配色，默认不用。
 - 一键安装时会问一次（回车 = 不用）；装好以后双击 `配色开关.cmd` 换上或换回。
 - 颜色存在 Antigravity 自己的设置文件里（`%USERPROFILE%\.gemini\config\config.json` 的 `customThemeSeedsLight` / `customThemeSeedsDark`）。Antigravity 运行时会把这个文件写回去，所以换颜色时要先关闭它，改完会自动重新打开。
 
-### 可选：解锁 512K 上下文
+### 上下文上限
 
-Antigravity 桌面版默认在对话约 25.6 万 token 时自动压缩上下文（Gemini 和 Claude 模型，包括 Orchestrator）。解锁后，压缩线提高到 51.2 万 token，长对话能记住更多内容。做法和 agy CLI 在 `/model` 里选 512K 时一样：给请求补上 `checkpointConfig.maxTokenLimit = 512000`。
+v1.1.0～v1.3.0 有一个可选的“解锁 512K 上下文”：当时 Antigravity 桌面版在对话约 25.6 万 token 时就自动压缩，解锁后给请求补上 `checkpointConfig.maxTokenLimit = 512000`，把压缩线提高到 51.2 万 token。
 
-- **代价**：发给 Google 的内容会变，和官方桌面端的默认行为不同（见 [风险](#风险)）；上下文越长，每一轮消耗的额度越多。
-- **打开或关闭**：一键安装时会问一次（回车 = 不解锁）；装好以后双击 `上下文开关.cmd`。不用关 Antigravity，几秒内生效，从下一条消息开始按新设置计算。
-- **从源码运行**：在 `inject.mjs` 同目录建 `config.json`，内容是 `{"contextLimit": 512000}`；删掉这个文件或写 `0` 就是关闭，文件写错时按关闭处理。
-- **怎么确认**：看状态栏的上下文一项。上限显示 `512k` 就是已解锁，`256k` 就是默认。
-- **关闭以后**：已经超过 25.6 万 token 的长对话，下一轮可能会被自动压缩。
+2026-11-20 起这个功能去掉了。原因是官方默认的上限已经提高：在 Antigravity 2.33.0 上关掉解锁、新开对话，状态栏显示的上限如下。
+
+| 模型 | 官方默认上限 |
+|---|---|
+| Gemini 4 Neon | 512k |
+| Gemini 4 Carbon | 512k |
+| Claude Opus 5.5 | 840k |
+
+这时再补 512000，对 Gemini 没有作用，反而会把 Claude 的上限从 840k 压到 512k。
+
+- **装过旧版、打开过解锁的**：下载最新版，重新运行一次 `一键安装.cmd`，安装程序会删掉旧设置（安装目录里的 `config.json`）。升级以后，旧文件夹里的 `上下文开关.cmd` 就不起作用了。
+- **从源码运行的**：`inject.mjs` 不再读取 `config.json`，可以删掉这个文件。
 
 ## 快捷方式参数
 
@@ -138,22 +147,21 @@ Antigravity 2.33.0 以前，主程序启动时总会打开 Chromium 远程调试
 请先读完这一节，再决定用不用。
 
 - Antigravity 附加服务条款第 6 条规定：不得滥用、损害、干扰服务，包括 “using the Service in connection with products not provided by us”。违反条款可能导致 Antigravity 和 Gemini CLI 账号被暂停或终止。本项目是第三方工具，作者不能保证使用它不违反条款。
-- 默认情况下，本项目只改本机的界面显示，状态栏只读取本机数据，不改发给 Google 的内容。
-- 解锁 512K 上下文会改变发给 Google 的内容，风险最高，所以默认关闭，只有你自己选择才会打开。
+- 本项目只改本机的界面显示，状态栏只读取本机数据，不改发给 Google 的内容。
 - 本项目依赖 Antigravity 内部的页面结构和接口。Antigravity 更新后，部分功能可能失效，新加的界面文字会先显示英文。
 - 快捷方式上的启动参数会在本机 `127.0.0.1` 打开一个调试端口（2.33.0 以前的 Antigravity 本来就默认打开）。本机上的其他程序可以通过这个端口控制 Antigravity 窗口。介意的话请不要使用本项目。
 
 ## 安装程序做了什么
 
 - 把文件复制到 `%LOCALAPPDATA%\AgyZhPack`。安装包自带 `node.exe`（Node.js 官方程序，许可证在 `app\node-LICENSE.txt`），不用另装 Node.js。
-- 把上下文开关的选择写进 `%LOCALAPPDATA%\AgyZhPack\config.json`。
+- 升级安装时，删掉旧版留下的 `config.json`（以前“解锁 512K 上下文”的设置）。
 - 不改缩放、字体、对比度。配色只在你选择“作者的配色”时才改，原来的颜色记在 `originals.json`。
 - 建计划任务 `AgyZhPack`：登录时在后台启动注入程序（普通权限，约占 60 MB 内存）。建不了计划任务时，改用“启动”文件夹。
 - 给 Antigravity 的快捷方式加启动参数 `--remote-debugging-port=0`（见 [快捷方式参数](#快捷方式参数)）。Antigravity 开着但没带参数时，问过你再重开一次。
 
 ## 卸载
 
-双击 `一键卸载.cmd`。快捷方式上的启动参数会去掉。用过作者的配色的，卸载时会问要不要恢复成原来的颜色。请保留解压出来的文件夹，卸载、切换配色和上下文时都要用。
+双击 `一键卸载.cmd`。快捷方式上的启动参数会去掉。用过作者的配色的，卸载时会问要不要恢复成原来的颜色。请保留解压出来的文件夹，卸载、切换配色时都要用。
 
 <details>
 <summary>装过旧版 v1.0.0 的注意</summary>
@@ -169,8 +177,9 @@ v1.0.0 安装时直接改了外观（缩放 131%、强对比度、系统字体�
 
 | Antigravity 版本 | 测过的内容 | 日期 |
 |---|---|---|
+| 2.33.0 | 关掉解锁后看官方默认上限：Gemini 4 Neon、Gemini 4 Carbon 是 512k，Claude Opus 5.5 是 840k；Neon 真实对话的费用有显示（金额没核对）；去掉解锁后，本机注入程序重启并重新注入，汉化和状态栏正常，新消息后 Claude Opus 5.5 显示 840k；隔离目录里测了从开过解锁的旧版升级（删掉旧设置并提示）、重装、卸载 | 2026-11-20 |
 | 2.33.0 | 汉化（首页、设置页各屏、模型菜单，补了 2.32 和 2.33 新增的 301 条文字和 4 条规则）；Neon 和 Orchestrator (Neon) 的单价（离线核对）；快捷方式参数：真机上加参数后重开能注入、不带参数启动时约 20 秒弹出提醒；隔离目录里测了安装、重装、卸载去参数、Antigravity 开着时重开或跳过、没有快捷方式 | 2026-11-19 |
-| 2.33.0 | **没测**：用 Neon 真实对话后的费用显示和 512K；Antigravity 下次自动更新时会不会重写快捷方式、会不会不带参数自己重启；配色开关和上下文开关（这次没改代码） | — |
+| 2.33.0 | **没测**：Antigravity 下次自动更新时会不会重写快捷方式、会不会不带参数自己重启；配色开关（这次没改代码） | — |
 | 2.32.1 | Orchestrator (Carbon) 的 512K（计划阶段和执行阶段都实测）、Orchestrator 的额度分组、费用（对话累计、今天累计，包括 Antigravity 重启后今天的金额不清零）、状态栏英文显示、两行布局 | 2026-11-16 |
 | 2.32.1 | **没测**：一键安装和配色开关、2.32.1 新增界面文字的汉化、跨过 0 点的对话怎么拆分今天的费用 | — |
 | 2.31.2 | 汉化（设置页各屏、对话页）、状态栏（模型、上下文、缓存、首字、速度、5 小时和每周额度）、512K 改写生效、上下文开关切换；隔离目录里测了一键安装、配色开关（换上、换回、卸载恢复、Antigravity 开着时先关再开、从 v1.0.0 升级）、上下文开关、卸载 | 2026-11-13 |
@@ -188,9 +197,8 @@ v1.0.0 安装时直接改了外观（缩放 131%、强对比度、系统字体�
 
 - Antigravity 主进程打开 Chromium 远程调试端口，端口号写在 `%APPDATA%\Antigravity\DevToolsActivePort`。2.33.0 起要带启动参数才打开，见 [快捷方式参数](#快捷方式参数)。
 - `inject.mjs` 常驻后台，每 3 秒检查一次。发现主窗口后，用 Chrome DevTools Protocol 注入翻译器和状态栏脚本。不修改 Antigravity 的安装文件，Antigravity 自动更新后仍然有效。
-- 状态栏在页面里包一层 `fetch`，旁听应用和本机后台（`language_server`）之间的 grpc-web+json 数据。另外，它向本机后台查几个只读接口：额度、实际模型名、子代理运行状态、每次调用的 token 用量和调用时间（算费用）。
+- 状态栏在页面里包一层 `fetch`，旁听应用和本机后台（`language_server`）之间的 grpc-web+json 数据，不改应用发出的请求。另外，它向本机后台查几个只读接口：额度、实际模型名、子代理运行状态、每次调用的 token 用量和调用时间（算费用）。
 - 注入程序每 30 秒把页面里今天的花费存进 `cost-day.json`，并从 `%USERPROFILE%\.gemini\antigravity\brain\` 找出今天动过的对话交给状态栏，所以 Antigravity 重启后今天的金额不会丢。只存对话 ID 和金额。
-- 上下文开关打开时，同一层 `fetch` 包装给带 `cascadeConfig` 的请求补上 `checkpointConfig.maxTokenLimit`；关闭时完全不改请求。
 - 默认不写 Antigravity 的设置文件。只有两种情况会写：你选择作者的配色（或换回），会改 `%USERPROFILE%\.gemini\config\config.json` 的两组主题颜色；卸载时选择恢复，会按记下的原值改回这个文件（装过旧版 v1.0.0 的还有 `%APPDATA%\Antigravity\app_storage.json`）。
 - 除了从 Google Fonts 在线加载状态栏的图标，不连接其他网站。
 
@@ -205,7 +213,7 @@ node inject.mjs
 
 - 注入程序常驻后台。已经有一个在跑时，新启动的会自动退出。
 - Antigravity 2.33.0 起要带 `--remote-debugging-port=0` 启动。先运行一次 `powershell -ExecutionPolicy Bypass -File debug-port.ps1` 给快捷方式加上参数，再从快捷方式打开 Antigravity。
-- 改了 `statusbar.js`、`config.json` 或 `i18n` 下的文件后，已打开的窗口会自动更新，不用重启。改了 `inject.mjs` 要重启注入程序。
+- 改了 `statusbar.js` 或 `i18n` 下的文件后，已打开的窗口会自动更新，不用重启。改了 `inject.mjs` 要重启注入程序。
 - 想给页面加自己的样式（比如换回复字体），在 `inject.mjs` 同目录放一个 `style.css`，注入程序会自动加载；没有这个文件就不改任何样式。
 - 改了 `i18n/translator.js` 的逻辑，要把里面的 `VERSION` 加 1，已打开的窗口才会换用新翻译器。
 - 如果注入程序在 Antigravity 打开很久以后才启动，状态栏会提示 `Press Ctrl+R to reload this window`，按一次 Ctrl+R 刷新窗口就好。
@@ -227,13 +235,12 @@ node package/build.mjs
 |---|---|
 | `inject.mjs` | 注入程序：连 Antigravity 的调试端口，注入下面几个文件；保存今天花费的账本 |
 | `debug-port.ps1` | 给 Antigravity 快捷方式加、去启动参数 `--remote-debugging-port=0`，检查不带参数的 Antigravity，弹出提醒 |
-| `statusbar.js` | 用量状态栏、费用估算和上下文开关的改写（在页面里运行） |
+| `statusbar.js` | 用量状态栏和费用估算（在页面里运行） |
 | `i18n/translator.js` | 翻译器（在页面里运行） |
 | `i18n/zh-CN.json` | 词典：界面英文原文 → 中文 |
 | `i18n/zh-CN.rules.json` | 正则规则：相对时间、思考时长等带数字的文字 |
-| `config.json` | 上下文开关的设置（不在仓库里，由安装程序或你自己创建） |
 | `cost-day.json` | 今天花费的账本（不在仓库里，注入程序自动生成） |
-| `package/app/setup.mjs` | 一键安装、卸载、配色开关、上下文开关 |
+| `package/app/setup.mjs` | 一键安装、卸载、配色开关 |
 | `package/build.mjs` | 生成安装包 |
 | `package/third_party/node-LICENSE.txt` | 安装包自带的 Node.js 的许可证 |
 | `assets/statusbar.png` | 本页顶部的截图 |

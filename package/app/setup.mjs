@@ -1,8 +1,7 @@
-// Antigravity 中文美化包：安装 / 卸载 / 上下文开关 / 配色开关脚本。
-// 由“一键安装.cmd / 一键卸载.cmd / 上下文开关.cmd / 配色开关.cmd”调用：
+// Antigravity 中文美化包：安装 / 卸载 / 配色开关脚本。
+// 由“一键安装.cmd / 一键卸载.cmd / 配色开关.cmd”调用：
 //   node.exe setup.mjs install
 //   node.exe setup.mjs uninstall
-//   node.exe setup.mjs context
 //   node.exe setup.mjs theme
 //
 // 安装做的事（缩放、字体、对比度一律不改；配色只在用户选择时才改）：
@@ -13,11 +12,12 @@
 //   3. 给 Antigravity 的快捷方式（开始菜单、桌面、任务栏固定）加上启动参数 --remote-debugging-port=0
 //      （debug-port.ps1）。Antigravity 2.33.0 起不带这个参数就不开调试端口，注入器连不上；
 //   4. 问用户要不要用作者的配色（默认不用）。要换颜色时才请用户关闭 Antigravity，原值记进 originals.json；
-//   5. 问用户要不要解锁 512K 上下文（默认不解锁），结果写进 AgyZhPack\config.json；
-//   6. 立即启动注入器。Antigravity 开着就提示按 Ctrl+R 刷新（开着但没带调试端口参数的，问过用户后重开一次），
+//   5. 立即启动注入器。Antigravity 开着就提示按 Ctrl+R 刷新（开着但没带调试端口参数的，问过用户后重开一次），
 //      没开（或刚为换配色关掉）就带参数打开它。
 // 卸载时把快捷方式上的参数去掉。
-// 上下文开关（context）只改 config.json，注入器发现文件变了会自动更新已打开的窗口，不用关 Antigravity。
+// 2026-11-09～11-20 还有“解锁 512K 上下文”（安装时问一次，存在 AgyZhPack\config.json，用“上下文开关.cmd”改）。
+// 11-20 实测官方默认已经提高（Gemini 512K、Claude Opus 5.5 840K），再解锁反而压低 Claude，所以删掉了；
+// 升级安装时删掉旧的 config.json（见 OBSOLETE）。
 // 配色开关（theme）改 Antigravity 自己的设置文件，只能在它关闭时改，所以会提示关闭、改完再打开。
 //
 // originals.json：换上作者配色前的原值；装过旧版（v1.0.0）的还有旧版改缩放、对比度、字体前的原值。
@@ -47,13 +47,14 @@ const AGY_EXE = path.join(LOCAL, 'Programs', 'antigravity', 'Antigravity.exe');
 const APP_STORAGE = path.join(ROAMING, 'Antigravity', 'app_storage.json');
 const CONFIG = path.join(os.homedir(), '.gemini', 'config', 'config.json');
 const ORIGINALS = path.join(INSTALL, 'originals.json'); // 只有旧版（v1.0.0）装过才有：当时改外观前的原值
-const USER_CONFIG = path.join(INSTALL, 'config.json'); // 用户设置：目前只有 contextLimit
-const CTX_ON = 512000; // 解锁后的上下文上限，和 agy CLI 在 /model 里选 512K 时一样
+const OLD_USER_CONFIG = path.join(INSTALL, 'config.json'); // 旧版“解锁 512K 上下文”的设置，新版不再用
 const PORT_FILE = path.join(ROAMING, 'Antigravity', 'DevToolsActivePort'); // 带调试端口启动时才有（2.33.0 起不带参数启动会删掉它）
 const DEBUG_ARG = '--remote-debugging-port=0';
 
 const FILES = ['node.exe', 'inject.mjs', 'statusbar.js', 'debug-port.ps1', 'i18n/translator.js', 'i18n/zh-CN.json', 'i18n/zh-CN.rules.json'];
-const OBSOLETE = ['style.css']; // 旧版装过、新版不再带的文件：升级时删掉（回复字体随之恢复成 Antigravity 默认）
+// 旧版装过、新版不再带的文件：升级时删掉。style.css：回复字体随之恢复成 Antigravity 默认；
+// config.json：旧版“解锁 512K 上下文”的设置。
+const OBSOLETE = ['style.css', 'config.json'];
 
 const VBS = [
   "' Antigravity Chinese pack: start the injector hidden at logon.",
@@ -173,33 +174,8 @@ const shortcuts = (mode) => {
 // Antigravity 开着时，这次启动有没有带调试端口
 const debugPortOpen = () => fs.existsSync(PORT_FILE);
 
-// ---------- 上下文上限（可选，默认关闭） ----------
-const readUserConfig = () => { try { return readJson(USER_CONFIG); } catch { return {}; } };
-const ctxEnabled = () => Number(readUserConfig().contextLimit) > 256000;
-const writeCtx = (on) => {
-  const cfg = readUserConfig();
-  cfg.contextLimit = on ? CTX_ON : 0;
-  writeJson(USER_CONFIG, cfg);
-};
-const sayCtxRisk = () => {
-  say('  【可选】解锁 512K 上下文');
-  say('  Antigravity 默认在对话约 25.6 万 token 时自动压缩上下文（Gemini 和 Claude 模型）。');
-  say('  解锁后，压缩线提高到 51.2 万 token，长对话能记住更多内容。');
-  say('  请先了解风险：');
-  say('    - 这项会改变 Antigravity 发给 Google 服务器的内容，和官方桌面端的默认行为不同。');
-  say('      Antigravity 服务条款禁止干扰服务，违反可能导致账号被暂停。');
-  say('    - 上下文越长，每一轮消耗的额度越多，额度会用得更快。');
-  say('  不解锁的话，美化包只改本机的界面显示。');
-  say('  以后想改，双击“上下文开关.cmd”就行。');
-};
-// 问一次要不要解锁；current = 现在的设置，直接回车保持不变（新装时 current 是 false，即默认不解锁）
-const askCtx = async (current) => {
-  const a = await ask(current
-    ? '  现在是“已解锁”。输入 n 回车=关闭（恢复默认），直接回车=保持解锁：'
-    : '  现在是“未解锁”（推荐）。输入 y 回车=解锁，直接回车=保持不解锁：');
-  if (current) return !/^n/i.test(a);
-  return /^y/i.test(a);
-};
+// 旧版有没有打开过“解锁 512K 上下文”（升级时提示一句这个选项已经去掉）
+const oldCtxWasOn = () => { try { return Number(readJson(OLD_USER_CONFIG).contextLimit) > 256000; } catch { return false; } };
 
 // ---------- 作者的配色（可选，默认不用） ----------
 // 只改 ~/.gemini/config/config.json 里 userSettings 的两组主题颜色，不改缩放、字体、对比度。
@@ -297,8 +273,10 @@ async function install() {
       }
     }
   }
+  const hadCtx = oldCtxWasOn();
   for (const f of OBSOLETE) fs.rmSync(path.join(INSTALL, f), { force: true });
   ok('文件已复制到 ' + INSTALL);
+  if (hadCtx) ok('旧版的“解锁 512K 上下文”已经去掉：Antigravity 官方默认的上限已经提高（Gemini 约 51.2 万 token，Claude 更高），不用再解锁。');
   if (Object.keys(readOriginals().appStorage).length) {
     warn('旧版美化包（v1.0.0）改过 Antigravity 的缩放、对比度和字体，新版不再改这些，这次保持不动。');
     warn('想恢复成安装旧版之前的样子：运行“一键卸载”时选择恢复，再重新安装。');
@@ -329,16 +307,9 @@ async function install() {
   const th = await switchTheme(themeWant);
   if (th.changed) ok(themeWant ? '已换成作者的配色' : '已换回原来的配色');
   else ok(themeActive() ? '配色保持不变（作者的配色）' : '配色保持不变（你自己的）');
-
-  // 5. 上下文上限：默认不解锁；重装时默认保持原来的选择
-  say('');
-  sayCtxRisk();
-  const ctxOn = await askCtx(ctxEnabled());
-  writeCtx(ctxOn);
-  ok(ctxOn ? '已解锁 512K 上下文' : '上下文保持默认（不解锁）');
   say('');
 
-  // 6. 启动（换配色时关掉的 Antigravity 在这里重新打开）
+  // 5. 启动（换配色时关掉的 Antigravity 在这里重新打开）
   // Antigravity 开着但这次启动没带调试端口参数：问过用户后关掉，下面带参数重新打开
   let reopen = th.reopen;
   if (!reopen && agyRunning() && !debugPortOpen()) {
@@ -371,7 +342,7 @@ async function install() {
   }
   say('  以后每次开机、每次从开始菜单或桌面图标打开 Antigravity，都会自动生效。');
   say('  如果 Antigravity 自动更新后自己重新启动，界面可能暂时是英文，右下角会弹出提醒，照提醒重新打开一次即可。');
-  say('  请保留这个文件夹：以后卸载、切换配色和上下文，都要用里面的脚本。');
+  say('  请保留这个文件夹：以后卸载、切换配色，都要用里面的脚本。');
   say('');
 }
 
@@ -431,35 +402,6 @@ async function uninstall() {
   say('');
 }
 
-// ---------- 上下文开关 ----------
-async function context() {
-  say('');
-  say('  ===== Antigravity 中文美化包：上下文开关 =====');
-  say('');
-  if (!fs.existsSync(path.join(INSTALL, 'inject.mjs'))) {
-    warn('还没安装美化包，请先双击“一键安装.cmd”。');
-    process.exitCode = 1;
-    return;
-  }
-  sayCtxRisk();
-  say('');
-  const before = ctxEnabled();
-  const after = await askCtx(before);
-  writeCtx(after);
-  if (after === before) {
-    ok('没有改动：' + (after ? '仍然是已解锁' : '仍然是默认（不解锁）'));
-  } else if (after) {
-    ok('已解锁 512K 上下文');
-    say('  已打开的 Antigravity 窗口几秒内会自动更新，从下一条消息开始生效。');
-    say('  想确认的话，看输入框上方状态栏的上下文一项：上限显示 512k 就是生效了。');
-  } else {
-    ok('已关闭，恢复默认上下文');
-    say('  已打开的 Antigravity 窗口几秒内会自动更新，从下一条消息开始按默认上限计算。');
-    say('  已经超过 25.6 万 token 的长对话，下一轮可能会被自动压缩。');
-  }
-  say('');
-}
-
 // ---------- 配色开关 ----------
 async function theme() {
   say('');
@@ -481,7 +423,7 @@ async function theme() {
 }
 
 const cmd = process.argv[2];
-const actions = { install, uninstall, context, theme };
-(actions[cmd] ? actions[cmd]() : Promise.reject(new Error('用法：setup.mjs install|uninstall|context|theme')))
+const actions = { install, uninstall, theme };
+(actions[cmd] ? actions[cmd]() : Promise.reject(new Error('用法：setup.mjs install|uninstall|theme')))
   .catch((e) => { say(''); warn('出错了：' + (e && e.message)); say('  请截图保存这个窗口，反馈问题时附上。'); process.exitCode = 1; })
   .finally(closeInput);
