@@ -998,6 +998,15 @@ function agyStatusBar(CFG) {
     return s;
   };
 
+  // 柱子里一段（一个模型在一天里）的悬停说明
+  const partTip = (nm, name, m, dayUsd) => {
+    const lb = dayLabel(nm);
+    let s = lb.md + ' ' + lb.wd + ' · ' + name + '\n' + fmtUsd(m[0]) + (dayUsd > 0 ? '（占当天 ' + Math.round(m[0] / dayUsd * 100) + '%）' : '');
+    if (m[1]) s += '，' + m[1] + ' 次调用';
+    if (m[2] || m[3] || m[5]) s += '\n输入 ' + fmtK(m[2]) + ' · 缓存读取 ' + fmtK(m[3]) + (m[4] ? ' · 缓存写入 ' + fmtK(m[4]) : '') + ' · 输出 ' + fmtK(m[5]);
+    if (m[2] + m[3] > 0) s += '\n缓存命中 ' + Math.round(m[3] / (m[2] + m[3]) * 100) + '%';
+    return s;
+  };
   const renderPanel = (panel) => {
     const n = S.panelDays;
     const recs = lastDays(n).map((nm) => ({ nm, r: dayRecord(nm) }));
@@ -1031,6 +1040,8 @@ function agyStatusBar(CFG) {
       for (const [name, m] of Object.entries((r && r.models) || {}).filter(([, m]) => m[0] > 0).sort((a, b) => b[1][0] - a[1][0])) {
         const part = el('div', 'p-part k-' + (MODEL_COLOR[name] || 'muted'));
         part.style.height = (m[0] / max * 100) + '%';
+        part.dataset.m = name;
+        part.title = partTip(nm, name, m, r.usd);
         stack.append(part);
         shown += m[0];
         seen.add(name);
@@ -1039,6 +1050,8 @@ function agyStatusBar(CFG) {
       if (rest > 0.0005) {
         const part = el('div', 'p-part k-muted');
         part.style.height = (rest / max * 100) + '%';
+        part.dataset.m = 'Other';
+        part.title = dayLabel(nm).md + ' ' + dayLabel(nm).wd + ' · 没有按模型拆开的部分\n' + fmtUsd(rest);
         stack.append(part);
         seen.add('Other');
       }
@@ -1050,9 +1063,16 @@ function agyStatusBar(CFG) {
     panel.append(chart, labels);
     if (seen.size) {
       const legend = el('div', 'p-legend');
+      // 鼠标停在图例上：每一天里这个模型的那一段都高亮，其他段变淡
       for (const name of [...Object.keys(MODEL_COLOR), 'Other'].filter((x) => seen.has(x))) {
         const it = el('span', 'k-' + (MODEL_COLOR[name] || 'muted'));
         it.append(el('i'), el('span', '', name));
+        it.title = '这段时间里 ' + name + ' 的花费在柱子里高亮';
+        it.addEventListener('mouseenter', () => {
+          chart.classList.add('focus');
+          for (const p of chart.querySelectorAll('.p-part')) p.classList.toggle('hl', p.dataset.m === name);
+        });
+        it.addEventListener('mouseleave', () => chart.classList.remove('focus'));
         legend.append(it);
       }
       panel.append(legend);
@@ -1372,7 +1392,12 @@ ${P} .p-chart{display:flex; align-items:stretch; gap:3px; height:92px; border-bo
 ${P} .p-col{flex:1; min-width:0; display:flex}
 ${P} .p-col:hover{background:color-mix(in srgb, var(--sep) 25%, transparent)}
 ${P} .p-stack{flex:1; display:flex; flex-direction:column-reverse}
-${P} .p-part{background:var(--kc); flex:none}
+${P} .p-part{background:var(--kc); flex:none; transition:opacity .12s, filter .12s}
+/* 悬停：停在哪一段就高亮哪一段，同一天的其他段变淡；停在图例上，每一天里这个模型的那一段高亮 */
+${P} .p-stack:has(.p-part:hover) .p-part:not(:hover){opacity:.35}
+${P} .p-part:hover{filter:brightness(1.12) saturate(1.15); box-shadow:inset 0 0 0 1.5px color-mix(in srgb, #fff 60%, transparent)}
+${P} .p-chart.focus .p-part{opacity:.2}
+${P} .p-chart.focus .p-part.hl{opacity:1; filter:brightness(1.08)}
 ${P} .p-labels{display:flex; gap:3px; margin:.15rem 0 .4rem}
 ${P} .p-labels span{flex:1; min-width:0; overflow:hidden; text-align:center; font-size:10.5px}
 ${P} .p-labels span.today{color:var(--k-cost); font-weight:600}
