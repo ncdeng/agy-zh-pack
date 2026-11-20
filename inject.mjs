@@ -209,8 +209,8 @@ async function syncCost() {
 // ---------- 每天用量历史（2026-11-20 加） ----------
 // usage-history.json：{ v: 1, days: { 'YYYY-MM-DD': { usd, convs, models, quota } } }，保留 90 天，只存数字，不存对话内容。
 //   models：{ 价目名: [美元, 调用数, 输入, 缓存读, 缓存写, 输出] }，由当天账本的 det 合计而来；
-//   quota：{ 桶 ID: { n 组名, w 窗口, f 当天起点, l 最近一次, a 当天重置前已累计, m 当天最高, r 重置时间（毫秒） } }，已用比例 0～1。
-// 状态栏的每日用量面板显示它：当天用掉的每周额度 = a + l − f。
+//   quota：{ 桶 ID: { n 组名, w 窗口, l 最近一次的已用比例, u 当天用掉的（只累计上涨）, m 当天最高, r 重置时间（毫秒） } }，比例 0～1。
+// 状态栏的每日用量面板显示 u。（v1.4.0 的格式是 f 起点 / a 已累计，u = a + l − f；见 migrateQuota。）
 const HISTORY_FILE = path.join(DIR, 'usage-history.json');
 const HISTORY_KEEP_DAYS = 90;
 const HISTORY_PUSH_DAYS = 31;
@@ -246,7 +246,7 @@ function summarizeBook(book) {
   return { usd: Math.round(vals.reduce((a, b) => a + b, 0) * 1e6) / 1e6, convs: vals.filter((v) => v > 0).length, models };
 }
 // 页面里的额度 → [{ id, w, used, reset, name }]；只认今天（本地 0 点以后）查到的。
-// 查到得晚一点没关系：同一个周期里已用比例只增不减，晚记只是把用量算晚一点，不会算错。
+// 查到得晚一点没关系：上涨的部分晚一点记，只是把用量算晚一点。
 // 状态变了（有没有额度、几个桶）记一行日志，方便排查额度一栏为什么是空的。
 let quotaNote = '';
 function quotaBuckets(q) {
@@ -273,21 +273,28 @@ function prevQuota(h, today, id) {
   }
   return null;
 }
-// 记一次额度观察。当天第一次见到某个桶：前面有记录、而且还在同一个额度周期里（重置时间相差不到 1 小时），
-// 就从那条记录最后的值接着算（中间没观察到的用量算到今天）；周期已经换了就从 0 算；以前从没见过就从现在的值算。
-// 当天里已用比例变小、或重置时间往后跳了 1 小时以上，算作重置：把重置前用掉的部分加进 a，再从 0 开始。
+// 记一次额度观察，u = 当天用掉的部分，只累计上涨。
+// 2026-11-20 改：已用比例在同一个周期里也会往回降（实测 Gemini 每周额度 19.04% → 18.34%，重置时间没变，
+// 可能是滑动窗口里旧用量过期），v1.4.0 把“变小”当成重置、把起点清成 0，当天用量会多算成整个周期的用量。
+// 现在只认重置时间往后跳了 1 小时以上才算进入新周期；下降不扣，也不当成重置。
+// 当天第一次见到某个桶：前面有记录、还在同一个周期里，就从那条记录最后的值接着算（中间没观察到的上涨算到今天）；
+// 周期已经换了就把现在的值全算进来（新周期从 0 开始）；以前从没见过就从 0 算。
+// v1.4.0 旧格式（f 起点 / a 已累计）的修正：f 被清成 0 而 a > 0 的，是被误判成重置的，只认 a；否则取 m − f（加上 a）。
+const migrateQuota = (q) => (+q.f === 0 && +q.a > 0 ? +q.a : Math.max(0, (+q.m || 0) - (+q.f || 0)) + (+q.a || 0));
 function noteQuota(day, buckets, prev) {
   if (!day.quota || typeof day.quota !== 'object') day.quota = {};
   for (const b of buckets) {
     let q = day.quota[b.id];
+    if (q && q.u === undefined) { q.u = r4(migrateQuota(q)); delete q.f; delete q.a; }
     if (!q) {
       const p = prev(b.id);
       const same = p && Math.abs((+p.r || 0) - b.reset) < 3600e3;
-      const f = p ? (same ? Math.min(+p.l || 0, b.used) : 0) : b.used;
-      q = day.quota[b.id] = { n: b.name, w: b.w, f: r4(f), l: r4(b.used), a: 0, m: r4(b.used), r: b.reset };
-    } else if (b.used + 0.005 < q.l || b.reset - (+q.r || 0) > 3600e3) {
-      q.a = r4((+q.a || 0) + Math.max(0, q.l - q.f));
-      q.f = 0;
+      const u = p ? (same ? Math.max(0, b.used - (+p.l || 0)) : b.used) : 0;
+      q = day.quota[b.id] = { n: b.name, w: b.w, l: r4(b.used), u: r4(u), m: r4(b.used), r: b.reset };
+    } else if (b.reset - (+q.r || 0) > 3600e3) {
+      q.u = r4((+q.u || 0) + b.used); // 进入新周期：新周期里的已用部分都是新用的
+    } else if (b.used > q.l) {
+      q.u = r4((+q.u || 0) + b.used - q.l); // 只累计上涨；下降不扣
     }
     q.l = r4(b.used);
     q.m = r4(Math.max(+q.m || 0, b.used));

@@ -917,8 +917,8 @@ function agyStatusBar(CFG) {
   // ---------- 每日用量面板（2026-11-20 加）：点状态栏上的 “$x today” 打开 ----------
   // 过去的天数来自注入程序的 usage-history.json：它每 30 秒把最近 31 天推到 S.history，注入时也经 CFG.history 带过来。
   // 一天的记录：{ usd, convs, models: { 价目名: [美元, 调用数, 输入, 缓存读, 缓存写, 输出] }, quota: { 桶 ID: 额度记录 } }。
-  // 额度记录 { n 组名, w 窗口, f 当天起点, l 最近一次, a 当天重置前已累计, m 当天最高 }（都是已用比例 0～1），
-  // 当天用掉的每周额度 = a + l − f（注入程序按观察到的变化累计，见 inject.mjs 的 noteQuota）。今天这一行的钱和 token 用页面里实时的账本。
+  // 额度记录 { n 组名, w 窗口, l 最近一次, u 当天用掉的（只累计上涨）, m 当天最高 }（都是已用比例 0～1），
+  // 注入程序按观察到的变化累计，见 inject.mjs 的 noteQuota。今天这一行的钱和 token 用页面里实时的账本。
   if (CFG && CFG.history && CFG.history.days && (!S.history || (+CFG.history.at || 0) > (+S.history.at || 0))) S.history = CFG.history;
   const PANEL_CLASS = 'agy-usage-panel';
   const P = '.' + PANEL_CLASS;
@@ -972,7 +972,9 @@ function agyStatusBar(CFG) {
     for (let i = 0; i < n; i++) { out.push(d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate())); d.setDate(d.getDate() - 1); }
     return out;
   };
-  const qUsed = (q) => Math.max(0, (+q.a || 0) + (+q.l || 0) - (+q.f || 0));
+  // 当天用掉的：u（2026-11-20 起的格式，只累计上涨）；v1.4.0 的旧格式按注入程序 migrateQuota 同样的规则换算
+  const qUsed = (q) => (q.u != null ? Math.max(0, +q.u || 0)
+    : +q.f === 0 && +q.a > 0 ? +q.a : Math.max(0, (+q.m || 0) - (+q.f || 0)) + (+q.a || 0));
   // 一组额度在某一天：wk = 当天用掉的每周额度（0～1，没有记录是 null），peak = 当天 5 小时额度的最高值
   const groupQuota = (rec, grp) => {
     let wk = null, peak = null, name = '';
