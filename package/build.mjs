@@ -61,6 +61,8 @@ const readme = `Antigravity 中文美化包（非官方）
   第二行：首字时间、生成速度、5 小时额度和每周额度（已用比例、重置时间、和匀速用完的进度差）。
   子代理在跑时，每个子代理单独一行，跑完约 10 秒后自动收起；打开子代理窗口时，显示的是那个子代理自己的数据。
   鼠标停在任何一项上，会显示中文的详细说明。
+  点“$x today”会打开每日用量面板：最近 7 天或 30 天每天的折算花费、token、缓存命中率、当天用掉的每周额度。
+  从装上这一版那天开始记录，以前的天数没有数据。
   费用是按 Google / Anthropic 公开的 API 标准价把 token 折成美元，是折算值，不是实际扣费（订阅按额度扣）。
   状态栏的外观和英文写法借鉴 Haleclipse（哈雷）的 CCometixLine（ccline）的 cometix 主题：https://github.com/Haleclipse/CCometixLine
 
@@ -105,7 +107,7 @@ const readme = `Antigravity 中文美化包（非官方）
 
 【说明】
 - 不修改 Antigravity 本身的文件，Antigravity 自动更新后仍然有效。
-- 安装位置：%LOCALAPPDATA%\\AgyZhPack（原来的配色记在 originals.json，今天的花费记在 cost-day.json）
+- 安装位置：%LOCALAPPDATA%\\AgyZhPack（原来的配色记在 originals.json，今天的花费记在 cost-day.json，每天用量的历史记在 usage-history.json，只存数字）
 - 开机自启项：计划任务“AgyZhPack”（登录后立刻在后台运行，约占 60 MB 内存）。
   电脑不允许建计划任务时，会改用“启动”文件夹里的 agy-zh-pack.vbs（开机后要等几分钟才生效）。
 - 用量和额度是向本机的 Antigravity 后台查的。除了从 Google Fonts 在线加载状态栏的图标，不会连接其他网站。

@@ -62,16 +62,16 @@ const JSON_KEYS = new Set(['dict', 'rules']);
 const assets = { css: '', dict: null, rules: [], translator: '', statusbar: '' };
 const EMPTY = { dict: null, rules: [] };
 
-// 传给状态栏的参数。costDay：今天花费的账本（见下面“今天花费的账本”）。
+// 传给状态栏的参数。costDay：今天花费的账本（见下面“今天花费的账本”）；history：最近 31 天的用量（见“每天用量历史”）。
 function barConfig() {
-  return { costDay: readCostBook() };
+  return { costDay: readCostBook(), history: recentHistory() };
 }
 
 // ---------- 今天花费的账本（2026-11-16 加） ----------
 // 状态栏把每个对话今天的花费记在页面的 window.__agyStats.costBook（{ day, by: { 对话 ID: 美元 } }）。
 // 页面的本地存储按端口分开，Antigravity 每次启动都换端口，存在页面里的账本会丢；后台重启后对话摘要里也只剩打开过的对话。
 // 所以注入程序每 30 秒把页面里的账本读出来，合并进同目录的 cost-day.json（同一个对话取较大的数，换了一天就清空），
-// 注入时再交给状态栏。只存对话 ID 和金额。
+// 注入时再交给状态栏。只存对话 ID、金额和按模型的调用数、token 数（det，2026-11-20 加）。
 const COST_FILE = path.join(DIR, 'cost-day.json');
 const COST_SYNC_MS = 30000;
 const dayName = () => {
@@ -83,9 +83,14 @@ function readCostBook() {
   if (!costBook) {
     try { costBook = JSON.parse(fs.readFileSync(COST_FILE, 'utf8')); } catch { costBook = null; }
   }
-  if (!costBook || costBook.day !== dayName() || !costBook.by || typeof costBook.by !== 'object') costBook = { day: dayName(), by: {} };
+  if (!costBook || costBook.day !== dayName() || !costBook.by || typeof costBook.by !== 'object') costBook = { day: dayName(), by: {}, det: {} };
+  if (!costBook.det || typeof costBook.det !== 'object') costBook.det = {};
   return costBook;
 }
+// det[对话 ID] = { 价目名: [美元, 调用数, 输入, 缓存读, 缓存写, 输出] }；同一个对话取调用数较多的那份
+const detCalls = (d) => { let n = 0; for (const k in d || {}) n += +(d[k] && d[k][1]) || 0; return n; };
+const validDet = (d) => !!d && typeof d === 'object' && !Array.isArray(d) && Object.entries(d).every(([k, r]) =>
+  k.length <= 40 && Array.isArray(r) && r.length === 6 && r.every((x) => Number.isFinite(+x) && +x >= 0));
 function mergeCostBook(b) {
   const book = readCostBook();
   if (!b || b.day !== book.day || !b.by || typeof b.by !== 'object') return;
@@ -95,6 +100,15 @@ function mergeCostBook(b) {
     if (!/^[0-9a-f-]{36}$/.test(id) || !(n >= 0) || book.by[id] >= n) continue;
     book.by[id] = n;
     changed = true;
+  }
+  if (b.det && typeof b.det === 'object') {
+    for (const [id, d] of Object.entries(b.det)) {
+      if (!/^[0-9a-f-]{36}$/.test(id) || !validDet(d)) continue;
+      if (book.det[id] && detCalls(d) < detCalls(book.det[id])) continue;
+      if (JSON.stringify(book.det[id]) === JSON.stringify(d)) continue;
+      book.det[id] = d;
+      changed = true;
+    }
   }
   if (!changed) return;
   try { fs.writeFileSync(COST_FILE, JSON.stringify(book)); } catch (e) { log(`write cost-day.json failed: ${e.message}`); }
@@ -120,18 +134,133 @@ function todayConversations() {
   return out;
 }
 let costSyncAt = 0;
+// 每次同步：交给页面今天动过的对话和最近 31 天的历史，读回页面的账本和额度，再更新历史
+const QUOTA_EXPR = `S.quota && Array.isArray(S.quota.groups) ? { at: S.quota.at, buckets: S.quota.groups.flatMap((g) => (g.buckets || []).map((b) =>
+  ({ id: b.bucketId, w: b.window, rf: b.remainingFraction, reset: b.resetTime, dis: b.disabled, name: g.displayName }))) } : null`;
 async function syncCost() {
   const ids = JSON.stringify(todayConversations());
+  const hist = JSON.stringify(recentHistory());
+  let quota = null;
+  let any = false;
   for (const s of sessions.values()) {
     try {
       const r = await s.send('Runtime.evaluate', {
-        expression: `(() => { const S = window.__agyStats; if (!S) return null; S.todayIds = ${ids}; return JSON.stringify(S.costBook || null); })()`,
+        expression: `(() => { const S = window.__agyStats; if (!S) return null; S.todayIds = ${ids}; S.history = ${hist};
+          return JSON.stringify({ book: S.costBook || null, quota: ${QUOTA_EXPR} }); })()`,
         returnByValue: true,
       });
       const v = r && r.result && r.result.value;
-      if (v) mergeCostBook(JSON.parse(v));
+      if (!v) continue;
+      const o = JSON.parse(v);
+      any = true;
+      if (o.book) mergeCostBook(o.book);
+      if (o.quota && (!quota || o.quota.at > quota.at)) quota = o.quota;
     } catch { /* 窗口刚关或还没注入：下次再读 */ }
   }
+  if (any) updateHistory(readCostBook(), quotaBuckets(quota));
+}
+
+// ---------- 每天用量历史（2026-11-20 加） ----------
+// usage-history.json：{ v: 1, days: { 'YYYY-MM-DD': { usd, convs, models, quota } } }，保留 90 天，只存数字，不存对话内容。
+//   models：{ 价目名: [美元, 调用数, 输入, 缓存读, 缓存写, 输出] }，由当天账本的 det 合计而来；
+//   quota：{ 桶 ID: { n 组名, w 窗口, f 当天起点, l 最近一次, a 当天重置前已累计, m 当天最高, r 重置时间（毫秒） } }，已用比例 0～1。
+// 状态栏的每日用量面板显示它：当天用掉的每周额度 = a + l − f。
+const HISTORY_FILE = path.join(DIR, 'usage-history.json');
+const HISTORY_KEEP_DAYS = 90;
+const HISTORY_PUSH_DAYS = 31;
+let history = null;
+let historyJson = '';
+function readHistory() {
+  if (!history) {
+    try { history = JSON.parse(fs.readFileSync(HISTORY_FILE, 'utf8')); } catch { history = null; }
+    if (!history || !history.days || typeof history.days !== 'object') history = { v: 1, days: {} };
+    historyJson = JSON.stringify(history);
+  }
+  return history;
+}
+const r4 = (x) => Math.round(x * 1e4) / 1e4;
+function summarizeBook(book) {
+  const vals = Object.values(book.by || {}).map(Number).filter((v) => v >= 0);
+  const models = {};
+  for (const d of Object.values(book.det || {})) {
+    for (const [name, r] of Object.entries(d || {})) {
+      const m = models[name] || (models[name] = [0, 0, 0, 0, 0, 0]);
+      for (let i = 0; i < 6; i++) m[i] += +r[i] || 0;
+    }
+  }
+  for (const m of Object.values(models)) m[0] = Math.round(m[0] * 1e6) / 1e6;
+  return { usd: Math.round(vals.reduce((a, b) => a + b, 0) * 1e6) / 1e6, convs: vals.filter((v) => v > 0).length, models };
+}
+// 页面里的额度 → [{ id, w, used, reset, name }]；只认今天（本地 0 点以后）查到的。
+// 查到得晚一点没关系：同一个周期里已用比例只增不减，晚记只是把用量算晚一点，不会算错。
+// 状态变了（有没有额度、几个桶）记一行日志，方便排查额度一栏为什么是空的。
+let quotaNote = '';
+function quotaBuckets(q) {
+  const note = (s) => { if (s !== quotaNote) { quotaNote = s; log('usage history: ' + s); } };
+  if (!q || !Array.isArray(q.buckets)) { note('no quota in page yet'); return null; }
+  const d0 = new Date();
+  d0.setHours(0, 0, 0, 0);
+  if (!(q.at >= d0.getTime())) { note('quota in page is from before today'); return null; }
+  const out = [];
+  for (const b of q.buckets) {
+    const rf = Number(b.rf);
+    if (!b.id || b.dis || !(rf >= 0 && rf <= 1)) continue;
+    const reset = Date.parse(String(b.reset || '').replace(/(\.\d{3})\d+/, '$1'));
+    out.push({ id: String(b.id).slice(0, 80), w: String(b.w || '').slice(0, 20), used: 1 - rf, reset: reset > 0 ? reset : 0, name: String(b.name || '').slice(0, 60) });
+  }
+  note(`quota buckets ${out.length}/${q.buckets.length}: ${out.map((b) => b.id + '(' + b.w + ')').join(', ')}`);
+  return out;
+}
+// 某个桶在今天以前最近的一条记录（最多往前找 14 天）
+function prevQuota(h, today, id) {
+  for (const k of Object.keys(h.days).filter((x) => x < today).sort().reverse().slice(0, 14)) {
+    const q = h.days[k] && h.days[k].quota && h.days[k].quota[id];
+    if (q) return q;
+  }
+  return null;
+}
+// 记一次额度观察。当天第一次见到某个桶：前面有记录、而且还在同一个额度周期里（重置时间相差不到 1 小时），
+// 就从那条记录最后的值接着算（中间没观察到的用量算到今天）；周期已经换了就从 0 算；以前从没见过就从现在的值算。
+// 当天里已用比例变小、或重置时间往后跳了 1 小时以上，算作重置：把重置前用掉的部分加进 a，再从 0 开始。
+function noteQuota(day, buckets, prev) {
+  if (!day.quota || typeof day.quota !== 'object') day.quota = {};
+  for (const b of buckets) {
+    let q = day.quota[b.id];
+    if (!q) {
+      const p = prev(b.id);
+      const same = p && Math.abs((+p.r || 0) - b.reset) < 3600e3;
+      const f = p ? (same ? Math.min(+p.l || 0, b.used) : 0) : b.used;
+      q = day.quota[b.id] = { n: b.name, w: b.w, f: r4(f), l: r4(b.used), a: 0, m: r4(b.used), r: b.reset };
+    } else if (b.used + 0.005 < q.l || b.reset - (+q.r || 0) > 3600e3) {
+      q.a = r4((+q.a || 0) + Math.max(0, q.l - q.f));
+      q.f = 0;
+    }
+    q.l = r4(b.used);
+    q.m = r4(Math.max(+q.m || 0, b.used));
+    q.r = b.reset;
+    if (b.name) q.n = b.name;
+    if (b.w) q.w = b.w;
+  }
+}
+function updateHistory(book, buckets) {
+  const h = readHistory();
+  const today = book.day;
+  const day = h.days[today] || (h.days[today] = {});
+  const s = summarizeBook(book);
+  if (!(day.usd > s.usd)) Object.assign(day, s); // 文件里今天的数更大（账本被重置过）就保留文件里的
+  if (buckets && buckets.length) noteQuota(day, buckets, (id) => prevQuota(h, today, id));
+  const keys = Object.keys(h.days).sort();
+  for (const k of keys.slice(0, Math.max(0, keys.length - HISTORY_KEEP_DAYS))) delete h.days[k];
+  const json = JSON.stringify(h);
+  if (json === historyJson) return;
+  historyJson = json;
+  try { fs.writeFileSync(HISTORY_FILE, json); } catch (e) { log(`write usage-history.json failed: ${e.message}`); }
+}
+function recentHistory() {
+  const h = readHistory();
+  const days = {};
+  for (const k of Object.keys(h.days).sort().slice(-HISTORY_PUSH_DAYS)) days[k] = h.days[k];
+  return { at: Date.now(), days };
 }
 const mtimes = {};
 function loadAssets() {

@@ -68,7 +68,7 @@
 | | `89% · 456k / 512k · compacted 3×` | 上下文：已用比例、已用 / 上限、被自动压缩过几次 |
 | | `450k · 99% hit` | 缓存：最近一次调用从缓存读取的 token 和命中率 |
 | | `$17.81` | 这个对话累计花费（含子代理）。悬停可以看最近一次调用的输入、缓存、输出 token 数和各自的金额 |
-| | `$17.85 today` | 今天累计花费（本地 0 点起，所有对话） |
+| | `$17.85 today` | 今天累计花费（本地 0 点起，所有对话）。点一下打开 [每日用量面板](#每日用量面板) |
 | | `running` | 正在生成 |
 | 第二行 | `6.9s` | 首字时间 |
 | | `169 tok/s` | 生成速度 |
@@ -77,6 +77,16 @@
 | 子代理 | `self · … · running` | 每个在跑的子代理单独一行，跑完约 10 秒后收起。打开子代理窗口时，显示那个子代理自己的数据 |
 
 外观借鉴 Haleclipse（哈雷）的 [CCometixLine](https://github.com/Haleclipse/CCometixLine)（ccline，Claude Code 的状态栏工具）的 cometix 主题：两行显示、彩色图标配同色文字、`|` 分隔各项、`·` 连接同一项里的数字、额度用 10 格进度条。本项目没有用它的代码，状态栏是为 Antigravity 重新写的。
+
+#### 每日用量面板
+
+点状态栏上的 `$x today`，状态栏上方会弹出一个面板。再点一次、点面板外面或按 `Esc` 关掉。
+
+- **柱状图**：最近 7 天或 30 天每天的折算花费，按模型分颜色。鼠标停在柱子上看当天的明细。
+- **表格**：每天一行，有花费、对话数、调用数、输入 / 缓存 / 输出 token、缓存命中率，以及当天用掉了多少个百分点的每周额度（Gemini 组和 Claude 组分开）。
+- **底部**：这段时间的合计和日均；每组额度现在用了多少、这段时间用掉多少，以及按折算花费估算的“1% 每周额度大约值多少钱”。
+
+数据存在安装目录的 `usage-history.json`，保留 90 天，只存金额、调用数、token 数和额度比例，不存对话内容。从装上这一版那天开始记录，以前的天数没有数据。每周额度按注入程序观察到的变化累计：Antigravity 没开着时用掉的额度（比如用 agy CLI），会算到下次观察到的那一天。
 
 #### 费用怎么算
 
@@ -198,7 +208,7 @@ v1.0.0 安装时直接改了外观（缩放 131%、强对比度、系统字体�
 - Antigravity 主进程打开 Chromium 远程调试端口，端口号写在 `%APPDATA%\Antigravity\DevToolsActivePort`。2.33.0 起要带启动参数才打开，见 [快捷方式参数](#快捷方式参数)。
 - `inject.mjs` 常驻后台，每 3 秒检查一次。发现主窗口后，用 Chrome DevTools Protocol 注入翻译器和状态栏脚本。不修改 Antigravity 的安装文件，Antigravity 自动更新后仍然有效。
 - 状态栏在页面里包一层 `fetch`，旁听应用和本机后台（`language_server`）之间的 grpc-web+json 数据，不改应用发出的请求。另外，它向本机后台查几个只读接口：额度、实际模型名、子代理运行状态、每次调用的 token 用量和调用时间（算费用）。
-- 注入程序每 30 秒把页面里今天的花费存进 `cost-day.json`，并从 `%USERPROFILE%\.gemini\antigravity\brain\` 找出今天动过的对话交给状态栏，所以 Antigravity 重启后今天的金额不会丢。只存对话 ID 和金额。
+- 注入程序每 30 秒把页面里今天的花费存进 `cost-day.json`，并从 `%USERPROFILE%\.gemini\antigravity\brain\` 找出今天动过的对话交给状态栏，所以 Antigravity 重启后今天的金额不会丢。只存对话 ID、金额和按模型的调用数、token 数。同时把当天的汇总和额度变化写进 `usage-history.json`，再把最近 31 天交给状态栏的每日用量面板。
 - 默认不写 Antigravity 的设置文件。只有两种情况会写：你选择作者的配色（或换回），会改 `%USERPROFILE%\.gemini\config\config.json` 的两组主题颜色；卸载时选择恢复，会按记下的原值改回这个文件（装过旧版 v1.0.0 的还有 `%APPDATA%\Antigravity\app_storage.json`）。
 - 除了从 Google Fonts 在线加载状态栏的图标，不连接其他网站。
 
@@ -240,6 +250,7 @@ node package/build.mjs
 | `i18n/zh-CN.json` | 词典：界面英文原文 → 中文 |
 | `i18n/zh-CN.rules.json` | 正则规则：相对时间、思考时长等带数字的文字 |
 | `cost-day.json` | 今天花费的账本（不在仓库里，注入程序自动生成） |
+| `usage-history.json` | 每天用量的历史，保留 90 天（不在仓库里，注入程序自动生成） |
 | `package/app/setup.mjs` | 一键安装、卸载、配色开关 |
 | `package/build.mjs` | 生成安装包 |
 | `package/third_party/node-LICENSE.txt` | 安装包自带的 Node.js 的许可证 |

@@ -71,7 +71,7 @@ Two fixed lines above the input box. Each item is a colored icon with text in th
 | | `89% · 456k / 512k · compacted 3×` | Context: percent used, used / limit, and how many times it was auto-compacted |
 | | `450k · 99% hit` | Cache: tokens read from cache in the last call, and the hit ratio |
 | | `$17.81` | Total cost of this conversation (subagents included). Hover to see the input, cache and output tokens of the last call and the cost of each |
-| | `$17.85 today` | Total cost today (from local midnight, all conversations) |
+| | `$17.85 today` | Total cost today (from local midnight, all conversations). Click it to open the [daily usage panel](#daily-usage-panel) |
 | | `running` | The model is generating |
 | Line 2 | `6.9s` | Time to first token |
 | | `169 tok/s` | Output speed |
@@ -80,6 +80,16 @@ Two fixed lines above the input box. Each item is a colored icon with text in th
 | Subagents | `self · … · running` | Each running subagent gets its own line. The line closes about 10 seconds after the subagent ends. In a subagent window, the bar shows that subagent's own data |
 
 The look follows the cometix theme of [CCometixLine](https://github.com/Haleclipse/CCometixLine) (ccline, a status line for Claude Code) by Haleclipse: two lines, colored icons with text in the same color, `|` between items, `·` between numbers in one item, and 10-cell bars for the limits. This project does not use ccline code. The status bar was written again for Antigravity.
+
+#### Daily usage panel
+
+Click `$x today` in the status bar. A panel opens above the status bar. Click it again, click outside the panel, or press `Esc` to close it.
+
+- **Bar chart**: the estimated cost of each day in the last 7 or 30 days, with one color for each model. Hover over a bar to see that day's details.
+- **Table**: one row for each day, with cost, conversations, calls, input / cache / output tokens, cache hit ratio, and how many percentage points of the weekly limit were used that day (Gemini group and Claude group separately).
+- **Bottom lines**: the total and daily average for the period; for each limit group, how much is used now and how much was used in the period, plus an estimate of how much cost one percent of the weekly limit is worth.
+
+The data is kept in `usage-history.json` in the install folder for 90 days. It holds only amounts, call counts, token counts and limit ratios, not conversation content. Recording starts on the day you install this version, so earlier days have no data. The weekly limit is counted from the changes that the injector sees: limit used while Antigravity is closed (for example with the agy CLI) is counted on the next day that the injector sees it.
 
 #### How cost is calculated
 
@@ -201,7 +211,7 @@ Known gaps in the translation:
 - The Antigravity main process opens a Chromium remote debugging port. The port number is in `%APPDATA%\Antigravity\DevToolsActivePort`. From 2.33.0, it opens only with a start flag; see [Shortcut flag](#shortcut-flag).
 - `inject.mjs` runs in the background and checks every 3 seconds. When it finds the main window, it injects the translator and the status bar script through the Chrome DevTools Protocol. It does not change the Antigravity install files, so it keeps working after Antigravity updates itself.
 - The status bar wraps `fetch` in the page and listens to the grpc-web+json data between the app and the local backend (`language_server`). It does not change the requests that the app sends. It also calls a few read-only local APIs: quota, the actual model name, subagent status, and the token usage and time of each call (for the cost).
-- Every 30 seconds, the injector saves today's cost from the page into `cost-day.json`. It also finds the conversations you used today in `%USERPROFILE%\.gemini\antigravity\brain\` and gives them to the status bar, so today's amount is kept when Antigravity restarts. Only conversation IDs and amounts are saved.
+- Every 30 seconds, the injector saves today's cost from the page into `cost-day.json`. It also finds the conversations you used today in `%USERPROFILE%\.gemini\antigravity\brain\` and gives them to the status bar, so today's amount is kept when Antigravity restarts. Only conversation IDs, amounts, and call and token counts for each model are saved. It also writes the day's totals and limit changes to `usage-history.json`, and gives the last 31 days to the daily usage panel.
 - By default, it does not write Antigravity's settings files. It writes them only in two cases: you choose the author's color theme (or switch back), which changes the two theme color groups in `%USERPROFILE%\.gemini\config\config.json`; or you choose to restore on uninstall, which writes the saved values back to that file (and to `%APPDATA%\Antigravity\app_storage.json` if you installed the old v1.0.0).
 - It does not connect to any website, except Google Fonts for the status bar icons.
 
@@ -243,6 +253,7 @@ This creates `dist/Antigravity中文美化包/` and a zip with the same name. Wh
 | `i18n/zh-CN.json` | Dictionary: English UI text → Chinese |
 | `i18n/zh-CN.rules.json` | Regex rules: relative times, thinking time and other text with numbers |
 | `cost-day.json` | Ledger for today's cost (not in the repo; created by the injector) |
+| `usage-history.json` | Daily usage history, kept for 90 days (not in the repo; created by the injector) |
 | `package/app/setup.mjs` | Install, uninstall, color toggle |
 | `package/build.mjs` | Builds the package |
 | `package/third_party/node-LICENSE.txt` | License of the Node.js included in the package |
