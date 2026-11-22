@@ -68,11 +68,11 @@ Two fixed lines above the input box. Each item is a colored icon with text in th
 | Line | Example | Meaning |
 |---|---|---|
 | Line 1 | `gemini-flash-worker-agy` | Model: the name in the UI, plus the model name that the API actually returns. For Gemini models, it turns yellow when the two do not match |
-| | `89% · 456k / 512k · compacted 3×` | Context: percent used, used / limit, and how many times it was auto-compacted |
+| | `89% · 456k / 512k · 3×` | Context: percent used, used / limit. If the conversation was auto-compacted, a small badge with a compress icon follows; the number is how many times (hover to see at which steps) |
 | | `450k · 99% hit` | Cache: tokens read from cache in the last call, and the hit ratio |
 | | `$17.81` | Total cost of this conversation (subagents included). Hover to see the input, cache and output tokens of the last call and the cost of each |
 | | `$17.85 today` | Total cost today (from local midnight, all conversations). Click it to open the [daily usage panel](#daily-usage-panel) |
-| | `running` | The model is generating |
+| | `running` | The model is generating. When it is not generating, this item keeps an empty space, so the bar does not wrap and jump when generation starts or stops |
 | Line 2 | `6.9s` | Time to first token |
 | | `169 tok/s` | Output speed |
 | | `0% · 16:44` | 5-hour limit: percent used (10-cell bar) and reset time |
@@ -190,6 +190,7 @@ v1.0.0 changed the look directly at install time (131% zoom, strong contrast, sy
 
 | Antigravity version | What was tested | Date |
 |---|---|---|
+| 2.34.0 | Status bar (issue #2): hover text now uses our own tooltip box. On a real Mac with a simulated mouse: shown after 0.6 seconds; it stays through 6 forced re-renders in a row; it closes when the mouse moves away; button tooltips in the daily panel work; the compress icon font loads. On Windows after a hot update, the status bar and panel have no native `title`; when not generating, the empty `running` space is on line 1 and the bar has 2 lines. Quick quota retry: after a restart of Antigravity on the Mac, the first request got the limits in 3.3 seconds and no retry was needed. **Not tested**: how the badge looks and wraps in a compacted conversation, the retry when the first quota request fails | 2026-11-22 |
 | 2.34.0 | Translation: added 167 new UI strings and 16 rules from 2.34.0 (Orchestrator settings, permission and sandbox options, plugin panels, sidebar customization, send-key setting, home page suggestion cards; the limit descriptions on the Models settings screen are translated by rules, and the maximum text length for rules went from 80 to 120); after the change, scans of the Windows home and conversation pages and the macOS settings screens (General, Models) show only names and developer options in English | 2026-11-22 |
 | 2.34.0 | macOS on a real computer (13-inch Intel MacBook Pro 2020, macOS 15.7.9, Node.js 24.14.0): `install-agent` installs the LaunchAgent and starts the injector; `launch-agy` starts Antigravity with the debugging port; after injection into the onboarding page, the window reloads once; translation, the status bar (model, today's cost, 5-hour and weekly limits) and the daily usage panel work; fill-in is skipped correctly when there are no conversation databases. **Not tested**: autostart after a restart, the notification when Antigravity starts without the flag, color toggle | 2026-11-22 |
 | 2.33.0 | Official default limits with the unlock off: 512k for Gemini 4 Neon and Gemini 4 Carbon, 840k for Claude Opus 5.5; cost shows in a real Neon conversation (amount not checked); after the unlock was removed, the injector on a real computer restarted and injected again, translation and the status bar work, and Claude Opus 5.5 shows 840k after a new message; in an isolated folder: upgrade from an old version with the unlock on (old setting deleted, with a message), reinstall, uninstall; the daily usage panel shows correctly on a real computer (bar chart, table, both limit columns); the limit counting was tested offline in 8 cases; fill-in: 4270 calls read from 73 conversation databases, and today's numbers match the live status bar ledger item by item (calls and tokens for Carbon, Opus 5.5 and Neon) | 2026-11-20 |

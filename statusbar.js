@@ -247,10 +247,21 @@ function agyStatusBar(CFG) {
     const f = new Uint8Array(5 + p.length);
     new DataView(f.buffer).setUint32(1, p.length);
     f.set(p, 5);
+    const askAt = S.quotaAskAt;
     window.fetch(S.lsService + '/RetrieveUserQuotaSummary', { method: 'POST', headers: S.lsHeaders, body: f })
       .then((r) => r.arrayBuffer())
       .catch(() => {})
-      .then(() => { S.quotaPending = false; });
+      .then(() => {
+        S.quotaPending = false;
+        // 2026-11-22：刚启动时页面可能还停在引导页，第一次查不到额度，每周额度要等 3 分钟后的下一轮才出来。
+        // 查完 1.5 秒还没拿到这次的结果，就改成 20 秒后再查（连续最多 3 次，之后回到每 3 分钟一次）。
+        setTimeout(() => {
+          if (S.quota && S.quota.at >= askAt) { S.quotaQuick = 0; return; }
+          if ((S.quotaQuick || 0) >= 3) return;
+          S.quotaQuick = (S.quotaQuick || 0) + 1;
+          S.quotaAskAt = Date.now() - 150000; // 定时器在离上次查询 170 秒时再查，也就是约 20 秒后
+        }, 1500);
+      });
   };
 
   // 向本机后台发一个一元请求（grpc-web+json），返回解析好的 JSON；拿不到就是 null
@@ -591,7 +602,7 @@ function agyStatusBar(CFG) {
   // 一项：kind 决定颜色（见 CSS 里的 --k-*），icon 是 Material Symbols 图标名
   const seg = (kind, icon, pieces, title, colorKind) => {
     const s = el('span', 'seg k-' + (colorKind || kind));
-    if (title) s.title = title;
+    if (title) s.setAttribute('data-agy-tip', title); // 悬停提示（自己画的，见 setTip 一节；不用系统 title）
     if (icon) s.append(typeof icon === 'string' ? el('span', 'ic', icon) : icon); // 也可以直接传图标元素（如费用的内联 SVG）
     const list = pieces.filter(Boolean);
     list.forEach((p, i) => {
@@ -675,11 +686,17 @@ function agyStatusBar(CFG) {
     return out;
   };
   const promptTokens = (mu) => (Number(mu.inputTokens) || 0) + (Number(mu.cacheReadTokens) || 0) + (Number(mu.cacheWriteTokens) || 0);
-  // comps：后台压缩过上下文的步骤序号（状态流的 compactionInfo）。有压缩就在上下文这一项后面标“已压缩 N 次”。
+  // comps：后台压缩过上下文的步骤序号（状态流的 compactionInfo）。有压缩就在上下文这一项后面放一个小徽章（图标 + 次数）。
+  // 2026-11-22 以前是文字 “compacted N×”，太宽，会把行末的 running 挤到下一行（issue #2）。
+  const compBadge = (n) => {
+    const b = el('span', 'comp');
+    b.append(el('span', 'ic', 'compress'), n + '×');
+    return b;
+  };
   const ctxSeg = (ctx, mu, comps) => {
     const n = Array.isArray(comps) ? comps.length : 0;
-    const compPiece = n ? el('span', 'tx comp', 'compacted ' + n + '×') : null;
-    const compTip = n ? '\n后台在第 ' + comps.join('、') + ' 步压缩过上下文' : '\n这个对话还没有被压缩过';
+    const compPiece = n ? compBadge(n) : null;
+    const compTip = n ? '\n已压缩 ' + n + ' 次：后台在第 ' + comps.join('、') + ' 步压缩过上下文' : '\n这个对话还没有被压缩过';
     const sent = mu ? promptTokens(mu) : 0;
     const sentTip = sent > 0 ? '\n最近一次调用实际发给模型：' + sent.toLocaleString() + ' token（输入 + 缓存读写）' : '';
     if (ctx && Number(ctx.maxContextTokens) > 0) {
@@ -699,8 +716,10 @@ function agyStatusBar(CFG) {
     const hit = Math.round((cache / (cache + input)) * 100);
     return seg('cache', 'database', [fmtK(cache), hit + '% hit'], '最近一次调用中，从缓存读取的 token 和命中率');
   };
-  const runSeg = (text) => {
-    const g = el('span', 'seg k-run');
+  // idle：不在生成，只占位置不显示（见 CSS 的 .seg.k-run.idle）
+  const runSeg = (text, idle) => {
+    const g = el('span', 'seg k-run' + (idle ? ' idle' : ''));
+    if (idle) g.setAttribute('aria-hidden', 'true');
     g.append(el('span', 'pulse'), el('span', 'tx', text || 'running'));
     return g;
   };
@@ -1075,18 +1094,18 @@ function agyStatusBar(CFG) {
     const total = usedDays.reduce((a, { r }) => a + r.usd, 0);
     const head = el('div', 'p-head');
     const title = el('span', 'p-title', 'Daily usage');
-    title.title = '每天的用量：钱按 API 标准价折算（不是实际扣费），额度是当天用掉的每周额度';
+    setTip(title, '每天的用量：钱按 API 标准价折算（不是实际扣费），额度是当天用掉的每周额度');
     head.append(title);
     for (const k of [7, 30]) {
       const b = el('button', 'p-btn' + (k === n ? ' on' : ''), k + 'd');
-      b.title = '最近 ' + k + ' 天';
+      setTip(b, '最近 ' + k + ' 天');
       b.addEventListener('click', () => { S.panelDays = k; renderPanel(panel); });
       head.append(b);
     }
     const first = dayLabel(recs[recs.length - 1].nm), last = dayLabel(recs[0].nm);
     head.append(el('span', 'p-range', first.md + ' – ' + last.md + ' · ' + fmtUsd(total)));
     const x = el('button', 'p-btn p-x', '×');
-    x.title = '关闭（Esc）';
+    setTip(x, '关闭（Esc）');
     x.addEventListener('click', closePanel);
     head.append(el('span', 'p-fill'), x);
     panel.append(head);
@@ -1155,7 +1174,7 @@ function agyStatusBar(CFG) {
       const line = el('div', 'p-avg');
       line.style.bottom = (avg / max * 100) + '%';
       line.append(el('span', '', 'avg ' + fmtUsdShort(avg)));
-      line.title = '有用量的 ' + usedDays.length + ' 天平均每天 ' + fmtUsd(avg);
+      setTip(line, '有用量的 ' + usedDays.length + ' 天平均每天 ' + fmtUsd(avg));
       bars.append(line);
     }
     chart.append(bars);
@@ -1183,7 +1202,7 @@ function agyStatusBar(CFG) {
     const rows = recs.filter(({ r }) => r && ((r.usd || 0) > 0 || recTokens(r)[0] > 0 || GROUPS.some(([g]) => groupQuota(r, g).wk != null)));
     if (!rows.length) {
       const empty = el('div', 'p-empty', 'no usage recorded yet');
-      empty.title = '这段时间没有用量记录（以前的天数由注入程序从 Antigravity 对话库补算，补算完会自动出现）';
+      setTip(empty, '这段时间没有用量记录（以前的天数由注入程序从 Antigravity 对话库补算，补算完会自动出现）');
       panel.append(empty);
     } else {
       const table = el('table');
@@ -1192,7 +1211,7 @@ function agyStatusBar(CFG) {
       const heads = [['Date', ''], ['Cost', '按 API 标准价折算的花费（不是实际扣费）'], ['Convs', '当天动过的对话数（含子代理）'], ['Calls', '模型调用次数'],
         ['In', '输入 token（不含缓存）'], ['Cache', '缓存读取 token'], ['Out', '输出 token（含思考）'], ['Hit', '缓存命中率 = 缓存读取 ÷（缓存读取 + 输入）'],
         ...GROUPS.map(([, label]) => [label + ' wk', '当天用掉了多少个百分点的' + label + '每周额度'])];
-      for (const [h, tip] of heads) { const th = el('th', '', h); if (tip) th.title = tip; hr.append(th); }
+      for (const [h, t] of heads) { const th = el('th', '', h); setTip(th, t); hr.append(th); }
       thead.append(hr);
       const tbody = el('tbody');
       for (const { nm, r } of rows) {
@@ -1208,8 +1227,8 @@ function agyStatusBar(CFG) {
         for (const [grp] of GROUPS) {
           const q = groupQuota(r, grp);
           const td = el('td', 'q', q.wk == null ? '—' : '+' + pctTx(q.wk));
-          if (q.peak != null) td.title = '5 小时额度当天最高 ' + pctTx(q.peak);
-          else if (r.bf) td.title = '补算的天没有额度记录';
+          if (q.peak != null) setTip(td, '5 小时额度当天最高 ' + pctTx(q.peak));
+          else if (r.bf) setTip(td, '补算的天没有额度记录');
           tr.append(td);
         }
         const col = cols.get(nm);
@@ -1228,7 +1247,7 @@ function agyStatusBar(CFG) {
     // 底部：这段时间的合计；每组额度：现在用了多少、这段时间用掉多少、折算下来 1% 每周额度大约值多少钱
     const foot = el('div', 'p-foot');
     const l1 = el('div', 'k-cost', 'last ' + n + 'd ' + fmtUsd(total) + (usedDays.length ? ' · avg ' + fmtUsd(total / usedDays.length) + '/day · ' + usedDays.length + ' days' : ''));
-    l1.title = '最近 ' + n + ' 天合计（按 API 标准价折算）；平均值只算有用量的天';
+    setTip(l1, '最近 ' + n + ' 天合计（按 API 标准价折算）；平均值只算有用量的天');
     foot.append(l1);
     for (const [grp, label] of GROUPS) {
       let wk = 0, wkDays = 0, usd = 0;
@@ -1246,10 +1265,10 @@ function agyStatusBar(CFG) {
       if (wkDays) parts.push('+' + pctTx(wk) + ' in ' + n + 'd');
       if (wk >= 0.02 && usd > 0) parts.push('≈ ' + fmtUsd(usd / (wk * 100)) + ' per 1%');
       const line = el('div', 'k-quota', parts.join(' · '));
-      line.title = label + ' 组每周额度：现在已用 ' + (now != null ? Math.round(now * 100) + '%' : '（还没查到）') +
+      setTip(line, label + ' 组每周额度：现在已用 ' + (now != null ? Math.round(now * 100) + '%' : '（还没查到）') +
         (wkDays ? '；最近 ' + n + ' 天里有记录的 ' + wkDays + ' 天共用掉 ' + pctTx(wk) : '') +
         (wk >= 0.02 && usd > 0 ? '\n这几天' + label + '模型折算 ' + fmtUsd(usd) + '，平均每 1% 每周额度约 ' + fmtUsd(usd / (wk * 100)) +
-          '\n只是估算：钱按 API 标准价折算；额度按注入程序观察到的变化累计，Antigravity 没开着时用掉的额度会算到下次观察到的那一天' : '');
+          '\n只是估算：钱按 API 标准价折算；额度按注入程序观察到的变化累计，Antigravity 没开着时用掉的额度会算到下次观察到的那一天' : ''));
       foot.append(line);
     }
     panel.append(foot);
@@ -1299,6 +1318,7 @@ function agyStatusBar(CFG) {
     if (!p) return;
     placePanel(p);
     try { renderPanel(p); } catch (e) { p.textContent = 'usage panel error: ' + e.message; }
+    tipAfterRender();
   };
 
   const MAX_SUBS = 4;
@@ -1398,7 +1418,7 @@ function agyStatusBar(CFG) {
     // 还没有模型调用（首页或新对话刚开始）：显示模型按钮当前选中的模型
     const selKey = md ? '' : selectedKey();
     const line1 = [modelSeg(md, selKey), ctxSeg(rc && rc.ctx, mu, rc && rc.compactions), cacheSeg(mu),
-      ...safeCost(md, root ? treeIds(root) : []), root && isRunning(root) ? runSeg() : null].filter(Boolean);
+      ...safeCost(md, root ? treeIds(root) : []), root ? runSeg('', !isRunning(root)) : null].filter(Boolean);
     const line2 = [...callSegs(md), ...quotaPieces(modelKey(md) || selKey)];
     // 还没有模型调用时只有“模型 + 额度”，合成一行
     if (!md && line2.length) line1.push(...line2.splice(0));
@@ -1438,10 +1458,12 @@ function agyStatusBar(CFG) {
 
   const BAR_CLASS = 'agy-usage-bar';
   const B = '.' + BAR_CLASS;
+  const TIP_CLASS = 'agy-tip'; // 悬停提示框（见 setTip 一节）
+  const T = '.' + TIP_CLASS;
   const style = document.createElement('style');
   style.textContent = `
-@import url("https://fonts.googleapis.com/css2?family=Material+Symbols+Rounded:opsz,wght,FILL,GRAD@20..24,400..500,0..1,0&icon_names=auto_awesome,calendar_month,check,data_usage,database,event,hourglass_top,schedule,smart_toy,speed,timelapse&display=block");
-${B}, ${P}{
+@import url("https://fonts.googleapis.com/css2?family=Material+Symbols+Rounded:opsz,wght,FILL,GRAD@20..24,400..500,0..1,0&icon_names=auto_awesome,calendar_month,check,compress,data_usage,database,event,hourglass_top,schedule,smart_toy,speed,timelapse&display=block");
+${B}, ${P}, ${T}{
   --k-model:#5c64d6; --k-context:#8839ef; --k-cache:#1b8fbf; --k-timing:#c4566a; --k-tokens:#158a90;
   --k-quota:#e0620d; --k-warn:#c9800f; --k-crit:#d20f39; --k-run:#40a02b; --k-muted:#8c8fa1;
   --k-agent:#df8e1d; --k-cost:#c03d8e; --k-argon:#1e66f5;
@@ -1453,7 +1475,8 @@ ${B}{
   font-size:12px; line-height:1.65; font-weight:500; font-variant-numeric:tabular-nums;
   color:var(--k-muted); user-select:text; cursor:default;
 }
-body.theme-dark ${B}, :root[style*="color-scheme: dark"] ${B}, body.theme-dark ${P}, :root[style*="color-scheme: dark"] ${P}{
+body.theme-dark ${B}, :root[style*="color-scheme: dark"] ${B}, body.theme-dark ${P}, :root[style*="color-scheme: dark"] ${P},
+body.theme-dark ${T}, :root[style*="color-scheme: dark"] ${T}{
   --k-model:#b4befe; --k-context:#cba6f7; --k-cache:#89dceb; --k-timing:#f2cdcd; --k-tokens:#94e2d5;
   --k-quota:#fab387; --k-warn:#f9e2af; --k-crit:#f38ba8; --k-run:#a6e3a1; --k-muted:#7f849c;
   --k-agent:#f9e2af; --k-cost:#f5c2e7; --k-argon:#89b4fa; --p-bg:#1e1e2e; --k-text:#cdd6f4;
@@ -1471,7 +1494,12 @@ ${B} .ic.svg{display:inline-flex; align-items:center; overflow:visible}
 ${B} .ic.svg svg{width:1em; height:1em; display:block}
 ${B} .dot{margin:0 .45em; opacity:.55}
 ${B} .real{opacity:.72; font-weight:400}
-${B} .comp{color:var(--k-warn); font-weight:600}
+/* 压缩过上下文：小徽章（图标 + 次数），详细说明在上下文这一项的悬停提示里（issue #2：原来的 “compacted 1×” 太宽，会把 running 挤到下一行） */
+${B} .comp{display:inline-flex; align-items:center; color:var(--k-warn); font-weight:600; padding:0 .3em 0 .15em; border-radius:4px; line-height:1.35;
+  background:color-mix(in srgb, var(--k-warn) 15%, transparent)}
+${B} .comp .ic{font-size:13px; margin-right:.1em}
+/* running 一直占着位置，空闲时只是看不见：开始、结束生成时状态栏的行数不变，不会上下跳 */
+${B} .seg.k-run.idle{visibility:hidden}
 ${B} .pace-ok{color:var(--k-run)}
 ${B} .pace-hi{color:var(--k-warn)}
 ${B} .real.odd{opacity:1; font-weight:600; color:var(--k-warn)}
@@ -1554,7 +1582,96 @@ ${P} .p-card .dim{color:var(--k-muted)}
 ${P} .p-card .q{color:var(--k-quota)}
 ${P} .k-model{--kc:var(--k-model)} ${P} .k-context{--kc:var(--k-context)} ${P} .k-cache{--kc:var(--k-cache)} ${P} .k-tokens{--kc:var(--k-tokens)}
 ${P} .k-quota{--kc:var(--k-quota)} ${P} .k-cost{--kc:var(--k-cost)} ${P} .k-run{--kc:var(--k-run)} ${P} .k-argon{--kc:var(--k-argon)} ${P} .k-muted{--kc:var(--k-muted)}
+/* 悬停提示（代替系统 title，见 setTip 一节）：挂在 body 上，不挡鼠标；背景色由脚本取元素一带的实际底色 */
+${T}{position:fixed; z-index:2147483600; pointer-events:none; box-sizing:border-box; max-width:min(440px, calc(100vw - 16px));
+  padding:.35rem .6rem .4rem; border:1px solid var(--sep); border-radius:8px; background:var(--p-bg); box-shadow:0 6px 20px rgba(0,0,0,.18);
+  font-family:"Google Sans Code","Cascadia Mono",Consolas,ui-monospace,"Microsoft YaHei UI",monospace;
+  font-size:11.5px; line-height:1.55; font-weight:500; color:var(--k-text); white-space:pre-line; overflow-wrap:anywhere}
 `;
+
+  // ---------- 悬停提示（2026-11-22 加，issue #2）----------
+  // 以前用系统 title 提示：生成回复时状态栏每 300 毫秒整个重画，鼠标下面的元素被换掉，系统提示的计时一直重来，
+  // 就弹不出来；macOS 的系统提示本来就慢，更明显。改成自己画的提示框：挂在 body 上，文字放在 data-agy-tip 里；
+  // 每次重画后按鼠标最后的位置重新找元素，提示框不会被重画打断，里面的数字也跟着更新。状态栏和每日面板共用。
+  const setTip = (e, text) => { if (e && text) e.setAttribute('data-agy-tip', text); return e; };
+  const tip = { el: null, target: null, x: -1, y: -1, timer: 0, hideAt: 0 };
+  const tipBox = () => {
+    if (!tip.el || !tip.el.isConnected) {
+      tip.el = el('div', TIP_CLASS);
+      tip.el.setAttribute('data-agy-no-i18n', '');
+      tip.el.setAttribute('role', 'tooltip');
+      tip.el.hidden = true;
+      document.body.append(tip.el);
+    }
+    return tip.el;
+  };
+  const tipOwner = (node) => {
+    const t = node && node.closest ? node.closest('[data-agy-tip]') : null;
+    return t && t.closest(B + ',' + P) ? t : null;
+  };
+  const hideTip = () => {
+    clearTimeout(tip.timer);
+    tip.timer = 0;
+    tip.target = null;
+    if (tip.el && !tip.el.hidden) { tip.el.hidden = true; tip.hideAt = Date.now(); }
+  };
+  // 显示在元素上方（状态栏贴着输入框，下方没地方）；上方放不下才放下方
+  const placeTip = () => {
+    const t = tip.target;
+    if (!t || !t.isConnected) { hideTip(); return; }
+    const box = tipBox();
+    const text = t.getAttribute('data-agy-tip') || '';
+    if (box.textContent !== text) box.textContent = text;
+    const bg = solidBg(t);
+    if (bg) box.style.background = bg;
+    box.hidden = false;
+    const r = t.getBoundingClientRect();
+    const w = box.offsetWidth, h = box.offsetHeight;
+    const x = Math.max(8, Math.min(r.left, window.innerWidth - w - 8));
+    let y = r.top - h - 6;
+    if (y < 8) y = Math.min(r.bottom + 6, window.innerHeight - h - 8);
+    box.style.left = x + 'px';
+    box.style.top = y + 'px';
+  };
+  const tipMove = (ev) => {
+    tip.x = ev.clientX;
+    tip.y = ev.clientY;
+    const t = tipOwner(ev.target);
+    if (t === tip.target) return;
+    if (!t) { hideTip(); return; }
+    const showing = tip.el && !tip.el.hidden;
+    tip.target = t;
+    clearTimeout(tip.timer);
+    tip.timer = 0;
+    // 正在显示，或刚关掉不到 0.6 秒：直接换成这一项（像系统提示那样连着看）；否则停 0.35 秒再显示
+    if (showing || Date.now() - tip.hideAt < 600) { placeTip(); return; }
+    tip.timer = setTimeout(() => { tip.timer = 0; if (tip.target) placeTip(); }, 350);
+  };
+  // 状态栏或面板重画以后调用：鼠标下的元素换成了新的，就按鼠标位置重新找
+  const tipAfterRender = () => {
+    if (!tip.target || tip.target.isConnected) return;
+    const t = tip.x >= 0 ? tipOwner(document.elementFromPoint(tip.x, tip.y)) : null;
+    if (!t) { hideTip(); return; }
+    tip.target = t;
+    if (tip.el && !tip.el.hidden) placeTip(); // 正在等 0.35 秒的话，计时到了会用新元素
+  };
+  // 挂监听；返回去掉监听的函数（换新版本时用，见 start）
+  const tipListen = () => {
+    const out = (ev) => { if (!ev.relatedTarget) hideTip(); }; // 鼠标移出窗口
+    document.addEventListener('mousemove', tipMove, true);
+    document.addEventListener('mousedown', hideTip, true);
+    document.addEventListener('wheel', hideTip, { capture: true, passive: true });
+    document.addEventListener('mouseout', out, true);
+    window.addEventListener('blur', hideTip);
+    return () => {
+      document.removeEventListener('mousemove', tipMove, true);
+      document.removeEventListener('mousedown', hideTip, true);
+      document.removeEventListener('wheel', hideTip, { capture: true });
+      document.removeEventListener('mouseout', out, true);
+      window.removeEventListener('blur', hideTip);
+      hideTip();
+    };
+  };
 
   // 保证每个输入框上方都有状态栏；force 时重画内容
   const ensure = (force) => {
@@ -1572,6 +1689,7 @@ ${P} .k-quota{--kc:var(--k-quota)} ${P} .k-cost{--kc:var(--k-cost)} ${P} .k-run{
       }
       if (force || fresh) bar.replaceChildren(...build(paneConvId(box)));
     }
+    tipAfterRender();
   };
   // 2026-11-20：窗口在后台（最小化或被别的窗口挡住）时不重画，记一笔，回到前台再画一次；
   // 生成回复时数据来得很密，最短 300 毫秒画一次（原来 150 毫秒）。数据照常接收，只是不画。
@@ -1596,6 +1714,9 @@ ${P} .k-quota{--kc:var(--k-quota)} ${P} .k-cost{--kc:var(--k-cost)} ${P} .k-run{
     S.styleEl = style;
     document.querySelectorAll('.' + BAR_CLASS).forEach((b) => b.remove());
     closePanel(); // 旧版本开着的面板和它的监听也一起去掉
+    if (S.tipOff) S.tipOff(); // 旧版本的悬停提示监听和提示框
+    document.querySelectorAll(T).forEach((e) => e.remove());
+    S.tipOff = tipListen();
     if (S.visHandler) document.removeEventListener('visibilitychange', S.visHandler);
     S.visHandler = onVisible;
     document.addEventListener('visibilitychange', onVisible);
