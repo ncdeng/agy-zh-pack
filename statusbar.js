@@ -505,25 +505,59 @@ function agyStatusBar(CFG) {
   // 按顺序匹配，先中先用。Orchestrator 的两个内部模型没有公开价：规划按 Carbon（Argon 版按 Argon，Neon 版按 Neon），
   // 执行模型 gemini-flash-worker-agy 按 Hydrogen：后台给它的显示名是 “Gemini 4 Hydrogen (Orchestrator)”（modelDisplayName，11-16 查），
   // 模型菜单的官方说明也写 Carbon “may offload routine steps to Hydrogen”。
+  // k = 在线价格表（仓库的 data/prices.json，见 setPrices）里对应的模型 ID；在线表里有这个模型就用在线的价，t 是内置的价（取不到在线表时用）。
   const PRICES = [
-    { re: /orchestrator-neon/i, name: 'Neon', note: 'Orchestrator (Neon) 的规划调用，按 Gemini 4 Neon 价', t: P_NE },
-    { re: /orchestrator-argon/i, name: 'Argon', note: 'Orchestrator (Argon) 的规划调用，按 Gemini 4 Argon 价', t: P_CA },
-    { re: /orchestrator/i, name: 'Carbon', note: 'Orchestrator 的规划调用，按 Gemini 4 Carbon 价', t: P_CA },
-    { re: /flash-worker/i, name: 'Hydrogen', note: '执行模型 gemini-flash-worker-agy（后台显示名 Gemini 4 Hydrogen (Orchestrator)），按 Gemini 4 Hydrogen 价', t: P_H },
-    { re: /gemini-4-neon/i, name: 'Neon', t: P_NE },
-    { re: /gemini-4-carbon/i, name: 'Carbon', t: P_CA },
-    { re: /gemini-4-argon/i, name: 'Argon', t: P_CA },
+    { re: /orchestrator-neon/i, name: 'Neon', note: 'Orchestrator (Neon) 的规划调用，按 Gemini 4 Neon 价', k: 'gemini-4-neon', t: P_NE },
+    { re: /orchestrator-argon/i, name: 'Argon', note: 'Orchestrator (Argon) 的规划调用，按 Gemini 4 Argon 价', k: 'gemini-4-argon', t: P_CA },
+    { re: /orchestrator/i, name: 'Carbon', note: 'Orchestrator 的规划调用，按 Gemini 4 Carbon 价', k: 'gemini-4-carbon', t: P_CA },
+    { re: /flash-worker/i, name: 'Hydrogen', note: '执行模型 gemini-flash-worker-agy（后台显示名 Gemini 4 Hydrogen (Orchestrator)），按 Gemini 4 Hydrogen 价', k: 'gemini-4-hydrogen', t: P_H },
+    { re: /gemini-4-neon/i, name: 'Neon', k: 'gemini-4-neon', t: P_NE },
+    { re: /gemini-4-carbon/i, name: 'Carbon', k: 'gemini-4-carbon', t: P_CA },
+    { re: /gemini-4-argon/i, name: 'Argon', k: 'gemini-4-argon', t: P_CA },
     // gemini-4-hydrogen-tiered-high：浏览器子代理用的（11-22 见到，模型编号 PLACEHOLDER_M530）。官方价格页没有这个名字，
     // 只有 gemini-4-hydrogen（Standard 1.5 / 0.075 / 7.5，另有 Batch、Flex 半价和 Priority 1.8 倍）；按 Standard 算，是估计。
-    { re: /gemini-4-hydrogen-tiered/i, name: 'Hydrogen', note: 'gemini-4-hydrogen-tiered-high（浏览器子代理用的）官方价格页没有，按 Gemini 4 Hydrogen 标准价估', t: P_H },
-    { re: /gemini-4-hydrogen/i, name: 'Hydrogen', t: P_H },
-    { re: /gemini-3[.-]8-flash/i, name: '3.8 Flash', t: P_F38 },
-    { re: /claude-opus-5[.-]5/i, name: 'Opus 5.5', t: [[Infinity, { in: 4, cache: 0.2, cw: 5, out: 20 }]] },
-    { re: /claude-sonnet-5[.-]5/i, name: 'Sonnet 5.5', t: [[Infinity, { in: 2, cache: 0.1, cw: 2.5, out: 10 }]] },
+    { re: /gemini-4-hydrogen-tiered/i, name: 'Hydrogen', note: 'gemini-4-hydrogen-tiered-high（浏览器子代理用的）官方价格页没有，按 Gemini 4 Hydrogen 标准价估', k: 'gemini-4-hydrogen', t: P_H },
+    { re: /gemini-4-hydrogen/i, name: 'Hydrogen', k: 'gemini-4-hydrogen', t: P_H },
+    { re: /gemini-3[.-]8-flash/i, name: '3.8 Flash', k: 'gemini-3.8-flash', t: P_F38 },
+    { re: /claude-opus-5[.-]5/i, name: 'Opus 5.5', k: 'claude-opus-5-5', t: [[Infinity, { in: 4, cache: 0.2, cw: 5, out: 20 }]] },
+    { re: /claude-sonnet-5[.-]5/i, name: 'Sonnet 5.5', k: 'claude-sonnet-5-5', t: [[Infinity, { in: 2, cache: 0.1, cw: 2.5, out: 10 }]] },
   ];
+  // 在线价格表（v1.7）：注入程序从仓库取来、校验过的 data/prices.json（CFG.remote.prices，之后 S.setRemote 推送）。
+  // { updated, models: { 模型 ID: { title, t: [[到哪天为止（不含，太平洋时间零点）或 null, 单价], …] } } }。
+  // 内置规则按 k 换成在线的价；在线表里有、内置规则没有的模型（比如新出的模型），按模型 ID 生成一条规则排在后面
+  // （ID 里数字之间的 . 和 - 都认，后面不能紧跟别的版本号：claude-opus-5 不会匹配 claude-opus-5-5）。
+  let priceRules = PRICES;
+  let priceSrc = { online: false, updated: '' };
+  const setPrices = (pr) => {
+    priceRules = PRICES;
+    priceSrc = { online: false, updated: '' };
+    if (!pr || !pr.models) return;
+    const conv = (t) => t.map(([u, p]) => [u ? PT0(u) : Infinity, p]);
+    const known = new Set(PRICES.map((r) => r.k));
+    const extra = [];
+    for (const [id, e] of Object.entries(pr.models)) {
+      if (known.has(id) || !Array.isArray(e.t)) continue;
+      const pat = id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/(\d)\\?[.-](?=\d)/g, '$1[.-]');
+      try {
+        extra.push({ re: new RegExp(pat + '(?![.-]?\\d)', 'i'), name: String(e.title || id).replace(/^Gemini (4 )?/, '').replace(/^Claude /, ''), k: id, note: '在线价格表里的 ' + (e.title || id), t: conv(e.t) });
+      } catch {}
+    }
+    priceRules = [...PRICES.map((r) => (pr.models[r.k] && Array.isArray(pr.models[r.k].t) ? { ...r, t: conv(pr.models[r.k].t) } : r)), ...extra];
+    priceSrc = { online: true, updated: String(pr.updated || '') };
+  };
+  // 在线数据（v1.7）：{ version 装着的版本, on 在线更新开着, prices, meta { latest, date }, st 检查情况 }，见 inject.mjs 的 remoteForPage。
+  // 注入时经 CFG.remote 带来；注入程序每次检查完调 S.setRemote 推送（定义在 S.setLook 旁边）。
+  if (CFG && CFG.remote) S.remote = CFG.remote;
+  setPrices(S.remote && S.remote.on !== false ? S.remote.prices : null);
+  const verGt = (a, b) => {
+    const x = String(a).split('.').map(Number), y = String(b).split('.').map(Number);
+    for (let i = 0; i < 3; i++) if ((x[i] || 0) !== (y[i] || 0)) return (x[i] || 0) > (y[i] || 0);
+    return false;
+  };
+  const priceSrcText = () => priceSrc.online ? '单价来自在线价格表（' + priceSrc.updated + ' 更新，按官方价格页每天自动核对）' : '单价来自内置价格表（安装包自带）';
   const priceFor = (names, at) => {
     const when = at > 0 ? at : Date.now();
-    for (const r of PRICES) {
+    for (const r of priceRules) {
       if (!r.re.test(names)) continue;
       const tier = r.t.find((x) => when < x[0]) || r.t[r.t.length - 1];
       return { name: r.name, note: r.note || '', p: tier[1] };
@@ -795,13 +829,14 @@ function agyStatusBar(CFG) {
     event: '日历', date_range: '日期范围', account_tree: '树形分支', person: '人像' };
   // 不能单独换的几个：[Material 名, unicode 字符]
   const ICON_FIXED = { check: ['check', '✓'], ctx: ['data_usage', '◔'], quota1: ['timelapse', '◔'] };
-  const LOOK_DEFAULT = { pal: 'cometix', skin: 'plain', bar: 'thin', dense: 'compact', icons: 'material', iconMap: {} };
+  const LOOK_DEFAULT = { pal: 'cometix', skin: 'plain', bar: 'thin', dense: 'compact', icons: 'material', iconMap: {}, online: 'auto' };
   const LOOK_CHOICES = {
     pal: ['cometix', 'catppuccin', 'tokyo-night', 'rose-pine', 'gruvbox', 'nord', 'dracula', 'mono'],
     skin: ['plain', 'pill', 'powerline'],
     bar: ['thin', 'cells', 'ring', 'none'],
     dense: ['compact', 'full'],
     icons: ['material', 'outline', 'unicode', 'off'],
+    online: ['auto', 'off'], // v1.7：在线更新词典和价格（不是外观，但跟外观一起存、一起同步到各窗口）
   };
   const cleanLook = (o) => {
     const l = { ...LOOK_DEFAULT, iconMap: {} };
@@ -1196,7 +1231,7 @@ function agyStatusBar(CFG) {
       const dtip = '今天累计 ' + fmtUsd(day.usd) + '（按 API 标准价，本地 0 点起，' + day.convs + ' 个对话，含子代理）' +
         (day.undated ? '\n  还有 ' + day.undated + ' 次调用正在查时间，暂时没算进今天' : '') +
         (day.loading ? '\n  还有 ' + day.loading + ' 个对话正在读取' : '') +
-        '\n\n点击查看每天的用量和额度';
+        '\n' + priceSrcText() + '\n\n点击查看每天的用量和额度';
       const ts = seg('cost', ICON('today'), [fmtUsd(day.usd) + ' today'], dtip);
       ts.classList.add('p-open');
       ts.addEventListener('click', () => togglePanel(ts));
@@ -1382,7 +1417,7 @@ function agyStatusBar(CFG) {
     }
     if (r.bf) out.push(el('div', 'dim', '从 Antigravity 对话库补算，没有额度记录'));
     else if (r.fix) out.push(el('div', 'dim', '实时记录少算了，花费和 token 已按 Antigravity 对话库重算'));
-    out.push(el('div', 'dim', '钱按 API 标准价折算，不是实际扣费'));
+    out.push(el('div', 'dim', '钱按 API 标准价折算，不是实际扣费；' + (priceSrc.online ? '在线价格表 ' + priceSrc.updated : '内置价格表')));
     return out;
   };
   const partCard = (name, model, m, dayUsd) => {
@@ -1431,7 +1466,7 @@ function agyStatusBar(CFG) {
     const total = usedDays.reduce((a, { r }) => a + r.usd, 0);
     const head = el('div', 'p-head');
     const title = el('span', 'p-title', 'Daily usage');
-    setTip(title, '每天的用量：钱按 API 标准价折算（不是实际扣费），额度是当天用掉的每周额度');
+    setTip(title, '每天的用量：钱按 API 标准价折算（不是实际扣费），额度是当天用掉的每周额度\n' + priceSrcText());
     head.append(title);
     for (const k of [7, 30]) {
       const b = el('button', 'p-btn' + (k === n ? ' on' : ''), k + 'd');
@@ -1453,7 +1488,14 @@ function agyStatusBar(CFG) {
     const acEl = ac && ac.m ? el('span', 'p-acct', ac.m + (ac.t ? ' · ' + ac.t.replace(/^Google AI\s+/i, '') : '')) : null;
     if (acEl) setTip(acEl, '当前账号 ' + ac.m + (ac.t ? '（' + ac.t + '）' : '') +
       '\n额度（Gemini wk / Claude wk、底部的每周额度和预估）只算这个账号；花费和 token 是这台电脑上的合计，不分账号。');
-    head.append(el('span', 'p-fill'), ...(acEl ? [acEl] : []), th, x);
+    // 新版本（v1.7）：仓库 data/meta.json 的 latest 比装着的新就提示。代码不会自动更新，要自己下载安装包
+    const rm = S.remote || {};
+    const upEl = rm.meta && rm.version && verGt(rm.meta.latest, rm.version)
+      ? setTip(el('span', 'p-new', 'v' + rm.meta.latest + ' available'), '新版本 v' + rm.meta.latest + (rm.meta.date ? '（' + rm.meta.date + ' 发布）' : '') +
+        '，你装的是 v' + rm.version + '。\n到 GitHub 上 ncdeng/agy-zh-pack 项目的 Releases 页下载安装包，覆盖安装就行（每日记录和外观都保留）。' +
+        '\n词典和价格平时会自动更新，不用为它们升级。')
+      : null;
+    head.append(el('span', 'p-fill'), ...(upEl ? [upEl] : []), ...(acEl ? [acEl] : []), th, x);
     panel.append(head);
 
     // 今天的汇总（11-22 加）：花费、调用次数、token 合计、缓存命中率。今天这一行用页面里实时的账本（同表格第一行）
@@ -1822,6 +1864,19 @@ function agyStatusBar(CFG) {
     bar: ['bars', '额度进度条', { thin: '细条（默认，约是 10 格的一半宽）', cells: '10 格（以前的样子）', ring: '小圆环，最省地方', none: '不画，只留百分比' }],
     dense: ['detail', '信息密度', { compact: '上下文只写比例和用量、缓存只写命中率，其余在悬停说明里（默认）', full: '上下文带上限、缓存带读到的 token 数（以前的样子）' }],
   };
+  // Theme 页上在线更新的情况：版本、上次检查、在线词典条数、价格表日期、出的问题
+  const updStatus = (r) => {
+    const st = (r && r.st) || {};
+    const parts = ['agy-zh-pack v' + ((r && r.version) || '?')];
+    if (r && r.on === false) return parts[0] + ' · 在线更新已关闭，词典和价格用安装包自带的';
+    if (st.okAt) parts.push('上次检查 ' + fmtWhen(st.okAt) + (st.host ? '（' + st.host + '）' : ''));
+    else parts.push(st.at ? '还没检查成功过' : '注入程序启动约 1 分钟后第一次检查');
+    if (st.dictN) parts.push('在线词典 ' + st.dictN + ' 条、规则 ' + st.rulesN + ' 条');
+    parts.push(priceSrc.online ? '价格表 ' + priceSrc.updated : '价格表用内置的');
+    if (r && r.meta && r.version && verGt(r.meta.latest, r.version)) parts.push('有新版本 v' + r.meta.latest);
+    if (st.err) parts.push('问题：' + st.err);
+    return parts.join(' · ');
+  };
   const renderLook = (panel) => {
     panel.replaceChildren();
     const head = el('div', 'p-head');
@@ -1830,7 +1885,7 @@ function agyStatusBar(CFG) {
     setTip(back, '回到每日用量');
     back.addEventListener('click', () => { S.panelView = 'usage'; renderPanel(panel); });
     const reset = el('button', 'p-btn', 'reset');
-    setTip(reset, '全部恢复默认：Cometix / plain / thin / compact / 图标开');
+    setTip(reset, '全部恢复默认：Cometix / plain / thin / compact / 实心图标 / 在线更新开');
     reset.addEventListener('click', () => S.setLook({ ...LOOK_DEFAULT }));
     const x = el('button', 'p-btn p-x', '×');
     setTip(x, '关闭（Esc）');
@@ -1899,6 +1954,18 @@ function agyStatusBar(CFG) {
       pick.append(b);
     }
     panel.append(pick);
+    // 在线更新（v1.7）：auto = 每 6 小时从仓库取词典、规则、价格和最新版本号；off = 不联网，只用安装包自带的
+    const UPD_TIP = {
+      auto: '每 6 小时从 GitHub（经 jsDelivr）取最新的词典、规则和价格表（默认）。只取数据，不取代码；新版本只在每日面板上提示',
+      off: '不联网，词典和价格只用安装包自带的（Google 调价或 Antigravity 加了新文字，要等装新版本才有）',
+    };
+    panel.append(row('updates', '在线更新词典和价格', LOOK_CHOICES.online.map((v) => {
+      const b = el('button', 'p-btn' + (S.look.online === v ? ' on' : ''), v);
+      setTip(b, UPD_TIP[v]);
+      b.addEventListener('click', () => S.setLook({ online: v }));
+      return b;
+    })));
+    panel.append(el('div', 'lk-note', updStatus(S.remote)));
     panel.append(el('div', 'lk-note', '配色跟着 Antigravity 的浅色 / 深色自动切换。选择保存在 look.json，所有窗口共用；点右上角 reset 恢复默认。'));
   };
 
@@ -2428,6 +2495,7 @@ ${P} .lk-ib{padding:.1em .35em; line-height:1}
 ${P} .lk-ib .ic{margin-right:0; font-size:17px; vertical-align:middle}
 ${P} .p-range{color:var(--k-muted); margin-left:.35rem}
 ${P} .p-acct{color:var(--k-muted); font-size:11px; margin-right:.2rem; white-space:nowrap; cursor:default}
+${P} .p-new{color:var(--k-run); font-size:11px; margin-right:.4rem; white-space:nowrap; cursor:default; font-weight:600}
 /* 柱状图：上面留 16px 给柱顶的金额；每根柱子从下往上叠（column-reverse），柱顶那段圆角 */
 ${P} .p-chart{height:122px; padding-top:16px; box-sizing:border-box; border-bottom:1px solid var(--sep)}
 ${P} .p-bars{position:relative; display:flex; align-items:stretch; gap:3px; height:100%}
@@ -2631,6 +2699,14 @@ ${T}{position:fixed; z-index:2147483600; pointer-events:none; box-sizing:border-
       S.lookPick = l;
     }
     S.look = l;
+    ensure(true);
+    refreshPanel();
+  };
+  // 注入程序检查完在线更新后推过来（见 inject.mjs 的 pushRemote）：换价格表，重画状态栏和打开着的面板
+  S.setRemote = (r) => {
+    if (!r || typeof r !== 'object') return;
+    S.remote = r;
+    setPrices(r.on !== false ? r.prices : null);
     ensure(true);
     refreshPanel();
   };

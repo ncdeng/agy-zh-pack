@@ -45,6 +45,7 @@
 | 界面汉化 | 开 | 不会，只改本机显示 |
 | 用量状态栏 | 开 | 不会，只读本机数据 |
 | 作者的配色 | 关 | 不会，只改本机 Antigravity 的主题颜色 |
+| 在线更新词典和价格 | 开 | 不会。每 6 小时从本项目的 GitHub 仓库（经 jsDelivr）下载词典和价格表，只是普通的下载请求，不上传任何数据。可以关掉，见 [在线更新](#在线更新) |
 
 缩放、字体、对比度一律不改。
 
@@ -140,10 +141,28 @@
 - `gemini-4-hydrogen-tiered-high`（浏览器子代理用的）官方价格页没有，按 Gemini 4 Hydrogen 的标准价估。
 - GPT-OSS 120B 没有单价，不计入。
 - 出处：Google AI Studio 价格页（2026-11-16；Neon 2026-11-19）、Anthropic 官方价（2026-11-03）。Claude 在 Antigravity 里经 Google Vertex 调用，实际价格可能不同。
-- 单价写在 `statusbar.js` 的 `PRICES` 里，价格变了改这里。
+- 单价默认用在线价格表 `data/prices.json`（见 [在线更新](#在线更新)）。鼠标停在 `$x today` 上可以看用的是在线的还是内置的。内置的单价写在 `statusbar.js` 的 `PRICES` 里，关掉在线更新或下载不到时用它。
 - 今天的花费：今天动过的对话里，0 点以后的调用加起来。每个对话今天的金额记在安装目录的 `cost-day.json`，Antigravity 重启后不会清零；过了 0 点自动重新开始。
 
 </details>
+
+### 在线更新
+
+Antigravity 更新后会加新的界面文字，Google 也会调价。为了不用每次都发新版、重装，注入程序每 6 小时从本项目的 GitHub 仓库下载几个数据文件：
+
+| 文件 | 内容 | 谁来更新 |
+|---|---|---|
+| `i18n/zh-CN.json`、`i18n/zh-CN.rules.json` | 词典和规则 | 作者补了汉化就推上去 |
+| `data/prices.json` | 每个模型的单价 | GitHub Actions 每天按 Google AI Studio 和 Vertex AI 的官方价格页核对，价格变了才提交（`tools/update-prices.mjs`） |
+| `data/meta.json` | 最新的版本号 | 发版时改 |
+
+- **只下载数据，不下载代码。** 词典和规则只被当作文字填进界面（不当 HTML），价格只是数字。注入程序、状态栏和翻译器不会自动更新。有新版本时，每日用量面板右上角显示 `v<版本> available`，要自己下载安装包覆盖安装。
+- **下载走 Antigravity 自己的网络。** 请求从 Antigravity 的页面里发出，用的是 Antigravity 的网络和代理设置，不带 cookie 和 Referer。地址依次试 `cdn.jsdelivr.net`、`fastly.jsdelivr.net`、`gcore.jsdelivr.net`、`raw.githubusercontent.com`，记住上次能用的那个。
+- **先校验再用。** 格式不对、条数比安装包自带的少两成以上（比如只下载到半截）、单价超出范围的文件不用，继续用原来的。下载失败 30 分钟后重试。
+- 在线词典覆盖自带词典里的同名条目，自带的其他条目照用。删掉了自带词典（只要状态栏）时，在线词典也不用。在线价格表里有的模型用在线的价，没有的用内置的价。
+- 改了译文的文字马上换上；在线词典里没有了的条目恢复英文。
+- 下载到的文件存在安装目录的 `remote/` 里，Antigravity 重启后照用。装了新版本以后，存着的词典先不用，等下一次下载。
+- **关掉**：每日用量面板 → `theme` → 最下面的 `updates` 选 `off`。关掉以后不再联网，词典和价格只用安装包自带的。这一行下面写着上次检查的时间、用的哪个地址、在线词典的条数、价格表的日期和出过的问题。
 
 ### 可选：作者的配色
 
@@ -191,6 +210,7 @@ Antigravity 2.33.0 以前，主程序启动时总会打开 Chromium 远程调试
 
 - Antigravity 附加服务条款第 6 条规定：不得滥用、损害、干扰服务，包括 “using the Service in connection with products not provided by us”。违反条款可能导致 Antigravity 和 Gemini CLI 账号被暂停或终止。本项目是第三方工具，作者不能保证使用它不违反条款。
 - 本项目只改本机的界面显示，状态栏只读取本机数据，不改发给 Google 的内容。
+- 在线更新会从本项目的 GitHub 仓库下载词典和价格表。万一仓库被人篡改，界面上可能出现被改过的文字（不会执行代码，也拿不到你的数据）。介意的话在 Theme 页把 `updates` 关掉。
 - 本项目依赖 Antigravity 内部的页面结构和接口。Antigravity 更新后，部分功能可能失效，新加的界面文字会先显示英文。
 - 快捷方式上的启动参数会在本机 `127.0.0.1` 打开一个调试端口（2.33.0 以前的 Antigravity 本来就默认打开）。本机上的其他程序可以通过这个端口控制 Antigravity 窗口。介意的话请不要使用本项目。
 
@@ -220,6 +240,7 @@ v1.0.0 安装时直接改了外观（缩放 131%、强对比度、系统字体�
 
 | Antigravity 版本 | 测过的内容 | 日期 |
 |---|---|---|
+| 2.34.0 | v1.7（Windows 11 真机，用本机服务器模拟仓库）：四个文件从 Antigravity 页面里下载（不带 cookie 和 Referer），校验后存进 `remote/`；在线词典的条目生效；`updates` 关掉后回到自带词典和内置价格，打开后 3 秒内重新检查；版本号改成 1.7.1 时面板显示新版本提示；词典被截成 100 条时拒收、继续用原来的；规则里一条写错的正则只跳过这一条；服务器停掉时记下错误、继续用存着的数据。翻译器换词典重翻：浏览器里 17 项测试全部通过。连真实地址（这时 `data/meta.json` 还没推上去，返回 404）：Windows 四个地址都连得上；macOS 上 `cdn.jsdelivr.net` 连不上、`fastly.jsdelivr.net` 超时，另外两个连得上。抓价脚本：用当天的两个价格页离线跑，7 个必需模型的价和内置单价表一致；模拟了过了换价日旧价被删、数字变化超过 5 倍两种情况。**没测**：推到 GitHub 以后从 jsDelivr 真实下载、GitHub Actions 实际运行 | 2026-11-22 |
 | 2.34.0 | v1.6（Windows 11 真机）：子代理树形行（模型、上下文、缓存、自己的花费、运行时间、等待批准、跑完的用时和步数）、压缩徽章、上下文悬停里各部分的百分比、`running` 在窄窗口不换行；Theme 页的四种图标和每一项的备选图标（彗星、三档速度仪表）；每日面板的账号、顶部四格、token 列、调用明细（今天和以前的天；11-18 共 1101 次、$69.24）、每周额度的 `cap` 和预估；悬停提示框不再透明；补算 v2 读了 79 个对话库，11-08、11-10、11-11、11-16、11-17、11-18、11-19 七天的调用次数逐天和调用明细一致，总调用数和额度记录没变。macOS 真机：账号显示、按账号分开记额度历史、面板正常；没有对话库时补算正常跳过。**没测**：一键安装（安装程序没改） | 2026-11-22 |
 | 2.34.0 | v1.5.1：macOS 真机完整测外观（用 v1.5.0 源码覆盖后重启注入程序）：8 套配色、3 种外形、4 种进度条、图标开关、Theme 页 8 张卡片和点卡片换配色都正常；在 Antigravity 设置里切到深色，测了 Cometix、Tokyo Night、Catppuccin + powerline、Gruvbox + pill + 小圆环和 Theme 页，再切回浅色；刷新窗口后马上恢复所选外观（v1.5.0 要等最多 30 秒）；`reset` 按钮恢复默认；没有页面报错。**没测**：子代理行在新外观下的样子 | 2026-11-22 |
 | 2.34.0 | 外观（v1.5.0）：Windows 真机上新状态栏（上下文圆环、紧凑写法、细进度条）显示正常；Theme 页 8 张配色卡片和外形、进度条、信息密度、图标四排选项正常，没有报错；选择在 28 秒后写进 `look.json`；离线预览页里 8 套配色的浅色和深色、3 种外形、4 种进度条、关掉图标都显示正常。macOS 真机：新状态栏、Theme 页、图标字体正常，没有报错。每周额度改成按周期净变化：同一周期、正在生成时实测 6 分钟里 Gemini 每周额度 1.699% → 1.594%、5 小时额度 1.907% → 1.487%；用本机真实历史离线重算，11-22 的每周额度从 +7.24% 改成 +1.59%（当时状态栏显示 2%）；另外模拟了同一周期起伏、当天中途换周期、以前没见过这个额度三种情况。**没测**：Antigravity 深色主题下的真机效果（只在离线预览里看过）、子代理行在新外观下的样子 | 2026-11-22 |
@@ -249,7 +270,7 @@ v1.0.0 安装时直接改了外观（缩放 131%、强对比度、系统字体�
 - 状态栏在页面里包一层 `fetch`，旁听应用和本机后台（`language_server`）之间的 grpc-web+json 数据，不改应用发出的请求。另外，它向本机后台查几个只读接口：额度、当前登录的账号（邮箱和订阅档次；邮箱只在页面里用来算账号编号和打码显示，不写进文件）、实际模型名、子代理运行状态和步骤、每次调用的 token 用量和调用时间（算费用和调用明细）。
 - 注入程序每 30 秒把页面里今天的花费存进 `cost-day.json`，并从 `%USERPROFILE%\.gemini\antigravity\brain\`（macOS 是 `~/.gemini/antigravity/brain/`）找出今天动过的对话，再把对话库文件夹（`conversations`）里最近 32 天的对话 ID、创建时间和修改时间交给状态栏（后台的对话列表只列一部分对话），所以 Antigravity 重启后今天的金额不会丢。只存对话 ID、金额和按模型的调用数、token 数。同时把当天的汇总和额度变化写进 `usage-history.json`，再把最近 31 天交给状态栏的每日用量面板。
 - 默认不写 Antigravity 的设置文件。只有两种情况会写：你选择作者的配色（或换回），会改 `%USERPROFILE%\.gemini\config\config.json` 的两组主题颜色；卸载时选择恢复，会按记下的原值改回这个文件（装过旧版 v1.0.0 的还有 `%APPDATA%\Antigravity\app_storage.json`）。
-- 除了从 Google Fonts 在线加载状态栏的图标，不连接其他网站。
+- 联网只有两处：从 Google Fonts 加载状态栏的图标；[在线更新](#在线更新) 从 jsDelivr（或 raw.githubusercontent.com）下载本项目仓库里的数据文件（可以关掉）。
 
 <details>
 <summary>从源码运行和打包</summary>
@@ -273,6 +294,8 @@ node inject.mjs
 node package/build.mjs
 ```
 
+发新版时，把 `inject.mjs` 里的 `PACK_VERSION` 和 `data/meta.json` 的 `latest`、`date` 改成新版本（打包脚本会检查两处一致）。`data/meta.json` 推到 main 以后，装着旧版本的用户会在每日用量面板上看到新版本提示。
+
 生成 `dist/Antigravity中文美化包/` 和同名 zip。传到 GitHub Releases 时，把 zip 改成英文名 `agy-zh-pack-v<版本>.zip`（GitHub 会去掉文件名里的中文）。zip 里带上当前运行的 `node.exe` 和 `package/third_party/node-LICENSE.txt`（Node.js 的许可证）。用别的 Node.js 版本打包时，把许可证换成对应版本的：`https://raw.githubusercontent.com/nodejs/node/<版本>/LICENSE`。
 
 </details>
@@ -292,6 +315,12 @@ node package/build.mjs
 | `usage-history.json` | 每天用量的历史，保留 90 天（不在仓库里，注入程序自动生成） |
 | `look.json` | 状态栏外观的选择（不在仓库里，在 Theme 页选过才有） |
 | `quota-samples.json` | 额度读数，保留 8 天，算每周额度预估用（不在仓库里，注入程序自动生成） |
+| `remote/` | 在线更新下载到的词典、规则、价格表和检查情况（不在仓库里，注入程序自动生成） |
+| `data/prices.json` | 在线价格表（GitHub Actions 每天按官方价格页更新） |
+| `data/meta.json` | 最新版本号（发版时改） |
+| `tools/update-prices.mjs` | 按官方价格页更新 `data/prices.json` |
+| `.github/workflows/update-prices.yml` | 每天跑一次上面的脚本：价格变了就提交，出了问题就开 issue |
+| `.github/workflows/purge-cdn.yml` | 推送了词典或 `data/` 以后，清掉 jsDelivr 上的缓存 |
 | `package/app/setup.mjs` | 一键安装、卸载、配色开关 |
 | `package/build.mjs` | 生成安装包 |
 | `package/third_party/node-LICENSE.txt` | 安装包自带的 Node.js 的许可证 |

@@ -1,0 +1,54 @@
+# 每天按官方价格页更新 data/prices.json（脚本说明见 tools/update-prices.mjs）。
+# 价格变了才提交，提交后清掉 jsDelivr 上这个文件的缓存，用户的注入程序下一次检查（最多 6 小时）就会拿到。
+# 页面取不到、解析不出必需的模型、或者数字变化超过 5 倍：涉及的模型保留原来的价，并开一个 issue（已有没关的同名 issue 就不重复开）。
+name: update-prices
+
+on:
+  schedule:
+    - cron: '17 3 * * *' # 每天 UTC 03:17（北京时间 11:17）
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: update-prices
+  cancel-in-progress: false
+
+jobs:
+  prices:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - id: run
+        run: node tools/update-prices.mjs
+
+      - name: Commit and purge CDN cache
+        if: steps.run.outputs.changed == 'true'
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add data/prices.json
+          git commit -m "价格表：按官方价格页自动更新（$(date -u +%F)）"
+          git push
+          curl -fsS -o /dev/null "https://purge.jsdelivr.net/gh/${GITHUB_REPOSITORY}@main/data/prices.json" || echo 'purge failed (the CDN copy updates within 12 hours anyway)'
+
+      - name: Open an issue for problems
+        if: steps.run.outputs.problems != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PROBLEMS: ${{ steps.run.outputs.problems }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          title='价格自动更新出了问题'
+          open=$(gh issue list --state open --search "\"$title\" in:title" --json number --jq 'length')
+          if [ "$open" != "0" ]; then echo 'an open issue already exists'; exit 0; fi
+          printf '每日价格更新（%s）发现下面的问题。涉及的模型保留了原来的价，其他模型照常更新。\n\n```\n%s\n```\n\n运行记录：%s\n\n处理完请关掉这个 issue；没关之前不会重复开。\n' "$(date -u +%F)" "$PROBLEMS" "$RUN_URL" > body.md
+          gh issue create --title "$title" --body-file body.md

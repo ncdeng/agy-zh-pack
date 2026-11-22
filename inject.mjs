@@ -58,7 +58,7 @@ function log(msg) {
 // ---------- 单实例：占用命名管道（Windows）或 Unix Socket（macOS/Linux），占不到说明已有实例在跑 ----------
 const lock = net.createServer();
 function onListening() {
-  log(`started pid=${process.pid} platform=${process.platform}`);
+  log(`started pid=${process.pid} platform=${process.platform} v${PACK_VERSION}`);
   if (!IS_WIN) {
     const cleanup = () => {
       try { lock.close(); } catch {}
@@ -110,7 +110,7 @@ const EMPTY = { dict: null, rules: [] };
 
 // 传给状态栏的参数。costDay：今天花费的账本（见下面“今天花费的账本”）；history：最近 31 天的用量（见“每天用量历史”）。
 function barConfig() {
-  return { costDay: readCostBook(), history: recentHistory(), look: readLook() };
+  return { costDay: readCostBook(), history: recentHistory(), look: readLook(), remote: remoteForPage() };
 }
 
 // ---------- 状态栏外观（2026-11-22 加） ----------
@@ -129,7 +129,7 @@ function readLook() {
 }
 function saveLook(pick) {
   const keep = {};
-  for (const k of ['pal', 'skin', 'bar', 'dense']) if (typeof pick[k] === 'string') keep[k] = pick[k].slice(0, 24);
+  for (const k of ['pal', 'skin', 'bar', 'dense', 'online']) if (typeof pick[k] === 'string') keep[k] = pick[k].slice(0, 24);
   if (typeof pick.icons === 'boolean' || typeof pick.icons === 'string') keep.icons = typeof pick.icons === 'string' ? pick.icons.slice(0, 24) : pick.icons;
   // v1.6：每一项单独选的图标 { 项目名: 图标名 }，最多 16 项
   if (pick.iconMap && typeof pick.iconMap === 'object') {
@@ -263,7 +263,16 @@ async function syncCost() {
   if (any) updateHistory(readCostBook(), quotaBuckets(quota), quotaAcct(quota), quota && quota.at);
   // 某个窗口里换了外观：存下来，马上推给其他窗口，并更新登记给刷新后页面的脚本（见 reRegister）
   if (pick && pick.at > ((look && look.at) || 0)) {
+    const wasOn = onlineOn();
     saveLook(pick);
+    const nowOn = onlineOn();
+    if (wasOn !== nowOn) { // 在线更新开关变了：自带词典 / 合并词典换一下，状态栏的在线价格也跟着换
+      log(`online updates ${nowOn ? 'on' : 'off'}`);
+      mergedCache = null;
+      if (nowOn) remoteNextAt = Date.now() + 3000;
+      for (const s of sessions.values()) apply(s).catch(() => {});
+      return;
+    }
     const js = JSON.stringify(readLook());
     for (const s of sessions.values()) {
       try {
@@ -715,8 +724,9 @@ function loadAssets() {
 }
 function pageScript() {
   // 在页面里执行：建一个固定 id 的 <style>，已有就只更新内容；再启动或更新翻译器
-  const i18n = assets.dict && assets.translator
-    ? `try { (${assets.translator})(${JSON.stringify(assets.dict)}, ${JSON.stringify(assets.rules || [])}); } catch (e) { console.warn('agy i18n', e); }`
+  const i18 = i18nData();
+  const i18n = i18.dict && assets.translator
+    ? `try { (${assets.translator})(${JSON.stringify(i18.dict)}, ${JSON.stringify(i18.rules || [])}); } catch (e) { console.warn('agy i18n', e); }`
     : `window.__agyI18n && window.__agyI18n.disable();`;
   // 状态栏：删掉 statusbar.js 就不再加载（已打开的窗口要刷新才会消失）
   const bar = assets.statusbar
@@ -740,6 +750,231 @@ function pageScript() {
     document.addEventListener('DOMContentLoaded', put, { once: true });
     ${i18n}
   })()`;
+}
+
+// ---------- 在线更新：词典、规则、价格、最新版本号（2026-11-22 加，v1.7） ----------
+// 安装包自带的词典和单价会过时（Antigravity 更新后新加的界面文字、Google 调价），所以注入程序每 6 小时
+// 从 GitHub 仓库（经 jsDelivr）取四个文件：
+//   i18n/zh-CN.json（词典）、i18n/zh-CN.rules.json（规则）、
+//   data/prices.json（价格，GitHub Actions 每天按官方价格页更新，见 tools/update-prices.mjs）、data/meta.json（最新版本号，发版时改）。
+// - 只取数据，不取代码：词典和规则只被翻译器当文字用（填进文字节点和 placeholder / title 属性，不当 HTML），价格只是数字。
+//   inject.mjs、statusbar.js、translator.js 不会自动更新；有新版本时每日面板上提示，由用户自己下载安装包。
+// - 请求从 Antigravity 的页面里发（Runtime.evaluate 里 fetch），走 Antigravity 自己的网络和代理设置
+//   （Node.js 不读系统代理，国内直连 jsDelivr 不一定通）。不带 cookie、不带 Referer，只是普通的 GET。
+//   jsDelivr 的几个域名和 raw.githubusercontent.com 依次试，记住上次能用的那个。
+// - 每个文件先校验（格式、条数、长度、数值范围），通过了才存进安装目录的 remote/，再交给页面；不通过就继续用原来的。
+//   词典和规则：在线的覆盖安装包自带的同名条目，自带的其他条目照用；删掉了自带词典（只要状态栏、不要汉化）时在线的也不用。
+//   价格：交给状态栏，在线价格表里有的模型用在线的价，没有的用内置的。
+// - Theme 页的 updates 选 off（look.json 的 online = 'off'）：不再联网，也不用 remote/ 里存的，只用安装包自带的。
+// - 换了版本（安装了新的安装包）以后，remote/ 里存的词典和规则先不用，等下一次取到再用（新安装包里的可能更新）。
+// - 测试：环境变量 AGY_REMOTE_BASE 换成别的地址（例如本机起的 http://127.0.0.1:端口/），只试这一个地址。
+const PACK_VERSION = '1.7.0';
+const REMOTE_DIR = path.join(DIR, 'remote');
+const REMOTE_STATE = path.join(REMOTE_DIR, 'state.json');
+const REMOTE_BASES = process.env.AGY_REMOTE_BASE ? [process.env.AGY_REMOTE_BASE] : [
+  'https://cdn.jsdelivr.net/gh/ncdeng/agy-zh-pack@main/',
+  'https://fastly.jsdelivr.net/gh/ncdeng/agy-zh-pack@main/',
+  'https://gcore.jsdelivr.net/gh/ncdeng/agy-zh-pack@main/',
+  'https://raw.githubusercontent.com/ncdeng/agy-zh-pack/main/',
+];
+const REMOTE_FILES = [['meta', 'data/meta.json'], ['prices', 'data/prices.json'], ['dict', 'i18n/zh-CN.json'], ['rules', 'i18n/zh-CN.rules.json']];
+const REMOTE_EVERY_MS = 6 * 3600e3; // 成功以后隔多久再查
+const REMOTE_RETRY_MS = 30 * 60e3; // 失败以后隔多久重试
+const REMOTE_FIRST_MS = 60e3; // 注入程序启动后多久第一次查（让 Antigravity 先加载完）
+const remote = { dict: null, rules: null, prices: null, meta: null, state: {} };
+let remoteNextAt = 0;
+let remoteBusy = false;
+let mergedCache = null;
+const onlineOn = () => { const l = readLook(); return !(l && l.online === 'off'); };
+const isObj = (o) => !!o && typeof o === 'object' && !Array.isArray(o);
+const DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
+// 校验：不通过就抛错（带原因），通过就返回清理过的对象
+function checkDict(o) {
+  if (!isObj(o)) throw Error('not an object');
+  const out = {};
+  for (const [k, v] of Object.entries(o)) if (k && typeof v === 'string' && k.length <= 2000 && v.length <= 2000) out[k] = v;
+  const local = isObj(assets.dict) ? Object.keys(assets.dict).length : 0;
+  const n = Object.keys(out).length;
+  if (n < 500 || n < local * 0.8) throw Error(`only ${n} entries (bundled ${local})`); // 防止取到半截文件
+  return out;
+}
+function checkRules(a) {
+  if (!Array.isArray(a) || a.length > 2000) throw Error('not a list');
+  const out = [];
+  for (const r of a) {
+    if (!Array.isArray(r) || r.length !== 2 || typeof r[0] !== 'string' || typeof r[1] !== 'string' || r[0].length > 300 || r[1].length > 300) continue;
+    try { new RegExp(r[0]); } catch { continue; }
+    out.push([r[0], r[1]]);
+  }
+  const local = Array.isArray(assets.rules) ? assets.rules.length : 0;
+  if (out.length < 10 || out.length < local * 0.8) throw Error(`only ${out.length} rules (bundled ${local})`);
+  return out;
+}
+function checkPrices(o) {
+  if (!isObj(o) || o.schema !== 1 || !isObj(o.models) || !DAY_RE.test(String(o.updated))) throw Error('bad format');
+  const models = {};
+  for (const [id, e] of Object.entries(o.models).slice(0, 300)) {
+    if (!/^[a-z0-9][a-z0-9.-]{2,60}$/.test(id) || !isObj(e) || !Array.isArray(e.t) || !e.t.length || e.t.length > 12) continue;
+    let ok = true;
+    let prev = '';
+    const t = e.t.map((x, i) => {
+      if (!Array.isArray(x) || x.length !== 2 || !isObj(x[1])) { ok = false; return null; }
+      const [u, p] = x;
+      if (i === e.t.length - 1 ? u !== null : !(typeof u === 'string' && DAY_RE.test(u) && u > prev)) ok = false;
+      if (typeof u === 'string') prev = u;
+      const q = {};
+      for (const k of ['in', 'cache', 'out', 'cw']) {
+        if (k === 'cw' && p[k] === undefined) continue;
+        if (typeof p[k] === 'number' && p[k] >= 0 && p[k] <= 1000) q[k] = p[k]; else ok = false;
+      }
+      return [u, q];
+    });
+    if (ok) models[id] = { title: String(e.title || id).slice(0, 60), t };
+  }
+  if (Object.keys(models).length < 3) throw Error('too few models');
+  return { updated: o.updated, models };
+}
+function checkMeta(o) {
+  if (!isObj(o) || o.schema !== 1 || !/^\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(String(o.latest))) throw Error('bad format');
+  return { latest: o.latest, date: DAY_RE.test(String(o.date)) ? o.date : '' };
+}
+const REMOTE_CHECK = { dict: checkDict, rules: checkRules, prices: checkPrices, meta: checkMeta };
+const remoteFile = (rel) => path.join(REMOTE_DIR, path.basename(rel));
+function saveRemoteState() {
+  try { fs.mkdirSync(REMOTE_DIR, { recursive: true }); fs.writeFileSync(REMOTE_STATE, JSON.stringify(remote.state)); } catch (e) { log(`write remote state failed: ${e.message}`); }
+}
+// 启动时读 remote/ 里存的（要在 loadAssets 之后调用：校验词典条数时要和自带的比）
+function loadRemoteCache() {
+  try { remote.state = JSON.parse(fs.readFileSync(REMOTE_STATE, 'utf8')); } catch { remote.state = {}; }
+  if (!isObj(remote.state)) remote.state = {};
+  const samePack = remote.state.pack === PACK_VERSION;
+  for (const [key, rel] of REMOTE_FILES) {
+    remote[key] = null;
+    if (!samePack && (key === 'dict' || key === 'rules')) continue;
+    try { remote[key] = REMOTE_CHECK[key](JSON.parse(fs.readFileSync(remoteFile(rel), 'utf8'))); } catch {}
+  }
+  mergedCache = null;
+  const st = remote.state;
+  const now = Date.now();
+  remoteNextAt = !samePack ? now + REMOTE_FIRST_MS
+    : Math.max(now + REMOTE_FIRST_MS, (st.okAt || 0) + REMOTE_EVERY_MS, st.at > (st.okAt || 0) ? st.at + REMOTE_RETRY_MS : 0);
+}
+// 交给翻译器的词典和规则：自带的 + 在线的（在线的覆盖同名条目）
+function i18nData() {
+  const on = onlineOn();
+  const c = mergedCache;
+  if (c && c.d === assets.dict && c.r === assets.rules && c.rd === remote.dict && c.rr === remote.rules && c.on === on) return c;
+  let dict = assets.dict;
+  let rules = assets.rules || [];
+  if (on && assets.dict) {
+    if (remote.dict) dict = { ...assets.dict, ...remote.dict };
+    if (remote.rules) {
+      const seen = new Set(remote.rules.map((r) => r[0]));
+      rules = [...remote.rules, ...(assets.rules || []).filter((r) => !seen.has(r[0]))];
+    }
+  }
+  mergedCache = { d: assets.dict, r: assets.rules, rd: remote.dict, rr: remote.rules, on, dict, rules };
+  return mergedCache;
+}
+// 交给状态栏的：版本号、开关、在线价格表、最新版本号、检查情况
+function remoteForPage() {
+  const on = onlineOn();
+  const st = remote.state || {};
+  return {
+    version: PACK_VERSION, on,
+    prices: on ? remote.prices : null,
+    meta: on ? remote.meta : null,
+    st: {
+      at: st.at || 0, okAt: st.okAt || 0, host: st.host ? new URL(st.host).host : '', err: st.err || '', changedAt: st.changedAt || 0,
+      dictN: on && remote.dict ? Object.keys(remote.dict).length : 0, rulesN: on && remote.rules ? remote.rules.length : 0,
+    },
+  };
+}
+// 在页面里取一个文件，返回文字；取不到抛错
+async function pageFetch(sess, url) {
+  const expr = `(async () => {
+    const c = new AbortController();
+    const t = setTimeout(() => c.abort(), 20000);
+    try {
+      const r = await fetch(${JSON.stringify(url)}, { cache: 'no-cache', credentials: 'omit', referrerPolicy: 'no-referrer', signal: c.signal });
+      if (!r.ok) return JSON.stringify({ s: r.status });
+      const text = await r.text();
+      return JSON.stringify({ s: r.status, text: text.length > 2000000 ? null : text });
+    } catch (e) { return JSON.stringify({ s: 0, e: String((e && e.message) || e).slice(0, 120) }); }
+    finally { clearTimeout(t); }
+  })()`;
+  const r = await sess.send('Runtime.evaluate', { expression: expr, awaitPromise: true, returnByValue: true });
+  const v = r && r.result && r.result.value;
+  if (typeof v !== 'string') throw Error('no result');
+  const o = JSON.parse(v);
+  if (o.s !== 200 || typeof o.text !== 'string') throw Error(o.e || `HTTP ${o.s}`);
+  return o.text;
+}
+async function checkRemote() {
+  const sess = [...sessions.values()].find((s) => s.ws && s.ws.readyState === 1 && s.scriptId);
+  if (remoteBusy || !sess) return;
+  remoteBusy = true;
+  const st = remote.state;
+  st.at = Date.now();
+  const problems = [];
+  try {
+    // 先取最小的 meta.json，顺便试出哪个地址能用（上次能用的排在最前）
+    const bases = [...REMOTE_BASES].sort((a, b) => (b === st.host) - (a === st.host));
+    const got = {};
+    let base = null;
+    const fails = [];
+    for (const b of bases) {
+      try { got.meta = await pageFetch(sess, b + 'data/meta.json'); base = b; break; }
+      catch (e) { fails.push(`${new URL(b).host}: ${e.message}`); }
+    }
+    if (!base) throw Error(fails.join('; '));
+    for (const [key, rel] of REMOTE_FILES) {
+      if (key === 'meta') continue;
+      try { got[key] = await pageFetch(sess, base + rel); } catch (e) { problems.push(`${key}: ${e.message}`); }
+    }
+    const changed = [];
+    for (const [key, rel] of REMOTE_FILES) {
+      if (typeof got[key] !== 'string') continue;
+      let val;
+      try { val = REMOTE_CHECK[key](JSON.parse(got[key].replace(/^﻿/, ''))); }
+      catch (e) { problems.push(`${key} rejected: ${e.message}`); continue; }
+      if (JSON.stringify(val) === JSON.stringify(remote[key])) continue;
+      remote[key] = val;
+      fs.mkdirSync(REMOTE_DIR, { recursive: true });
+      fs.writeFileSync(remoteFile(rel), JSON.stringify(val));
+      changed.push(key);
+    }
+    Object.assign(st, { okAt: Date.now(), host: base, err: problems.join('; ').slice(0, 300), pack: PACK_VERSION });
+    if (changed.length) st.changedAt = Date.now();
+    remoteNextAt = Date.now() + REMOTE_EVERY_MS;
+    log(`remote update via ${new URL(base).host}: ${changed.length ? 'changed ' + changed.join(', ') : 'no change'}` +
+      (remote.dict ? `, dict ${Object.keys(remote.dict).length}` : '') + (remote.rules ? `, rules ${remote.rules.length}` : '') +
+      (remote.prices ? `, prices ${remote.prices.updated}` : '') + (remote.meta ? `, latest ${remote.meta.latest}` : '') +
+      (problems.length ? `; problems: ${st.err}` : ''));
+    saveRemoteState();
+    await pushRemote(changed.includes('dict') || changed.includes('rules'));
+  } catch (e) {
+    st.err = String(e.message || e).slice(0, 300);
+    remoteNextAt = Date.now() + REMOTE_RETRY_MS;
+    log(`remote update failed: ${st.err}`);
+    saveRemoteState();
+    pushRemote(false).catch(() => {});
+  } finally {
+    remoteBusy = false;
+  }
+}
+// 把在线数据交给已打开的窗口。词典或规则变了要重新注入（翻译器换词典再翻一遍）；只变了价格、版本号、检查情况就只推给状态栏。
+// 两种都更新登记给“刷新后页面”的脚本（reRegister / apply 里带着新的 CFG）。
+async function pushRemote(i18nChanged) {
+  mergedCache = null;
+  const js = JSON.stringify(remoteForPage());
+  for (const s of sessions.values()) {
+    try {
+      if (i18nChanged) { await apply(s); continue; }
+      await s.send('Runtime.evaluate', { expression: `window.__agyStats && window.__agyStats.setRemote && window.__agyStats.setRemote(${js})` });
+      await reRegister(s);
+    } catch {}
+  }
 }
 
 // ---------- 与单个页面的 CDP 连接 ----------
@@ -895,6 +1130,7 @@ async function tick() {
     costSyncAt = Date.now();
     syncCost().catch(() => {});
   }
+  if (sessions.size && !remoteBusy && Date.now() >= remoteNextAt && onlineOn()) checkRemote().catch((e) => log(`remote update failed: ${e.message}`));
 
   let port;
   try {
@@ -916,6 +1152,7 @@ async function tick() {
 
 function main() {
   loadAssets();
+  loadRemoteCache();
   setTimeout(() => { backfillHistory().catch((e) => log(`usage backfill failed: ${e.message}`)); }, 15000); // 启动 15 秒后补算一次（每个版本只跑一次）
   const loop = async () => {
     try { await tick(); } catch (e) { log(`tick error: ${e.message}`); }

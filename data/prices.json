@@ -1,0 +1,290 @@
+{
+  "schema": 1,
+  "updated": "2026-11-22",
+  "sources": {
+    "gemini": "https://aistudio.google.com/docs/pricing",
+    "claude": "https://cloud.google.com/model-garden/partner-models/pricing"
+  },
+  "models": {
+    "claude-haiku-4-5": {
+      "title": "Claude Haiku 4.5",
+      "src": "claude",
+      "t": [
+        [
+          null,
+          {
+            "in": 1,
+            "cache": 0.1,
+            "cw": 1.25,
+            "out": 5
+          }
+        ]
+      ]
+    },
+    "claude-opus-4-5": {
+      "title": "Claude Opus 4.5",
+      "src": "claude",
+      "t": [
+        [
+          null,
+          {
+            "in": 5,
+            "cache": 0.5,
+            "cw": 6.25,
+            "out": 25
+          }
+        ]
+      ]
+    },
+    "claude-opus-4-6": {
+      "title": "Claude Opus 4.6",
+      "src": "claude",
+      "t": [
+        [
+          null,
+          {
+            "in": 5,
+            "cache": 0.5,
+            "cw": 6.25,
+            "out": 25
+          }
+        ]
+      ]
+    },
+    "claude-opus-4-7": {
+      "title": "Claude Opus 4.7",
+      "src": "claude",
+      "t": [
+        [
+          null,
+          {
+            "in": 5,
+            "cache": 0.5,
+            "cw": 6.25,
+            "out": 25
+          }
+        ]
+      ]
+    },
+    "claude-opus-4-8": {
+      "title": "Claude Opus 4.8",
+      "src": "claude",
+      "t": [
+        [
+          null,
+          {
+            "in": 5,
+            "cache": 0.5,
+            "cw": 6.25,
+            "out": 25
+          }
+        ]
+      ]
+    },
+    "claude-opus-5": {
+      "title": "Claude Opus 5",
+      "src": "claude",
+      "t": [
+        [
+          null,
+          {
+            "in": 5,
+            "cache": 0.5,
+            "cw": 6.25,
+            "out": 25
+          }
+        ]
+      ]
+    },
+    "claude-opus-5-5": {
+      "title": "Claude Opus 5.5",
+      "src": "claude",
+      "t": [
+        [
+          null,
+          {
+            "in": 4,
+            "cache": 0.2,
+            "cw": 5,
+            "out": 20
+          }
+        ]
+      ]
+    },
+    "claude-sonnet-4-6": {
+      "title": "Claude Sonnet 4.6",
+      "src": "claude",
+      "t": [
+        [
+          null,
+          {
+            "in": 3,
+            "cache": 0.3,
+            "cw": 3.75,
+            "out": 15
+          }
+        ]
+      ]
+    },
+    "claude-sonnet-5": {
+      "title": "Claude Sonnet 5",
+      "src": "claude",
+      "t": [
+        [
+          null,
+          {
+            "in": 2,
+            "cache": 0.2,
+            "cw": 2.5,
+            "out": 10
+          }
+        ]
+      ]
+    },
+    "claude-sonnet-5-5": {
+      "title": "Claude Sonnet 5.5",
+      "src": "claude",
+      "t": [
+        [
+          null,
+          {
+            "in": 2,
+            "cache": 0.1,
+            "cw": 2.5,
+            "out": 10
+          }
+        ]
+      ]
+    },
+    "gemini-3.5-flash-lite": {
+      "title": "Gemini 3.5 Flash-Lite",
+      "src": "gemini",
+      "t": [
+        [
+          null,
+          {
+            "in": 0.3,
+            "cache": 0.03,
+            "out": 2.5
+          }
+        ]
+      ]
+    },
+    "gemini-3.6-flash": {
+      "title": "Gemini 3.6 Flash",
+      "src": "gemini",
+      "t": [
+        [
+          "2027-01-01",
+          {
+            "in": 0.75,
+            "cache": 0.075,
+            "out": 3.75
+          }
+        ],
+        [
+          null,
+          {
+            "in": 1.5,
+            "cache": 0.15,
+            "out": 7.5
+          }
+        ]
+      ]
+    },
+    "gemini-3.8-flash": {
+      "title": "Gemini 3.8 Flash",
+      "src": "gemini",
+      "t": [
+        [
+          "2027-01-01",
+          {
+            "in": 0.75,
+            "cache": 0.075,
+            "out": 3.75
+          }
+        ],
+        [
+          null,
+          {
+            "in": 1.5,
+            "cache": 0.15,
+            "out": 7.5
+          }
+        ]
+      ]
+    },
+    "gemini-4-argon": {
+      "title": "Gemini 4 Argon",
+      "src": "gemini",
+      "t": [
+        [
+          "2026-12-01",
+          {
+            "in": 2,
+            "cache": 0.1,
+            "out": 10
+          }
+        ],
+        [
+          null,
+          {
+            "in": 4,
+            "cache": 0.2,
+            "out": 20
+          }
+        ]
+      ]
+    },
+    "gemini-4-carbon": {
+      "title": "Gemini 4 Carbon",
+      "src": "gemini",
+      "t": [
+        [
+          "2026-12-01",
+          {
+            "in": 2,
+            "cache": 0.1,
+            "out": 10
+          }
+        ],
+        [
+          null,
+          {
+            "in": 4,
+            "cache": 0.2,
+            "out": 20
+          }
+        ]
+      ]
+    },
+    "gemini-4-hydrogen": {
+      "title": "Gemini 4 Hydrogen",
+      "src": "gemini",
+      "t": [
+        [
+          null,
+          {
+            "in": 1.5,
+            "cache": 0.075,
+            "out": 7.5
+          }
+        ]
+      ]
+    },
+    "gemini-4-neon": {
+      "title": "Gemini 4 Neon",
+      "src": "gemini",
+      "t": [
+        [
+          null,
+          {
+            "in": 3,
+            "cache": 0.15,
+            "out": 15
+          }
+        ]
+      ]
+    }
+  }
+}

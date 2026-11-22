@@ -48,6 +48,7 @@ To change the color theme later, double-click `配色开关.cmd` (color toggle).
 | Chinese UI translation | On | No. It only changes the local display |
 | Usage status bar | On | No. It only reads local data |
 | Author's color theme | Off | No. It only changes the theme colors of your local Antigravity |
+| Online updates of the dictionary and prices | On | No. Every 6 hours it downloads the dictionary and price table from this project's GitHub repository (through jsDelivr). These are plain download requests; no data is uploaded. You can turn it off; see [Online updates](#online-updates) |
 
 Zoom, font and contrast are never changed.
 
@@ -143,10 +144,28 @@ Cost = tokens × the public API list price from Google / Anthropic, in US dollar
 - `gemini-4-hydrogen-tiered-high` (used by the browser subagent) is not on the official pricing page. It is estimated with the Gemini 4 Hydrogen standard price.
 - GPT-OSS 120B has no price and is not counted.
 - Sources: the Google AI Studio pricing page (2026-11-16; Neon 2026-11-19) and the Anthropic list prices (2026-11-03). In Antigravity, Claude is called through Google Vertex, so the real price can be different.
-- The prices are in `PRICES` in `statusbar.js`. Change them there if prices change.
+- By default, prices come from the online price table `data/prices.json` (see [Online updates](#online-updates)). Hover over `$x today` to see whether the online or the built-in prices are used. The built-in prices are in `PRICES` in `statusbar.js`; they are used when online updates are off or the download fails.
 - Today's cost: the sum of calls after midnight in the conversations you used today. The amount for each conversation is saved in `cost-day.json` in the install folder, so it is not reset when Antigravity restarts. It starts again from zero after midnight.
 
 </details>
+
+### Online updates
+
+Antigravity adds new UI text when it updates, and Google changes prices. So that you do not have to install a new version each time, the injector downloads a few data files from this project's GitHub repository every 6 hours:
+
+| File | Contents | Updated by |
+|---|---|---|
+| `i18n/zh-CN.json`, `i18n/zh-CN.rules.json` | Dictionary and rules | The author pushes new translations |
+| `data/prices.json` | The price of each model | GitHub Actions checks the official pricing pages of Google AI Studio and Vertex AI every day and commits only when a price changes (`tools/update-prices.mjs`) |
+| `data/meta.json` | The latest version number | Changed at each release |
+
+- **Only data is downloaded, not code.** The dictionary and rules are only put into the UI as text (not as HTML), and prices are only numbers. The injector, status bar and translator do not update themselves. When a new version is out, the daily usage panel shows `v<version> available` at the top right; download the zip and install it over the old one.
+- **The download uses Antigravity's own network.** The requests go out from the Antigravity page, with Antigravity's network and proxy settings, without cookies or a Referer. The addresses are tried in this order: `cdn.jsdelivr.net`, `fastly.jsdelivr.net`, `gcore.jsdelivr.net`, `raw.githubusercontent.com`. The last address that worked is tried first.
+- **Files are checked before use.** A file with a bad format, with more than 20% fewer entries than the bundled one (for example, a partial download), or with prices out of range is not used; the old data stays. After a failure, the injector tries again in 30 minutes.
+- Online dictionary entries replace bundled entries with the same text; the other bundled entries stay. If you deleted the bundled dictionary (status bar only), the online dictionary is not used either. Models in the online price table use the online price; other models use the built-in price.
+- Text whose translation changed is updated at once; entries that are no longer in the online dictionary go back to English.
+- The downloaded files are kept in `remote/` in the install folder and are used again after Antigravity restarts. After you install a new version, the saved dictionary is not used until the next download.
+- **To turn it off**: daily usage panel → `theme` → `updates` at the bottom → `off`. Then nothing is downloaded, and the dictionary and prices come only from the package. The line below it shows the last check time, the address used, the number of online dictionary entries, the date of the price table and any problems.
 
 ### Optional: the author's color theme
 
@@ -194,6 +213,7 @@ Read this section before you decide to use the pack.
 
 - Section 6 of the Antigravity additional terms of service says you must not abuse, harm or interfere with the service, including "using the Service in connection with products not provided by us". A breach can get your Antigravity and Gemini CLI accounts suspended or terminated. This project is a third-party tool. The author cannot promise that using it does not break the terms.
 - This project only changes the local UI. The status bar only reads local data and does not change what is sent to Google.
+- Online updates download the dictionary and price table from this project's GitHub repository. If someone tampered with the repository, the UI could show changed text (no code runs, and your data cannot be read). If you do not accept this, turn `updates` off on the Theme page.
 - This project depends on the internal page structure and APIs of Antigravity. After an Antigravity update, some features can stop working, and new UI text shows in English until the dictionary is updated.
 - The shortcut flag opens a debugging port on `127.0.0.1` on your computer (Antigravity before 2.33.0 opened it by default). Other programs on your computer can use this port to control the Antigravity window. If you do not accept this, do not use this project.
 
@@ -223,6 +243,7 @@ v1.0.0 changed the look directly at install time (131% zoom, strong contrast, sy
 
 | Antigravity version | What was tested | Date |
 |---|---|---|
+| 2.34.0 | v1.7 (real Windows 11 computer, with a local server in place of the repository): the four files are downloaded from the Antigravity page (no cookies, no Referer), checked and saved in `remote/`; online dictionary entries take effect; with `updates` off, the bundled dictionary and built-in prices come back, and turning it on checks again within 3 seconds; with the version set to 1.7.1, the panel shows the new-version notice; a dictionary cut to 100 entries is rejected and the old one stays; one bad regex in the rules is skipped alone; with the server stopped, the error is recorded and the saved data stays. Translator updates: 17 tests in a browser all pass. Real addresses (before `data/meta.json` was pushed, so 404): all four can be reached on Windows; on macOS, `cdn.jsdelivr.net` fails and `fastly.jsdelivr.net` times out, and the other two can be reached. Price script: offline runs with that day's two pricing pages give the same prices as the built-in table for the 7 required models; the cases "old price removed after the change date" and "a number changes by more than 5 times" were simulated. **Not tested**: real downloads from jsDelivr after the push, and real GitHub Actions runs | 2026-11-22 |
 | 2.34.0 | v1.6 (real Windows 11 computer): subagent tree lines (model, context, cache, own cost, time running, waiting for approval, time and steps when done), the compaction badge, the percent of each part in the context tooltip, and `running` that does not wrap in a narrow window; the four icon sets and the alternative icon of each item on the Theme page (comet, 3-step speed gauge); in the daily panel, the account, top cards, token column, call details (today and earlier days; 11-18 has 1101 calls, $69.24), and the weekly `cap` and estimate; tooltips are no longer transparent; the v2 fill-in read 79 conversation databases, and the call counts of 7 days (11-08, 11-10, 11-11, 11-16, 11-17, 11-18, 11-19) match the call details day by day; the total calls and the limit records did not change. Real Mac: the account, limit history kept for each account, and the panel work; the fill-in step is skipped correctly when there are no conversation databases. **Not tested**: the installer (not changed) | 2026-11-22 |
 | 2.34.0 | v1.5.1: full test of the look on a real Mac (v1.5.0 source copied over, injector restarted): 8 palettes, 3 styles, 4 bar types, icons on and off, the 8 cards on the Theme page and a click on a card all work; with Antigravity switched to its dark theme in Settings, Cometix, Tokyo Night, Catppuccin + powerline, Gruvbox + pill + ring and the Theme page were checked, then the theme was switched back to light; after a window reload the chosen look comes back at once (v1.5.0 needed up to 30 seconds); the `reset` button restores the defaults; no page errors. **Not tested**: subagent lines with the new look | 2026-11-22 |
 | 2.34.0 | Look (v1.5.0): on a real Windows computer, the new status bar (context ring, compact text, thin bars) shows correctly; the Theme page shows 8 palette cards and the 4 option rows (style, bars, detail, icons) with no errors; a choice is written to `look.json` after 28 seconds; in an offline preview page, all 8 palettes in light and dark, the 3 styles, the 4 bar types and icons off show correctly. On a real Mac: the new status bar, the Theme page and the icon font work with no errors. Weekly limit as net change per period: in one period, while the model was generating, the Gemini weekly limit went from 1.699% to 1.594% and the 5-hour limit from 1.907% to 1.487% in 6 minutes; the real history on our computer was calculated again offline, and 11-22 went from +7.24% to +1.59% (the status bar showed 2%); 3 more cases were simulated (ups and downs in one period, a new period during the day, a limit not seen before). **Not tested**: the dark theme of Antigravity on a real computer (only in the offline preview), subagent lines with the new look | 2026-11-22 |
@@ -252,7 +273,7 @@ Known gaps in the translation:
 - The status bar wraps `fetch` in the page and listens to the grpc-web+json data between the app and the local backend (`language_server`). It does not change the requests that the app sends. It also calls a few read-only local APIs: quota, the signed-in account (email and plan; the email is used only in the page to make the account ID and the masked text, and is not written to a file), the actual model name, subagent status and steps, and the token usage and time of each call (for the cost and the call details).
 - Every 30 seconds, the injector saves today's cost from the page into `cost-day.json`. It also finds the conversations you used today in `%USERPROFILE%\.gemini\antigravity\brain\` (macOS: `~/.gemini/antigravity/brain/`) and gives them to the status bar, together with the ID, creation time and change time of each conversation in the last 32 days from the conversation database folder (`conversations`), because the backend's conversation list shows only some conversations. So today's amount is kept when Antigravity restarts. Only conversation IDs, amounts, and call and token counts for each model are saved. It also writes the day's totals and limit changes to `usage-history.json`, and gives the last 31 days to the daily usage panel.
 - By default, it does not write Antigravity's settings files. It writes them only in two cases: you choose the author's color theme (or switch back), which changes the two theme color groups in `%USERPROFILE%\.gemini\config\config.json`; or you choose to restore on uninstall, which writes the saved values back to that file (and to `%APPDATA%\Antigravity\app_storage.json` if you installed the old v1.0.0).
-- It does not connect to any website, except Google Fonts for the status bar icons.
+- It connects to only two places: Google Fonts for the status bar icons, and jsDelivr (or raw.githubusercontent.com) for the data files of this repository ([Online updates](#online-updates), which you can turn off).
 
 <details>
 <summary>Run from source and build the package</summary>
@@ -276,6 +297,8 @@ Build:
 node package/build.mjs
 ```
 
+For a new release, change `PACK_VERSION` in `inject.mjs` and `latest` and `date` in `data/meta.json` to the new version (the build script checks that the two match). After `data/meta.json` is pushed to main, users of older versions see a new-version notice in the daily usage panel.
+
 This creates `dist/Antigravity中文美化包/` and a zip with the same name. When you upload it to GitHub Releases, rename the zip to `agy-zh-pack-v<version>.zip` (GitHub removes Chinese characters from file names). The zip includes the running `node.exe` and `package/third_party/node-LICENSE.txt` (the Node.js license). If you build with a different Node.js version, use the license for that version: `https://raw.githubusercontent.com/nodejs/node/<version>/LICENSE`.
 
 </details>
@@ -295,6 +318,12 @@ This creates `dist/Antigravity中文美化包/` and a zip with the same name. Wh
 | `usage-history.json` | Daily usage history, kept for 90 days (not in the repo; created by the injector) |
 | `look.json` | Your status bar look (not in the repo; created when you choose a look on the Theme page) |
 | `quota-samples.json` | Limit readings for 8 days, used for the weekly limit estimate (not in the repo; the injector creates it) |
+| `remote/` | The dictionary, rules, price table and check status from online updates (not in the repo; the injector creates it) |
+| `data/prices.json` | The online price table (GitHub Actions updates it daily from the official pricing pages) |
+| `data/meta.json` | The latest version number (changed at each release) |
+| `tools/update-prices.mjs` | Updates `data/prices.json` from the official pricing pages |
+| `.github/workflows/update-prices.yml` | Runs that script every day; commits when a price changes and opens an issue when there is a problem |
+| `.github/workflows/purge-cdn.yml` | Clears the jsDelivr cache after the dictionary or `data/` is pushed |
 | `package/app/setup.mjs` | Install, uninstall, color toggle |
 | `package/build.mjs` | Builds the package |
 | `package/third_party/node-LICENSE.txt` | License of the Node.js included in the package |

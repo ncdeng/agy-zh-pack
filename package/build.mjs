@@ -12,6 +12,14 @@ const DIST = path.join(SRC, 'dist');
 const OUT = path.join(DIST, NAME);
 const NODE = process.execPath;
 
+// 版本号：inject.mjs 的 PACK_VERSION 要和 data/meta.json 的 latest 一致（v1.7 起，在线更新靠 meta.json 提示新版本）
+const PACK_VERSION = (/const PACK_VERSION = '([\d.]+)'/.exec(fs.readFileSync(path.join(SRC, 'inject.mjs'), 'utf8')) || [])[1];
+const META = JSON.parse(fs.readFileSync(path.join(SRC, 'data', 'meta.json'), 'utf8'));
+if (!PACK_VERSION || PACK_VERSION !== META.latest) {
+  console.error(`版本号对不上：inject.mjs 的 PACK_VERSION 是 ${PACK_VERSION}，data/meta.json 的 latest 是 ${META.latest}。两处都改成要发的版本再打包。`);
+  process.exit(1);
+}
+
 fs.rmSync(OUT, { recursive: true, force: true });
 fs.mkdirSync(path.join(OUT, 'app', 'i18n'), { recursive: true });
 
@@ -40,7 +48,7 @@ fs.writeFileSync(path.join(OUT, '配色开关.cmd'), cmd('theme'), 'ascii');
 // 测试过的 Antigravity 版本（改了要同步 README.md 的“测试情况”和 README.en.md 的“Tested versions”）
 const TESTED = 'Antigravity 桌面版 2.34.0（汉化、状态栏）、2.33.0（快捷方式参数）、2.31.2（配色开关），Windows 11';
 
-const readme = `Antigravity 中文美化包（非官方）
+const readme = `Antigravity 中文美化包（非官方）v${PACK_VERSION}
 
 这是第三方工具，和 Google 没有关系。安装前请先读完“风险”一节。
 
@@ -104,6 +112,16 @@ const readme = `Antigravity 中文美化包（非官方）
   （实测 Gemini 约 51.2 万 token，Claude Opus 5.5 约 84 万 token），再解锁反而会把 Claude 的上限压低，所以去掉了。
 - 装过旧版的，用新版的“一键安装.cmd”装一次就会删掉旧设置。升级以后，旧文件夹里的“上下文开关.cmd”就不起作用了。
 
+【在线更新（默认开着）】
+- Antigravity 更新后会加新的界面文字，Google 也会调价。注入程序每 6 小时从本项目的 GitHub 仓库
+  （经 jsDelivr，备用 raw.githubusercontent.com）下载最新的词典、规则、价格表和最新版本号，不用重装就能用上。
+- 只下载数据，不下载代码：词典只被当作文字填进界面，价格只是数字。注入程序和状态栏本身不会自动更新；
+  有新版本时，每日用量面板右上角会显示“v<版本> available”，到 GitHub Releases 下载新的安装包覆盖安装即可。
+- 请求从 Antigravity 的页面里发出，用 Antigravity 自己的网络和代理设置，不带 cookie，不上传任何数据。
+  下载到的文件先校验（格式、条数、数值范围），通过了才用，存在安装目录的 remote 文件夹里。
+- 万一仓库被人篡改，界面上可能出现被改过的文字（不会执行代码，也拿不到你的数据）。
+- 想关掉：每日用量面板 → theme → 最下面的 updates 选 off。关掉后不再联网，只用安装包自带的词典和价格。
+
 【刷新】
 - 一般不用手动刷新：开机后注入程序会自动启动，Antigravity 刚打开时会自动刷新一次。
   如果输入框上方提示“Press Ctrl+R to reload this window”，按一下 Ctrl+R 就好。
@@ -114,10 +132,10 @@ const readme = `Antigravity 中文美化包（非官方）
 
 【说明】
 - 不修改 Antigravity 本身的文件，Antigravity 自动更新后仍然有效。
-- 安装位置：%LOCALAPPDATA%\\AgyZhPack（原来的配色记在 originals.json，今天的花费记在 cost-day.json，每天用量的历史记在 usage-history.json，只存数字和打码的邮箱；额度读数记在 quota-samples.json，保留 8 天；状态栏外观的选择记在 look.json）
+- 安装位置：%LOCALAPPDATA%\\AgyZhPack（原来的配色记在 originals.json，今天的花费记在 cost-day.json，每天用量的历史记在 usage-history.json，只存数字和打码的邮箱；额度读数记在 quota-samples.json，保留 8 天；状态栏外观的选择和在线更新开关记在 look.json；在线更新下载到的文件在 remote 文件夹）
 - 开机自启项：计划任务“AgyZhPack”（登录后立刻在后台运行，约占 60 MB 内存）。
   电脑不允许建计划任务时，会改用“启动”文件夹里的 agy-zh-pack.vbs（开机后要等几分钟才生效）。
-- 用量和额度是向本机的 Antigravity 后台查的。除了从 Google Fonts 在线加载状态栏的图标，不会连接其他网站。
+- 用量和额度是向本机的 Antigravity 后台查的。联网只有两处：从 Google Fonts 加载状态栏的图标；在线更新从 jsDelivr（或 raw.githubusercontent.com）下载本项目的数据文件（可以关掉，见上面）。
 - 自带的 node.exe 是 Node.js ${process.version} 官方程序，许可证见 app\\node-LICENSE.txt。
 `;
 fs.writeFileSync(path.join(OUT, '使用说明.txt'), '﻿' + readme.replace(/\n/g, '\r\n'), 'utf8');
@@ -127,4 +145,4 @@ const zip = path.join(DIST, NAME + '.zip');
 fs.rmSync(zip, { force: true });
 execFileSync('pwsh', ['-NoProfile', '-Command', `Compress-Archive -LiteralPath '${OUT.replace(/'/g, "''")}' -DestinationPath '${zip.replace(/'/g, "''")}' -CompressionLevel Optimal`], { stdio: 'inherit' });
 console.log('folder:', OUT);
-console.log('zip:', zip, (fs.statSync(zip).size / 1024 / 1024).toFixed(1) + ' MB');
+console.log('zip:', zip, (fs.statSync(zip).size / 1024 / 1024).toFixed(1) + ' MB', 'version', PACK_VERSION);

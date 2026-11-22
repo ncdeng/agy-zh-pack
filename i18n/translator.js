@@ -8,6 +8,9 @@
 //     这样不会打乱 React 的渲染。React 把文字改回英文时，监听器会再翻一次。
 //   - 跳过对话内容：助手回复、用户消息、代码、终端、输入框、可编辑区域。
 //   - 不改 aria-label（应用和样式都靠它定位元素）。
+//   - 翻过的文字节点和属性记下 [原文, 译文]（WeakMap，节点没了自动释放）。换词典（在线更新、改了词典文件）时按原文重翻：
+//     改了译文的马上换上；新词典里没有了的（例如关掉在线更新后，只有在线词典才有的条目）恢复原文。
+//     页面上的文字被应用改掉了（和记下的译文不一样）就当成新的原文。
 //
 // 被注入时以 (本函数)(词典, 规则) 的形式调用；再次调用只更新词典和规则并重新翻一遍。
 function agyI18n(DICT, RULES) {
@@ -58,7 +61,7 @@ function agyI18n(DICT, RULES) {
 
   // 改了本文件的逻辑就把版本号加 1：已打开的窗口会停掉旧翻译器、换成新的，不用刷新。
   // 版本号相同时只更新词典和规则。
-  const VERSION = 4;
+  const VERSION = 5;
   const existing = window.__agyI18n;
   if (existing && existing.version === VERSION) {
     existing.update(DICT, RULES);
@@ -106,20 +109,39 @@ function agyI18n(DICT, RULES) {
   const isExcluded = (el) => !el || (el.closest(EXCLUDE) !== null && el.closest(ALLOW) === null);
   const isAttrExcluded = (el) => !el || el.closest(ATTR_EXCLUDE) !== null;
 
+  const origText = new WeakMap(); // 文字节点 → [原文, 译文]
+  const origAttr = new WeakMap(); // 元素 → { 属性名: [原文, 译文] }
   const doText = (node, checked) => {
-    const r = translate(node.nodeValue);
-    if (r === null) return;
-    if (!checked && isExcluded(node.parentElement)) return;
-    node.nodeValue = r;
-  };
-  const doAttrs = (el) => {
-    for (const a of ATTRS) {
-      const v = el.getAttribute(a);
-      if (!v) continue;
-      const r = translate(v);
-      if (r !== null) el.setAttribute(a, r);
+    const v = node.nodeValue;
+    const o = origText.get(node);
+    const src = o && v === o[1] ? o[0] : v; // 还是我们写的译文：按原文重翻
+    const r = translate(src);
+    if (r === null) {
+      if (o && src === o[0] && v !== src) node.nodeValue = src; // 新词典里没有了：恢复原文
+      if (o) origText.delete(node);
+      return;
     }
+    if (!checked && isExcluded(node.parentElement)) return;
+    origText.set(node, [src, r]);
+    if (r !== v) node.nodeValue = r;
   };
+  const doAttr = (el, a) => {
+    const v = el.getAttribute(a);
+    if (!v) return;
+    let m = origAttr.get(el);
+    const o = m && m[a];
+    const src = o && v === o[1] ? o[0] : v;
+    const r = translate(src);
+    if (r === null) {
+      if (o && src === o[0] && v !== src) el.setAttribute(a, src);
+      if (o) delete m[a];
+      return;
+    }
+    if (!m) origAttr.set(el, (m = {}));
+    m[a] = [src, r];
+    if (r !== v) el.setAttribute(a, r);
+  };
+  const doAttrs = (el) => { for (const a of ATTRS) doAttr(el, a); };
 
   // 翻译一棵子树；root 本身已确认不在排除区域里。
   // 排除区域整棵跳过，所以再单独翻一遍子树里放行的按钮。
@@ -165,10 +187,7 @@ function agyI18n(DICT, RULES) {
           }
         }
       } else if (m.type === 'attributes') {
-        const el = m.target;
-        const v = el.getAttribute(m.attributeName);
-        const r = translate(v);
-        if (r !== null && !isAttrExcluded(el)) el.setAttribute(m.attributeName, r);
+        if (!isAttrExcluded(m.target)) doAttr(m.target, m.attributeName);
       }
     }
   };
