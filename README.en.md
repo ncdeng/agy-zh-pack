@@ -55,7 +55,7 @@ Zoom, font and contrast are never changed.
 
 ### Chinese UI translation
 
-Menus, settings, buttons and hints are shown in Chinese (a dictionary of 3125 entries and 60 regex rules). Conversation content, code and file names are not translated.
+Menus, settings, buttons and hints are shown in Chinese (a dictionary of 3292 entries and 76 regex rules). Conversation content, code and file names are not translated.
 
 #### Status bar only (no translation)
 
@@ -190,6 +190,8 @@ v1.0.0 changed the look directly at install time (131% zoom, strong contrast, sy
 
 | Antigravity version | What was tested | Date |
 |---|---|---|
+| 2.34.0 | Translation: added 167 new UI strings and 16 rules from 2.34.0 (Orchestrator settings, permission and sandbox options, plugin panels, sidebar customization, send-key setting, home page suggestion cards; the limit descriptions on the Models settings screen are translated by rules, and the maximum text length for rules went from 80 to 120); after the change, scans of the Windows home and conversation pages and the macOS settings screens (General, Models) show only names and developer options in English | 2026-11-22 |
+| 2.34.0 | macOS on a real computer (13-inch Intel MacBook Pro 2020, macOS 15.7.9, Node.js 24.14.0): `install-agent` installs the LaunchAgent and starts the injector; `launch-agy` starts Antigravity with the debugging port; after injection into the onboarding page, the window reloads once; translation, the status bar (model, today's cost, 5-hour and weekly limits) and the daily usage panel work; fill-in is skipped correctly when there are no conversation databases. **Not tested**: autostart after a restart, the notification when Antigravity starts without the flag, color toggle | 2026-11-22 |
 | 2.33.0 | Official default limits with the unlock off: 512k for Gemini 4 Neon and Gemini 4 Carbon, 840k for Claude Opus 5.5; cost shows in a real Neon conversation (amount not checked); after the unlock was removed, the injector on a real computer restarted and injected again, translation and the status bar work, and Claude Opus 5.5 shows 840k after a new message; in an isolated folder: upgrade from an old version with the unlock on (old setting deleted, with a message), reinstall, uninstall; the daily usage panel shows correctly on a real computer (bar chart, table, both limit columns); the limit counting was tested offline in 8 cases; fill-in: 4270 calls read from 73 conversation databases, and today's numbers match the live status bar ledger item by item (calls and tokens for Carbon, Opus 5.5 and Neon) | 2026-11-20 |
 | 2.33.0 | Translation (home page, all settings screens, model menu; added 301 new UI strings from 2.32 and 2.33 and 4 rules); prices for Neon and Orchestrator (Neon) (checked offline); shortcut flag: on a real computer, injection works after a restart from the shortcut, and a start without the flag shows the notification in about 20 seconds; in an isolated folder: install, reinstall, flag removal on uninstall, restart or skip when Antigravity is open, no shortcuts | 2026-11-19 |
 | 2.33.0 | **Not tested**: whether the next automatic update rewrites the shortcuts or restarts Antigravity without the flag; color toggle (no code change this time) | — |

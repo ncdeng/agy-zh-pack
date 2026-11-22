@@ -2,7 +2,8 @@
 //
 // 做法：
 //   - 只做“整段文字完全相同”的替换：文字节点去掉首尾空白后，在词典里查到才替换；
-//     查不到再试 zh-CN.rules.json 里的正则规则（只用于 80 字以内的短文字）。
+//     查不到再试 zh-CN.rules.json 里的正则规则（只用于 120 字以内的短文字；2026-11-22 从 80 放宽，
+//     设置页的额度说明 “You have used some of your weekly limit, it will fully refresh in 6 days, 10 hours.” 有 85 字）。
 //   - 只改文字节点的内容（nodeValue）和 placeholder / title 属性，不增删节点，
 //     这样不会打乱 React 的渲染。React 把文字改回英文时，监听器会再翻一次。
 //   - 跳过对话内容：助手回复、用户消息、代码、终端、输入框、可编辑区域。
@@ -57,7 +58,7 @@ function agyI18n(DICT, RULES) {
 
   // 改了本文件的逻辑就把版本号加 1：已打开的窗口会停掉旧翻译器、换成新的，不用刷新。
   // 版本号相同时只更新词典和规则。
-  const VERSION = 3;
+  const VERSION = 4;
   const existing = window.__agyI18n;
   if (existing && existing.version === VERSION) {
     existing.update(DICT, RULES);
@@ -79,7 +80,7 @@ function agyI18n(DICT, RULES) {
   // 一段短文字：先查词典，再试规则
   const lookup = (t) => {
     let v = dict.get(t);
-    if (v === undefined && t.length <= 80) {
+    if (v === undefined && t.length <= 120) {
       for (const [re, rep] of rules) {
         if (re.test(t)) { v = t.replace(re, rep); break; }
       }

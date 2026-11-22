@@ -238,5 +238,69 @@
   [
     "^See all \\((\\d+)\\)$",
     "查看全部（$1）"
+  ],
+  [
+    "^You have used some of your weekly limit, it will fully refresh in (\\d+) days?, (\\d+) hours?\\.$",
+    "你已用掉部分每周额度，将在 $1 天 $2 小时后完全恢复。"
+  ],
+  [
+    "^You have used some of your weekly limit, it will fully refresh in (\\d+) days?\\.$",
+    "你已用掉部分每周额度，将在 $1 天后完全恢复。"
+  ],
+  [
+    "^You have used some of your weekly limit, it will fully refresh in (\\d+) hours?, (\\d+) minutes?\\.$",
+    "你已用掉部分每周额度，将在 $1 小时 $2 分钟后完全恢复。"
+  ],
+  [
+    "^You have used some of your weekly limit, it will fully refresh in (\\d+) hours?\\.$",
+    "你已用掉部分每周额度，将在 $1 小时后完全恢复。"
+  ],
+  [
+    "^You have used some of your weekly limit, it will fully refresh in (\\d+) minutes?\\.$",
+    "你已用掉部分每周额度，将在 $1 分钟后完全恢复。"
+  ],
+  [
+    "^You have used some of your 5-hour limit, it will fully refresh in (\\d+) days?, (\\d+) hours?\\.$",
+    "你已用掉部分 5 小时额度，将在 $1 天 $2 小时后完全恢复。"
+  ],
+  [
+    "^You have used some of your 5-hour limit, it will fully refresh in (\\d+) hours?, (\\d+) minutes?\\.$",
+    "你已用掉部分 5 小时额度，将在 $1 小时 $2 分钟后完全恢复。"
+  ],
+  [
+    "^You have used some of your 5-hour limit, it will fully refresh in (\\d+) hours?\\.$",
+    "你已用掉部分 5 小时额度，将在 $1 小时后完全恢复。"
+  ],
+  [
+    "^You have used some of your 5-hour limit, it will fully refresh in (\\d+) minutes?\\.$",
+    "你已用掉部分 5 小时额度，将在 $1 分钟后完全恢复。"
+  ],
+  [
+    "^Models within this group: (.+)$",
+    "此组包含的模型：$1"
+  ],
+  [
+    "^(\\d+)h (\\d+)m left$",
+    "剩 $1 小时 $2 分钟"
+  ],
+  [
+    "^(\\d+)h left$",
+    "剩 $1 小时"
+  ],
+  [
+    "^(\\d+)m left$",
+    "剩 $1 分钟"
+  ],
+  [
+    "^(\\d+)s left$",
+    "剩 $1 秒"
+  ],
+  [
+    "^(\\d+) days?$",
+    "$1 天"
+  ],
+  [
+    "^(\\d+) hours?$",
+    "$1 小时"
   ]
 ]
