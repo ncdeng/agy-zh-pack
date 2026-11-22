@@ -63,7 +63,7 @@ const readme = `Antigravity 中文美化包（非官方）
   鼠标停在任何一项上，会显示中文的详细说明。
   点“$x today”会打开每日用量面板：最近 7 天或 30 天每天的折算花费、token、缓存命中率、当天用掉的每周额度。
   面板右上角的 theme 可以换状态栏的外观：8 套配色（默认 Cometix）、3 种外形、4 种额度进度条、信息详略、图标开关；
-  配色跟着 Antigravity 的浅色 / 深色自动切换，选择记在安装目录的 look.json，删掉这个文件就回到默认。
+  配色跟着 Antigravity 的浅色 / 深色自动切换，选择记在安装目录的 look.json；想回到默认，在 theme 页右上角点 reset。
   装好后会从 Antigravity 自己的对话库（只读）补算以前每天的花费和 token，只补一次；以前的天数没有额度记录。
   费用是按 Google / Anthropic 公开的 API 标准价把 token 折成美元，是折算值，不是实际扣费（订阅按额度扣）。
   状态栏的外观和英文写法借鉴 Haleclipse（哈雷）的 CCometixLine（ccline）的 cometix 主题：https://github.com/Haleclipse/CCometixLine

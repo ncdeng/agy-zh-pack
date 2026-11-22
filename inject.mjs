@@ -232,12 +232,15 @@ async function syncCost() {
     } catch { /* 窗口刚关或还没注入：下次再读 */ }
   }
   if (any) updateHistory(readCostBook(), quotaBuckets(quota));
-  // 某个窗口里换了外观：存下来，马上推给其他窗口
+  // 某个窗口里换了外观：存下来，马上推给其他窗口，并更新登记给刷新后页面的脚本（见 reRegister）
   if (pick && pick.at > ((look && look.at) || 0)) {
     saveLook(pick);
     const js = JSON.stringify(readLook());
     for (const s of sessions.values()) {
-      try { await s.send('Runtime.evaluate', { expression: `window.__agyStats && window.__agyStats.setLook && window.__agyStats.setLook(${js}, true)` }); } catch {}
+      try {
+        await s.send('Runtime.evaluate', { expression: `window.__agyStats && window.__agyStats.setLook && window.__agyStats.setLook(${js}, true)` });
+        await reRegister(s);
+      } catch {}
     }
   }
 }
@@ -618,6 +621,14 @@ async function apply(sess) {
   const r = await sess.send('Page.addScriptToEvaluateOnNewDocument', { source });
   sess.scriptId = r.identifier;
   await sess.send('Runtime.evaluate', { expression: source });
+}
+// 只换掉登记给“刷新后页面”的脚本，不在当前页面里重新执行（2026-11-22 加）。
+// 登记的脚本里带着当时的 CFG（look.json 等），换了外观不重新登记的话，刷新窗口后要等下一次 30 秒同步才变回所选外观。
+// 先登记新的再去掉旧的，中间不会出现没有脚本的空档。
+async function reRegister(sess) {
+  const r = await sess.send('Page.addScriptToEvaluateOnNewDocument', { source: pageScript() });
+  if (sess.scriptId) await sess.send('Page.removeScriptToEvaluateOnNewDocument', { identifier: sess.scriptId }).catch(() => {});
+  sess.scriptId = r.identifier;
 }
 
 // ---------- 调试端口参数（2026-11-19 加，Antigravity 2.33.0 起需要） ----------

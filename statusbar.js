@@ -1366,10 +1366,13 @@ function agyStatusBar(CFG) {
     const back = el('button', 'p-btn', '← usage');
     setTip(back, '回到每日用量');
     back.addEventListener('click', () => { S.panelView = 'usage'; renderPanel(panel); });
+    const reset = el('button', 'p-btn', 'reset');
+    setTip(reset, '全部恢复默认：Cometix / plain / thin / compact / 图标开');
+    reset.addEventListener('click', () => S.setLook({ ...LOOK_DEFAULT }));
     const x = el('button', 'p-btn p-x', '×');
     setTip(x, '关闭（Esc）');
     x.addEventListener('click', closePanel);
-    head.append(back, el('span', 'p-fill'), x);
+    head.append(back, el('span', 'p-fill'), reset, x);
     panel.append(head);
 
     panel.append(el('div', 'lk-sec', 'Palette'));
@@ -1416,7 +1419,7 @@ function agyStatusBar(CFG) {
       b.addEventListener('click', () => S.setLook({ icons: v }));
       return b;
     })));
-    panel.append(el('div', 'lk-note', '配色跟着 Antigravity 的浅色 / 深色自动切换。选择保存在 look.json，所有窗口共用；删掉这个文件就回到默认。'));
+    panel.append(el('div', 'lk-note', '配色跟着 Antigravity 的浅色 / 深色自动切换。选择保存在 look.json，所有窗口共用；点右上角 reset 恢复默认。'));
   };
 
   // 背景色取输入框一带不透明的颜色，和当前主题一致；取不到用 CSS 里的默认色
