@@ -114,7 +114,8 @@ function barConfig() {
 }
 
 // ---------- 状态栏外观（2026-11-22 加） ----------
-// look.json：{ pal 配色, skin 外形, bar 进度条, dense 信息密度, icons 图标, at 选择时间 }。
+// look.json：{ pal 配色, skin 外形, bar 进度条, dense 信息密度, icons 图标整套（v1.5 是 true / false，v1.6 起是 material / outline / unicode / off）,
+//   iconMap 每一项单独选的图标（v1.6 加）, at 选择时间 }。
 // 用户在每日用量面板的 Theme 页里选，页面记在 window.__agyStats.lookPick（页面的本地存储按端口分开，每次启动都换端口，存不住）；
 // 注入程序每 30 秒读回来存进这个文件，再推给其他窗口（S.setLook(look, true)）；新注入时通过 CFG.look 交给状态栏。
 // 选项的取值由状态栏校验（cleanLook），这里只挑出这几个字段、限制长度。
@@ -129,7 +130,12 @@ function readLook() {
 function saveLook(pick) {
   const keep = {};
   for (const k of ['pal', 'skin', 'bar', 'dense']) if (typeof pick[k] === 'string') keep[k] = pick[k].slice(0, 24);
-  if (typeof pick.icons === 'boolean') keep.icons = pick.icons;
+  if (typeof pick.icons === 'boolean' || typeof pick.icons === 'string') keep.icons = typeof pick.icons === 'string' ? pick.icons.slice(0, 24) : pick.icons;
+  // v1.6：每一项单独选的图标 { 项目名: 图标名 }，最多 16 项
+  if (pick.iconMap && typeof pick.iconMap === 'object') {
+    keep.iconMap = {};
+    for (const [k, v] of Object.entries(pick.iconMap).slice(0, 16)) if (typeof v === 'string') keep.iconMap[String(k).slice(0, 24)] = v.slice(0, 32);
+  }
   keep.at = +pick.at || Date.now();
   lookCache = keep;
   try { fs.writeFileSync(LOOK_FILE, JSON.stringify(keep)); log(`look saved: ${keep.pal} / ${keep.skin} / ${keep.bar} / ${keep.dense}`); }
@@ -202,13 +208,36 @@ function todayConversations() {
   }
   return out;
 }
+// 本机对话库文件清单（2026-11-22 加，v1.6，调用明细页用）：[[对话 ID, 创建时间毫秒, 最后修改毫秒], …]，只给最近 32 天改过的。
+// 后台的对话摘要（GetAllCascadeTrajectories）只列一部分对话（11-22 实测：摘要 21 个，本机库文件 79 个），
+// 没列出的对话按 ID 照样能取到调用记录，所以把文件清单交给页面，明细页按创建 / 修改时间挑出某一天动过的对话。
+// 只读文件名和时间，不打开文件。60 秒内重复要就用上次的结果。
+let convFilesCache = null, convFilesAt = 0;
+function convFiles() {
+  if (convFilesCache && Date.now() - convFilesAt < 60000) return convFilesCache;
+  const out = [];
+  const cut = Date.now() - 32 * 86400e3;
+  let names = [];
+  try { names = fs.readdirSync(CONV_DIR); } catch {}
+  for (const f of names) {
+    if (!f.endsWith('.db') || !UUID_RE.test(f.slice(0, -3))) continue;
+    try {
+      const st = fs.statSync(path.join(CONV_DIR, f));
+      if (st.mtimeMs < cut) continue;
+      out.push([f.slice(0, -3), Math.round(st.birthtimeMs > 0 ? Math.min(st.birthtimeMs, st.mtimeMs) : st.mtimeMs), Math.round(st.mtimeMs)]);
+    } catch {}
+  }
+  convFilesCache = out; convFilesAt = Date.now();
+  return out;
+}
 let costSyncAt = 0;
 // 每次同步：交给页面今天动过的对话和最近 31 天的历史，读回页面的账本和额度，再更新历史
-const QUOTA_EXPR = `S.quota && Array.isArray(S.quota.groups) ? { at: S.quota.at, buckets: S.quota.groups.flatMap((g) => (g.buckets || []).map((b) =>
+const QUOTA_EXPR = `S.quota && Array.isArray(S.quota.groups) ? { at: S.quota.at, acct: S.account || null, buckets: S.quota.groups.flatMap((g) => (g.buckets || []).map((b) =>
   ({ id: b.bucketId, w: b.window, rf: b.remainingFraction, reset: b.resetTime, dis: b.disabled, name: g.displayName }))) } : null`;
 async function syncCost() {
   const ids = JSON.stringify(todayConversations());
   const hist = JSON.stringify(recentHistory());
+  const files = JSON.stringify(convFiles());
   const look = readLook();
   const lookJs = JSON.stringify(look);
   let quota = null;
@@ -217,7 +246,7 @@ async function syncCost() {
   for (const s of sessions.values()) {
     try {
       const r = await s.send('Runtime.evaluate', {
-        expression: `(() => { const S = window.__agyStats; if (!S) return null; S.todayIds = ${ids}; S.history = ${hist};
+        expression: `(() => { const S = window.__agyStats; if (!S) return null; S.todayIds = ${ids}; S.history = ${hist}; S.convFiles = ${files};
           if (S.setLook && ${lookJs}) S.setLook(${lookJs}, true);
           return JSON.stringify({ book: S.costBook || null, quota: ${QUOTA_EXPR}, pick: S.lookPick || null }); })()`,
         returnByValue: true,
@@ -231,7 +260,7 @@ async function syncCost() {
       if (o.pick && o.pick.at > 0 && (!pick || o.pick.at > pick.at)) pick = o.pick;
     } catch { /* 窗口刚关或还没注入：下次再读 */ }
   }
-  if (any) updateHistory(readCostBook(), quotaBuckets(quota));
+  if (any) updateHistory(readCostBook(), quotaBuckets(quota), quotaAcct(quota), quota && quota.at);
   // 某个窗口里换了外观：存下来，马上推给其他窗口，并更新登记给刷新后页面的脚本（见 reRegister）
   if (pick && pick.at > ((look && look.at) || 0)) {
     saveLook(pick);
@@ -246,7 +275,11 @@ async function syncCost() {
 }
 
 // ---------- 每天用量历史（2026-11-20 加） ----------
-// usage-history.json：{ v: 1, days: { 'YYYY-MM-DD': { usd, convs, models, quota } } }，保留 90 天，只存数字，不存对话内容。
+// usage-history.json：{ v: 3, days: { 'YYYY-MM-DD': { usd, convs, models, quota, qa } }, accts, cur }，保留 90 天，只存数字，不存对话内容。
+//   v3（2026-11-22，v1.6）：额度按账号分开记在 qa：{ 账号键: { 桶 ID: 额度记录 } }；账号键是邮箱的哈希（不存邮箱原文），
+//   accts：{ 账号键: { m 打码的邮箱, t 套餐名, first / last 第一次 / 最近一次见到的日子 } }，cur：最近一次见到的账号。
+//   quota 留着 v3 以前的记录（不知道是哪个账号的）；第一次见到某个账号时，重置时间对得上的旧记录归给它（见 adoptLegacy）。
+//   钱和 token 不分账号（是这台电脑上的花费）。
 //   models：{ 价目名: [美元, 调用数, 输入, 缓存读, 缓存写, 输出] }，由当天账本的 det 合计而来；
 //   quota：{ 桶 ID: { n 组名, w 窗口, l 最近一次的已用比例, u 当天用掉的（只累计上涨）, m 当天最高, r 重置时间（毫秒） } }，比例 0～1。
 // 状态栏的每日用量面板显示 u。（v1.4.0 的格式是 f 起点 / a 已累计，u = a + l − f；见 migrateQuota。）
@@ -353,14 +386,14 @@ function prevQuota(h, today, id) {
 // v1.4.0 旧格式（f 起点 / a 已累计）和 v1.4.1 的格式（只有 u）在 migrateHistory 里一次性换算。
 const migrateQuota = (q) => (+q.f === 0 && +q.a > 0 ? +q.a : Math.max(0, (+q.m || 0) - (+q.f || 0)) + (+q.a || 0));
 const samePeriod = (r1, r2) => Math.abs((+r1 || 0) - (+r2 || 0)) < 3600e3;
-function noteQuota(day, buckets, prev) {
-  if (!day.quota || typeof day.quota !== 'object') day.quota = {};
+// qs：某一天、某个账号的 { 桶 ID: 额度记录 }（v3 起按账号分开，见 updateHistory）
+function noteQuota(qs, buckets, prev) {
   for (const b of buckets) {
-    let q = day.quota[b.id];
+    let q = qs[b.id];
     if (!q) {
       const p = prev(b.id);
       const s = p ? (samePeriod(p.r, b.reset) ? +p.l || 0 : 0) : b.used;
-      q = day.quota[b.id] = { n: b.name, w: b.w, l: r4(b.used), m: r4(b.used), r: b.reset, s: r4(s), c: 0 };
+      q = qs[b.id] = { n: b.name, w: b.w, l: r4(b.used), m: r4(b.used), r: b.reset, s: r4(s), c: 0 };
     } else {
       if (q.s === undefined) { q.s = r4(Math.max(0, (+q.l || 0) - (+q.u || 0))); q.c = 0; } // 迁移漏掉的旧记录：保持原来的 u
       if (!samePeriod(q.r, b.reset)) { q.c = r4((+q.c || 0) + Math.max(0, (+q.l || 0) - q.s)); q.s = 0; } // 换周期：上一段结算，新一段从 0 起
@@ -373,22 +406,133 @@ function noteQuota(day, buckets, prev) {
     if (b.w) q.w = b.w;
   }
 }
-function updateHistory(book, buckets) {
+// 页面给的账号：{ key 邮箱哈希, m 打码的邮箱, t 套餐名 }（见 statusbar.js 的 acctOf）。只认这几个字段、限制长度。
+function quotaAcct(q) {
+  const a = q && q.acct;
+  if (!a || typeof a !== 'object' || !/^[0-9a-f]{6,16}$/.test(String(a.key || ''))) return null;
+  return { key: String(a.key), m: String(a.m || '').slice(0, 80), t: String(a.t || '').slice(0, 60) };
+}
+// 某个账号的某个桶在今天以前最近的一条记录（最多往前找 14 天）
+function prevQuotaOf(h, today, key, id) {
+  for (const k of Object.keys(h.days).filter((x) => x < today).sort().reverse().slice(0, 14)) {
+    const q = h.days[k] && h.days[k].qa && h.days[k].qa[key] && h.days[k].qa[key][id];
+    if (q) return q;
+  }
+  return null;
+}
+// 第一次见到某个账号：最近 14 天里不知道账号的旧记录（day.quota），重置时间和这个账号现在的桶对得上（同一个周期），
+// 就归给这个账号——同一个周期的重置时间是固定的，换了账号几乎不可能正好对上。对不上的留在 quota（面板里不显示）。
+function adoptLegacy(h, key, buckets) {
+  let n = 0;
+  for (const k of Object.keys(h.days).sort().reverse().slice(0, 14)) {
+    const day = h.days[k];
+    if (!day || !day.quota) continue;
+    for (const [id, q] of Object.entries(day.quota)) {
+      const b = buckets.find((x) => x.id === id);
+      if (!b || !q || !samePeriod(q.r, b.reset)) continue;
+      ((day.qa || (day.qa = {}))[key] || (day.qa[key] = {}))[id] = q;
+      delete day.quota[id];
+      n++;
+    }
+    if (!Object.keys(day.quota).length) delete day.quota;
+  }
+  if (n) log(`usage history: ${n} earlier quota records matched the current account by reset time`);
+}
+function updateHistory(book, buckets, acct, quotaAt) {
   const h = readHistory();
   const today = book.day;
   const day = h.days[today] || (h.days[today] = {});
   const s = summarizeBook(book);
   if (!(day.usd > s.usd)) Object.assign(day, s); // 文件里今天的数更大（账本被重置过）就保留文件里的
-  if (buckets && buckets.length) noteQuota(day, buckets, (id) => prevQuota(h, today, id));
+  // 额度只在知道是哪个账号时才记（页面一般几秒内就拿到账号；拿到之前查到的额度跳过，下一次再记）
+  if (buckets && buckets.length && acct) {
+    const accts = h.accts || (h.accts = {});
+    if (!accts[acct.key]) { adoptLegacy(h, acct.key, buckets); accts[acct.key] = { first: today }; }
+    Object.assign(accts[acct.key], { m: acct.m, t: acct.t, last: today });
+    if (h.cur !== acct.key) { if (h.cur) log('usage history: account changed'); h.cur = acct.key; }
+    const qa = day.qa || (day.qa = {});
+    noteQuota(qa[acct.key] || (qa[acct.key] = {}), buckets, (id) => prevQuotaOf(h, today, acct.key, id));
+    noteSamples(acct.key, buckets, quotaAt);
+  }
+  h.v = 3;
   const keys = Object.keys(h.days).sort();
   for (const k of keys.slice(0, Math.max(0, keys.length - HISTORY_KEEP_DAYS))) delete h.days[k];
   saveHistory();
 }
+// 推给页面的历史：每天的 quota 换成当前账号的那一份（不知道当前账号时用旧记录），带上账号和每周额度预估
 function recentHistory() {
   const h = readHistory();
   const days = {};
-  for (const k of Object.keys(h.days).sort().slice(-HISTORY_PUSH_DAYS)) days[k] = h.days[k];
-  return { at: Date.now(), days };
+  for (const k of Object.keys(h.days).sort().slice(-HISTORY_PUSH_DAYS)) {
+    const d = h.days[k];
+    const { qa, quota, ...rest } = d;
+    days[k] = { ...rest, quota: h.cur ? (qa && qa[h.cur]) || {} : quota || {} };
+  }
+  return { at: Date.now(), days, acct: h.cur && h.accts ? { ...h.accts[h.cur], key: h.cur } : null, est: h.cur ? weeklyEstimate(h.cur) : null };
+}
+
+// ---------- 细粒度额度读数（2026-11-22 加，v1.6） ----------
+// quota-samples.json：{ v: 1, a: { 账号键: [[时间毫秒, 桶 ID, 已用比例, 重置时间毫秒], …] } }，每个账号留最近 8 天。
+// 页面大约每 3 分钟查一次额度，每查到一次（时间戳变了）记一笔，只记每周额度。用来算最近 24 小时的用量速度（预估用）。
+// 每天的历史只有“当天用掉多少”，看不出一天里什么时候用的，所以另记这个。
+const SAMPLES_FILE = path.join(DIR, 'quota-samples.json');
+const SAMPLES_KEEP_MS = 8 * 86400e3;
+let samples = null;
+let samplesAt = {};
+function readSamples() {
+  if (!samples) {
+    try { samples = JSON.parse(fs.readFileSync(SAMPLES_FILE, 'utf8')); } catch { samples = null; }
+    if (!samples || typeof samples.a !== 'object') samples = { v: 1, a: {} };
+  }
+  return samples;
+}
+function noteSamples(key, buckets, at) {
+  if (!(at > 0) || samplesAt[key] === at) return;
+  samplesAt[key] = at;
+  const sm = readSamples();
+  const list = sm.a[key] || (sm.a[key] = []);
+  for (const b of buckets) if (b.w === 'weekly') list.push([at, b.id, r4(b.used), b.reset]);
+  const cut = Date.now() - SAMPLES_KEEP_MS;
+  while (list.length && list[0][0] < cut) list.shift();
+  try { fs.writeFileSync(SAMPLES_FILE, JSON.stringify(sm)); } catch (e) { log(`write quota-samples.json failed: ${e.message}`); }
+}
+
+// ---------- 每周额度预估（2026-11-22 加，v1.6） ----------
+// 每个每周额度桶：按这个周期到现在的平均速度，和最近 24 小时的速度，推到重置时大约用到多少。
+//   周期开始 = 重置时间 − 7 天；这周到现在的平均速度 = 已用 ÷ 已过去的时间（这周过去不到 1 天时很不准，页面会标出来）。
+//   最近 24 小时：取同一个周期里约 24 小时前的读数（至少隔 6 小时才算），速度 = 净增加 ÷ 间隔；已用比例会来回起伏，所以用净变化。
+//   预估 > 100%：再算按这个速度哪天用完。
+// 只有这个账号的额度只被这台电脑用时才准：和家人共享额度、或者在别的电脑上也用这个号，别人用掉的也会算进速度里。
+function weeklyEstimate(key) {
+  const list = (readSamples().a[key] || []);
+  if (!list.length) return null;
+  const now = Date.now();
+  const out = {};
+  const last = {};
+  for (const x of list) last[x[1]] = x; // 每个桶最近一笔
+  for (const [id, x] of Object.entries(last)) {
+    const [at, , used, reset] = x;
+    if (!(reset > now) || now - at > 6 * 3600e3) continue; // 已经重置或者太久没查到：不估
+    const start = reset - 7 * 86400e3;
+    const elapsed = Math.max(1, at - start);
+    const left = reset - at;
+    const e = { used, reset, at, elapsedH: r4(elapsed / 3600e3), projWeek: r4(used + used / elapsed * left) };
+    // 最近 24 小时：同一个周期里、离现在最接近 24 小时（至少 6 小时）的那一笔
+    let ref = null;
+    for (const y of list) {
+      if (y[1] !== id || !samePeriod(y[3], reset) || at - y[0] < 6 * 3600e3) continue;
+      if (!ref || Math.abs(at - y[0] - 86400e3) < Math.abs(at - ref[0] - 86400e3)) ref = y;
+    }
+    if (ref) {
+      const rate = Math.max(0, used - ref[2]) / (at - ref[0]);
+      e.spanH = r4((at - ref[0]) / 3600e3);
+      e.proj24 = r4(used + rate * left);
+      if (rate > 0 && e.proj24 > 1) e.fullAt24 = Math.round(at + (1 - used) / rate);
+    }
+    if (e.projWeek > 1 && used > 0) e.fullAtWeek = Math.round(at + (1 - used) / (used / elapsed));
+    out[id] = e;
+  }
+  return out;
 }
 
 // ---------- 补算以前的用量（2026-11-20 加） ----------
@@ -396,11 +540,15 @@ function recentHistory() {
 //   ~/.gemini/antigravity/conversations/<对话 ID>.db（Windows 是 %USERPROFILE%\.gemini\...，macOS 是 /Users/<用户名>/.gemini/...），每个对话一个 SQLite 库。
 //   gen_metadata 表每行是一次模型调用（protobuf）：字段 4 = executionId，1.19 = 模型名，
 //     1.4 = token 用量（1.4.2 输入、1.4.3 输出含思考、1.4.4 缓存写入、1.4.5 缓存读取、1.4.9 思考、1.4.10 回复、1.4.11 请求 ID）；
+//   gen_metadata 字段 2 = 这次调用产生的步骤序号（packed，对应 steps.idx）；
 //   steps 表的 metadata（protobuf）：字段 1 = 创建时间（Timestamp，1 = 秒），12 = executionId。
-//   两张表按 executionId 对上，得到每次调用的时间、模型和 token。一个 executionId 里可能调用好几次，所以按请求 ID 去重
-//   （子代理的调用可能在两个库里都有），没有请求 ID 才用 executionId + token 数。
+//   每次调用的时间 = 它的第一个步骤的创建时间（找不到这个步骤才用同一 executionId 第一个步骤的时间）。
+//   不能只按 executionId 对时间：一个 executionId 是一轮，一轮可能跑一个多小时、跨过 0 点
+//   （实测 11-17 23:54 开始的三轮干到 11-18 01:17，按一轮开始的时间算，11-18 的 349 次调用全记到了 11-17）。
+//   一个 executionId 里可能调用好几次，所以按请求 ID 去重（子代理的调用可能在两个库里都有），没有请求 ID 才用 executionId + token 数。
 // 按本地日期归到 liveFrom 之前的每一天，存成那一天的 raw = { 模型名: [调用数, 输入, 缓存读, 缓存写, 输出] }，
-// 钱由状态栏按它的价目表算（价目表只放在 statusbar.js 一处）。只跑一次，结果记在 history.bf；删掉 bf 再重启注入程序会重新补算。
+// 钱由状态栏按它的价目表算（价目表只放在 statusbar.js 一处）。只跑一次，结果记在 history.bf（v = 补算办法的版本）；
+// 删掉 bf 再重启注入程序会重新补算。v1（11-20）按一轮开始的时间归日，v2（11-22）改成按每次调用自己的时间，v1 的记录会重算一次。
 // 字段号是 2026-11-20 对着 Antigravity 2.33.0 的数据和状态栏算出的数核对出来的；存储格式变了就补不出来，不影响其他功能。
 // 需要 Node.js 22.13 / 23.4 以上（node:sqlite 从这两个版本起不用加 --experimental-sqlite；22.5～22.12 要加参数才有）。
 // Windows 安装包自带的 node.exe 满足；macOS 用系统装的 Node。版本不够时 import 失败，只跳过补算（history.bf.err 记原因）。
@@ -423,6 +571,17 @@ function pbGet(buf, f) {
   }
   return undefined;
 }
+// packed 的一串 varint（比如 gen_metadata 字段 2 的步骤序号）
+function pbVarints(buf) {
+  const out = [];
+  let i = 0;
+  while (i < buf.length) {
+    let x = 0, m = 1, c;
+    do { c = buf[i++]; x += (c & 0x7f) * m; m *= 128; } while (c & 0x80 && i < buf.length);
+    out.push(x);
+  }
+  return out;
+}
 const dayOf = (ms) => {
   const d = new Date(ms);
   return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
@@ -432,15 +591,19 @@ function readConvDb(DatabaseSync, file, before, seen, acc) {
   const db = new DatabaseSync(file, { readOnly: true });
   let calls = 0, nodate = 0;
   try {
-    const when = new Map();
-    for (const r of db.prepare('select metadata from steps').iterate()) {
+    const stepAt = new Map(); // steps.idx → 创建时间（毫秒）
+    const when = new Map(); // executionId → 这一轮第一个步骤的时间（找不到调用自己的步骤时才用）
+    for (const r of db.prepare('select idx, metadata from steps').iterate()) {
       if (!r.metadata) continue;
       const m = Buffer.from(r.metadata);
-      const exec = pbGet(m, 12), ts = pbGet(m, 1);
-      if (!Buffer.isBuffer(exec) || !Buffer.isBuffer(ts)) continue;
+      const ts = pbGet(m, 1);
+      const sec = Buffer.isBuffer(ts) ? pbGet(ts, 1) : 0;
+      if (!(sec > 0)) continue;
+      stepAt.set(Number(r.idx), sec * 1000);
+      const exec = pbGet(m, 12);
+      if (!Buffer.isBuffer(exec)) continue;
       const id = exec.toString('utf8');
-      const sec = pbGet(ts, 1);
-      if (!when.has(id) && sec > 0) when.set(id, sec * 1000);
+      if (!when.has(id)) when.set(id, sec * 1000);
     }
     const conv = path.basename(file, '.db');
     for (const r of db.prepare('select data from gen_metadata').iterate()) {
@@ -459,7 +622,10 @@ function readConvDb(DatabaseSync, file, before, seen, acc) {
       const key = Buffer.isBuffer(rid) && rid.length ? rid.toString('utf8') : id + ':' + inp + ':' + cr + ':' + out;
       if (seen.has(key)) continue;
       seen.add(key);
-      const at = when.get(id);
+      const steps = pbGet(g, 2);
+      let at = 0;
+      for (const i of Buffer.isBuffer(steps) ? pbVarints(steps) : typeof steps === 'number' ? [steps] : []) if ((at = stepAt.get(i) || 0)) break;
+      if (!at) at = when.get(id) || 0;
       if (!(at > 0)) { nodate++; continue; }
       const day = dayOf(at);
       if (before && day >= before) continue;
@@ -473,32 +639,54 @@ function readConvDb(DatabaseSync, file, before, seen, acc) {
   } finally { db.close(); }
   return { calls, nodate };
 }
+const BACKFILL_V = 2;
+// 读全部对话库，算到昨天为止每一天的调用：
+// - liveFrom 之前（没有实时记录的日子）：补算出来的（bf）和没有记录的，换成新算的；有实时记录的不动。
+//   新算时找不到的日子不删（对话被删掉了，库就没了；留着原来补算的数）。
+// - liveFrom 以后（实时记录的日子）：只在新算的调用次数比原来记的多 2% 以上时才换。v1.6 以前页面的今天账本
+//   只算后台摘要里列出的对话和注入程序从磁盘找到的今天的对话，摘要只列一部分（实测 21 个，本机库文件 79 个），可能漏算。
+//   换的时候去掉 models / usd（钱由状态栏按价目表从 raw 算），额度记录（quota / qa）不动，原来的金额留在 liveUsd，记 fix = 1。
+//   11-22 Windows 上实测实时记录的日子没有漏算；这一段是保险。
 async function backfillHistory() {
   const h = readHistory();
-  if (h.bf) return;
+  if (h.bf && h.bf.v === BACKFILL_V) return;
   let DatabaseSync;
-  try { ({ DatabaseSync } = await import('node:sqlite')); } catch { h.bf = { at: Date.now(), err: 'node:sqlite not available' }; saveHistory(); return; }
+  try { ({ DatabaseSync } = await import('node:sqlite')); } catch { h.bf = { v: BACKFILL_V, at: Date.now(), err: 'node:sqlite not available' }; saveHistory(); return; }
   let names = [];
   try { names = fs.readdirSync(CONV_DIR).filter((n) => /^[0-9a-f-]{36}\.db$/.test(n)); } catch {}
+  const today = dayName();
   const seen = new Set();
   const acc = {};
   let dbs = 0, calls = 0, nodate = 0, errors = 0;
   for (const n of names) {
     try {
-      const r = readConvDb(DatabaseSync, path.join(CONV_DIR, n), h.liveFrom, seen, acc);
+      const r = readConvDb(DatabaseSync, path.join(CONV_DIR, n), today, seen, acc);
       calls += r.calls; nodate += r.nodate; dbs++;
     } catch { errors++; }
     await new Promise((r) => setImmediate(r)); // 每读完一个库让出一下，别长时间占住事件循环
   }
+  const sumCalls = (raw) => Object.values(raw || {}).reduce((t, r) => t + (Array.isArray(r) ? +r[0] || 0 : 0), 0);
   let daysAdded = 0;
+  const fixed = [];
   for (const [day, d] of Object.entries(acc)) {
-    if (day >= h.liveFrom || (h.days[day] && !h.days[day].bf)) continue;
-    h.days[day] = { bf: 1, convs: d.convs.size, raw: d.raw };
-    daysAdded++;
+    const rec = h.days[day];
+    if (day < h.liveFrom) {
+      if (rec && !rec.bf) continue;
+      h.days[day] = { ...(rec || {}), bf: 1, convs: d.convs.size, raw: d.raw };
+      daysAdded++;
+      continue;
+    }
+    if (!rec || rec.bf) continue;
+    const live = rec.models ? Object.values(rec.models).reduce((t, m) => t + (+m[1] || 0), 0) : sumCalls(rec.raw);
+    const db = sumCalls(d.raw);
+    if (!(db > live * 1.02 + 1)) continue;
+    const { models, usd, ...rest } = rec;
+    h.days[day] = { ...rest, raw: d.raw, convs: Math.max(+rec.convs || 0, d.convs.size), fix: 1, liveUsd: rec.liveUsd != null ? rec.liveUsd : usd };
+    fixed.push(day + ' ' + live + '→' + db);
   }
-  h.bf = { at: Date.now(), dbs, calls, nodate, errors, days: daysAdded };
-  log(`usage backfill: ${dbs}/${names.length} conversation dbs, ${calls} calls before ${h.liveFrom}, ${daysAdded} days` +
-    (nodate ? `, ${nodate} calls without time` : '') + (errors ? `, ${errors} dbs failed` : ''));
+  h.bf = { v: BACKFILL_V, at: Date.now(), dbs, calls, nodate, errors, days: daysAdded, fixed: fixed.length };
+  log(`usage backfill v${BACKFILL_V}: ${dbs}/${names.length} conversation dbs, ${calls} calls before ${today}, ${daysAdded} days before ${h.liveFrom}` +
+    (fixed.length ? `, live days fixed: ${fixed.join(', ')}` : '') + (nodate ? `, ${nodate} calls without time` : '') + (errors ? `, ${errors} dbs failed` : ''));
   const keys = Object.keys(h.days).sort();
   for (const k of keys.slice(0, Math.max(0, keys.length - HISTORY_KEEP_DAYS))) delete h.days[k];
   saveHistory();
@@ -728,7 +916,7 @@ async function tick() {
 
 function main() {
   loadAssets();
-  setTimeout(() => { backfillHistory().catch((e) => log(`usage backfill failed: ${e.message}`)); }, 15000); // 启动 15 秒后补算一次（只跑一次）
+  setTimeout(() => { backfillHistory().catch((e) => log(`usage backfill failed: ${e.message}`)); }, 15000); // 启动 15 秒后补算一次（每个版本只跑一次）
   const loop = async () => {
     try { await tick(); } catch (e) { log(`tick error: ${e.message}`); }
     setTimeout(loop, POLL_MS);

@@ -22,3 +22,6 @@ launchd.err.log
 
 # 状态栏外观选择（注入程序自动生成），每台机器自己的
 look.json
+
+# 细粒度额度读数（注入程序自动生成，算每周额度预估用），每台机器自己的
+quota-samples.json

@@ -84,13 +84,115 @@ function agyStatusBar(CFG) {
     }
     if (changed) try { localStorage.setItem(ENUM_KEY, JSON.stringify(Object.fromEntries(S.enumModel))); } catch (e) {}
   };
+  // ---------- 活动（2026-11-22 加，v1.6）：每个对话（含子代理）最近的步骤，给活动行和子代理行用 ----------
+  // 状态流的 stepsUpdate 里，steps[i] 是第 indices[i] 步，totalLength 是这条轨迹一共多少步。
+  // 只记类型、状态、工具名、一句说明（最多 80 字）和时间，每个对话只留最近 ACT_KEEP 步；
+  // 思考只留最近一段的小标题（或开头一句）和末尾约 400 字，给活动行和悬停说明用。都只在页面内存里，不存盘、不外传。
+  // 步骤状态（11-22 实测）：模型回复输出中是 GENERATING，工具调用 PENDING → RUNNING → DONE，出错是 ERROR。
+  if (!S.act) S.act = new Map();
+  const ACT_KEEP = 40;
+  const clip = (s, n) => { const t = String(s || '').replace(/\s+/g, ' ').trim(); return t.length > n ? t.slice(0, n - 1) + '…' : t; };
+  const fileBase = (p) => {
+    let s = String(p || '').replace(/^file:\/+/, '');
+    try { s = decodeURIComponent(s); } catch (e) { /* 不是合法的 URI 编码就原样用 */ }
+    return s.split(/[\\/]/).filter(Boolean).pop() || '';
+  };
+  // 一步做了什么：run_command 用模型自己写的 toolSummary；其他工具按参数拼一句。
+  // 参数在哪（11-22 采集）：状态流里是 GENERIC 步骤，进行中参数在 generic.args（对象），完成后具体内容在
+  // generic.result.payload（runCommand / viewFile / codeAction …）；GetCascadeTrajectorySteps 取到的是具体类型，
+  // 参数在 metadata.toolCall.argumentsJson（字符串）。
+  const stepLabel = (st0, md, type) => {
+    const tc = md.toolCall || {};
+    const g = st0.generic || {};
+    const st = (g.result && g.result.payload) || st0;
+    let a = g.args && typeof g.args === 'object' ? g.args : {};
+    if (!Object.keys(a).length) { try { a = JSON.parse(tc.argumentsJson || '{}') || {}; } catch (e) { a = {}; } }
+    const name = tc.name || '';
+    if (a.toolSummary) return { tool: name || 'tool', text: clip(a.toolSummary, 80) };
+    if (type === 'RUN_COMMAND') return { tool: 'run_command', text: clip((st.runCommand && st.runCommand.commandLine) || a.CommandLine, 70) };
+    if (type === 'VIEW_FILE') return { tool: name || 'read_file', text: fileBase((st.viewFile && st.viewFile.absolutePathUri) || a.Path) };
+    if (type === 'CODE_ACTION') return { tool: name || 'edit_file', text: fileBase(a.Path || a.TargetFile || a.path) };
+    if (type === 'SEARCH_WEB') return { tool: 'search_web', text: clip((st.searchWeb && st.searchWeb.query) || a.query, 60) };
+    if (type === 'INVOKE_SUBAGENT') return { tool: 'invoke_subagent', text: clip(a.Role || a.TypeName || '', 50) };
+    if (type === 'PLANNER_RESPONSE' || type === 'USER_INPUT') return { tool: '', text: '' };
+    return { tool: name || type.toLowerCase(), text: clip(a.toolSummary || a.Task || a.task || '', 60) };
+  };
+  // 状态流里的工具步骤类型都是 GENERIC（11-22 采集），工具名在 metadata.toolCall.name，参数不在流里；
+  // 用 GetCascadeTrajectorySteps 取到的是具体类型（RUN_COMMAND 等）和完整参数。这里把工具名换回具体类型，计数时两边一致。
+  const TOOL_TYPE = { run_command: 'RUN_COMMAND', read_file: 'VIEW_FILE', view_file: 'VIEW_FILE', edit_file: 'CODE_ACTION', write_file: 'CODE_ACTION',
+    search_web: 'SEARCH_WEB', invoke_subagent: 'INVOKE_SUBAGENT' };
+  // 流里的工具步骤没有参数，活动行只能写工具名：第一次见到时向本机后台补取这一步的参数（只取一次，只读，不经过 Google）。
+  // 补回来的只填说明文字，不改状态（补取的结果可能比流里的旧）。
+  S.argAsked = S.argAsked || new Set();
+  const askArgs = (id, idx) => {
+    const k = id + '#' + idx;
+    if (S.argAsked.has(k) || !S.lsHeaders || idx < 0) return;
+    S.argAsked.add(k);
+    if (S.argAsked.size > 600) S.argAsked = new Set([...S.argAsked].slice(-300));
+    setTimeout(() => {
+      lsCall('GetCascadeTrajectorySteps', { cascadeId: id, stepOffset: idx }).then((j) => {
+        const steps = (j && j.steps) || [];
+        steps.slice(0, 6).forEach((st, i) => { try { noteAct(st, (st && st.metadata) || {}, id, idx + i, 0, true); } catch (e) { /* 跳过 */ } });
+        S.render();
+      }).catch(() => {});
+    }, 400);
+  };
+  const noteAct = (st, md, convId, idx, total, textOnly) => {
+    const src = md.sourceTrajectoryStepInfo;
+    const id = (src && src.cascadeId) || convId;
+    const a = S.act.get(id) || { steps: new Map(), total: 0, turnAt: 0 };
+    let type = String(st.type || '').replace('CORTEX_STEP_TYPE_', '');
+    if (type === 'SYSTEM_MESSAGE') return;
+    const toolName = (md.toolCall && md.toolCall.name) || '';
+    if (type === 'GENERIC' && TOOL_TYPE[toolName]) type = TOOL_TYPE[toolName];
+    const status = String(st.status || '').replace('CORTEX_STEP_STATUS_', '');
+    const key = idx >= 0 ? idx : a.steps.size ? Math.max(...a.steps.keys()) + 1 : 0;
+    const lab = stepLabel(st, md, type);
+    const prev = a.steps.get(key);
+    if (textOnly) { // 补取参数：只把说明文字填进已有的记录
+      if (prev && !prev.text && lab.text) { prev.text = lab.text; if (lab.tool) prev.tool = lab.tool; }
+      return;
+    }
+    const rec = { type, status, tool: lab.tool, text: lab.text, t0: tms(md.startedAt || md.createdAt), t1: tms(md.completedAt) || 0, err: !!st.error || status === 'ERROR' };
+    if (prev) { // 同一步多次更新：保留补取到的说明文字和最早的开始时间
+      if (!rec.text && prev.text) rec.text = prev.text;
+      if (prev.t0 && (!rec.t0 || prev.t0 < rec.t0)) rec.t0 = prev.t0;
+    }
+    if (!rec.text && toolName && type !== 'PLANNER_RESPONSE' && /PENDING|RUNNING|WAIT/.test(status)) askArgs(id, key);
+    // 一轮 = 从用户发消息起；新的一轮把计数清零。计数按步骤序号去重（同一步会多次更新）
+    if (type === 'USER_INPUT') {
+      const at = tms(md.createdAt) || 0;
+      if (at > (a.turnAt || 0)) { a.turnAt = at; a.turnFrom = key; a.counts = {}; a.counted = new Set(); a.errored = new Set(); }
+    }
+    if (!a.counts) { a.counts = {}; a.counted = new Set(); a.errored = new Set(); }
+    if (!a.counted.has(key) && type !== 'USER_INPUT' && (a.turnFrom === undefined || key > a.turnFrom)) {
+      a.counted.add(key);
+      a.counts[type] = (a.counts[type] || 0) + 1;
+    }
+    if (rec.err && !a.errored.has(key)) { a.errored.add(key); a.counts.ERRORS = (a.counts.ERRORS || 0) + 1; }
+    if (type === 'PLANNER_RESPONSE') {
+      // 思考原文生成时不在流里（11-22 采集：生成中长度一直是 0），所以活动行只写“thinking”和用时，不写思考内容
+      const pr = st.plannerResponse || {};
+      rec.writing = !!(pr.response && String(pr.response).length);
+      if (pr.thinkingDuration) rec.think = parseFloat(pr.thinkingDuration) || 0;
+    }
+    a.steps.set(key, rec);
+    if (total > a.total) a.total = total;
+    if (a.steps.size > ACT_KEEP) for (const k of [...a.steps.keys()].sort((x, y) => x - y).slice(0, a.steps.size - ACT_KEEP)) a.steps.delete(k);
+    a.updated = Date.now();
+    S.act.set(id, a);
+  };
   const takeSteps = (tu, convId) => {
-    const steps = tu.stepsUpdate && tu.stepsUpdate.steps;
+    const su = tu.stepsUpdate;
+    const steps = su && su.steps;
     if (!Array.isArray(steps)) return;
-    for (const st of steps) {
+    const indices = Array.isArray(su.indices) ? su.indices : [];
+    for (let i = 0; i < steps.length; i++) {
+      const st = steps[i];
       if (!st || typeof st !== 'object') continue;
       const md = st.metadata || {};
       const src = md.sourceTrajectoryStepInfo;
+      try { noteAct(st, md, convId, Number.isInteger(indices[i]) ? indices[i] : -1, Number(su.totalLength) || 0); } catch (e) { /* 活动记录出错不影响其他 */ }
       // 子代理调用：运行中是 invokeSubagent 步骤，完成后包在 generic.result.payload 里
       const inv = st.invokeSubagent ||
         (st.generic && st.generic.result && st.generic.result.payload && st.generic.result.payload.invokeSubagent);
@@ -118,6 +220,22 @@ function agyStatusBar(CFG) {
       S.agents.set(id, ag);
     }
   };
+  // ---------- 账号（2026-11-22 加，v1.6） ----------
+  // GetUserStatus 里有 email 和 userTier.name（例如 Google AI Ultra）。页面里只留打码后的邮箱和邮箱的哈希：
+  // 哈希当账号键（注入程序按它把额度历史分开记），邮箱原文不往外传、不写文件。
+  // 打码：@ 前面留头两个字和最后两个字（太短就只留第一个字），域名照写，例如 ab***12@gmail.com。
+  const maskEmail = (e) => {
+    const m = /^([^@]+)@(.+)$/.exec(String(e || '').trim());
+    if (!m) return '';
+    const u = m[1];
+    return (u.length >= 6 ? u.slice(0, 2) + '***' + u.slice(-2) : u.slice(0, 1) + '***') + '@' + m[2];
+  };
+  const fnv = (str) => { let h = 0x811c9dc5; for (let i = 0; i < str.length; i++) { h ^= str.charCodeAt(i); h = Math.imul(h, 0x01000193) >>> 0; } return h.toString(16).padStart(8, '0'); };
+  const acctOf = (u) => {
+    if (!u || !u.email) return null;
+    const tier = u.userTier || {};
+    return { key: fnv(String(u.email).trim().toLowerCase()), m: maskEmail(u.email), t: String(tier.name || '').slice(0, 60), tid: String(tier.id || '').slice(0, 40) };
+  };
   S.onMessage = (method, j) => {
     if (method === 'RetrieveUserQuotaSummary') {
       const r = (j && j.response) || j || {};
@@ -126,6 +244,8 @@ function agyStatusBar(CFG) {
       return;
     }
     if (method === 'GetUserStatus') {
+      const a = acctOf(j && j.userStatus);
+      if (a && (!S.account || S.account.key !== a.key || S.account.t !== a.t)) { S.account = a; S.render(); }
       const cfgs = j && j.userStatus && j.userStatus.cascadeModelConfigData && j.userStatus.cascadeModelConfigData.clientModelConfigs;
       if (!Array.isArray(cfgs)) return;
       for (const c of cfgs) {
@@ -145,7 +265,13 @@ function agyStatusBar(CFG) {
     const cid = u.conversationId;
     const c = S.convs.get(cid) || { firstSeen: Date.now() };
     if (u.contextWindowUsage) c.ctx = u.contextWindowUsage;
-    if (u.status) c.status = u.status;
+    if (u.status) {
+      // 活动行用：记下这一轮开始跑和跑完的时间
+      const was = /RUNNING/.test(c.status || ''), now = /RUNNING/.test(u.status);
+      if (now && !was) { c.runSince = Date.now(); c.doneAt = 0; }
+      if (!now && was) c.doneAt = Date.now();
+      c.status = u.status;
+    }
     if (u.compactionInfo) c.compactions = (u.compactionInfo.compactedAtStepIndices || []).slice();
     const mtu = u.mainTrajectoryUpdate;
     if (mtu && mtu.metadata && mtu.metadata.rootConversationId) S.rootOf.set(cid, mtu.metadata.rootConversationId);
@@ -342,7 +468,7 @@ function agyStatusBar(CFG) {
           const prev = S.casStatus.get(id);
           if (!prev || prev.status !== status) changed = true;
           S.casStatus.set(id, { status, at: now });
-          S.casMeta.set(id, { created: tms(s.createdTime), modified: tms(s.lastModifiedTime) });
+          S.casMeta.set(id, { created: tms(s.createdTime), modified: tms(s.lastModifiedTime), title: String(s.summary || '').slice(0, 120) });
           if (ACTIVE.test(status)) active = true;
           const tm = s.trajectoryMetadata || {};
           if (tm.rootConversationId && tm.rootConversationId !== id) S.rootOf.set(id, tm.rootConversationId);
@@ -387,6 +513,9 @@ function agyStatusBar(CFG) {
     { re: /gemini-4-neon/i, name: 'Neon', t: P_NE },
     { re: /gemini-4-carbon/i, name: 'Carbon', t: P_CA },
     { re: /gemini-4-argon/i, name: 'Argon', t: P_CA },
+    // gemini-4-hydrogen-tiered-high：浏览器子代理用的（11-22 见到，模型编号 PLACEHOLDER_M530）。官方价格页没有这个名字，
+    // 只有 gemini-4-hydrogen（Standard 1.5 / 0.075 / 7.5，另有 Batch、Flex 半价和 Priority 1.8 倍）；按 Standard 算，是估计。
+    { re: /gemini-4-hydrogen-tiered/i, name: 'Hydrogen', note: 'gemini-4-hydrogen-tiered-high（浏览器子代理用的）官方价格页没有，按 Gemini 4 Hydrogen 标准价估', t: P_H },
     { re: /gemini-4-hydrogen/i, name: 'Hydrogen', t: P_H },
     { re: /gemini-3[.-]8-flash/i, name: '3.8 Flash', t: P_F38 },
     { re: /claude-opus-5[.-]5/i, name: 'Opus 5.5', t: [[Infinity, { in: 4, cache: 0.2, cw: 5, out: 20 }]] },
@@ -465,7 +594,7 @@ function agyStatusBar(CFG) {
   S.timeTried = S.timeTried || new Map(); // cascadeId → 已经取过的起点（同一个起点不重复取，防止死循环）
   const timeFetchFrom = (id) => {
     const c = S.costs.get(id);
-    const meta = S.casMeta.get(id);
+    const meta = convMeta(id);
     const d0 = dayStart();
     if (!c || !c.list.length || !meta || !(meta.created < d0) || !(meta.modified >= d0)) return null;
     const list = c.list;
@@ -512,11 +641,12 @@ function agyStatusBar(CFG) {
     }
     for (const [id, m] of S.casMeta) if (m.modified >= d0) ids.add(id);
     for (const id of S.todayIds || []) ids.add(id); // 注入程序从磁盘找到的今天动过的对话（见 inject.mjs 的 todayConversations）
+    for (const f of S.convFiles || []) if (f[2] >= d0) ids.add(f[0]); // 本机对话库文件今天改过的（后台摘要里不一定有）
     for (const id of ids) {
       const c = S.costs.get(id);
       if (c && (c.busy || now - (c.askAt || 0) < 1500)) continue;
       const last = (S.agents.get(id) || {}).lastAt || 0;
-      const meta = S.casMeta.get(id);
+      const meta = convMeta(id);
       const running = isRunning(id) || ACTIVE.test((S.casStatus.get(id) || {}).status || '');
       if (!c || c.more || last > c.at || (meta && meta.modified > c.at) || (running && now - c.at > 5000)) { S.fetchCost(id); continue; }
       const from = timeFetchFrom(id);
@@ -582,10 +712,22 @@ function agyStatusBar(CFG) {
     const t = document.querySelector('[data-testid="model-selector-trigger"]');
     return ((t && t.getAttribute('aria-label')) || '').replace(/^Select model, current:\s*/, '').split(' · ')[0].trim();
   };
+  // 按钮上的名字和模型列表里的名字写法不完全一样（2026-11-22 发现）：
+  //   普通模型：按钮 “Gemini 4 Neon Extra High”，列表 “Gemini 4 Neon (XHigh)”——推理强度要换成同一种写法再比；
+  //   Orchestrator：按钮 “Orchestrator Gemini 4 Neon Extra High”，列表 “Orchestrator (Neon)”——按 Orchestrator + 括号里的家族名找。
+  // 以前对不上就返回空，新对话第一次调用结束前，状态栏上没有模型这一项。
+  const normLabel = (s) => String(s).toLowerCase().replace(/extra\s*high/g, 'xhigh').replace(/[()\s]/g, '');
   const selectedKey = () => {
-    const want = selectedLabel().toLowerCase().replace(/[()\s]/g, '');
+    const raw = selectedLabel();
+    const want = normLabel(raw);
     if (!want) return '';
-    for (const [k, v] of S.models) if (String(v.label).toLowerCase().replace(/[()\s]/g, '') === want) return k;
+    for (const [k, v] of S.models) if (normLabel(v.label) === want) return k;
+    if (/^orchestrator\b/i.test(raw)) {
+      for (const [k, v] of S.models) {
+        const m = /^orchestrator\s*\(([^)]+)\)/i.exec(String(v.label));
+        if (m && new RegExp('\\b' + m[1].replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\b', 'i').test(raw)) return k;
+      }
+    }
     return '';
   };
   const isRunning = (id) => /RUNNING/.test((S.convs.get(id) || {}).status || '');
@@ -627,18 +769,48 @@ function agyStatusBar(CFG) {
   // 以及“仪表代替图标”（上下文的图标画成随用量变满的圆环）。本项目没有用它的代码（它的仓库没有许可证）；
   // 各配色取自配色方案自己公开的色值（都是 MIT 许可），每套都有浅色、深色两版，跟着 Antigravity 的明暗切换。
   // 默认是本项目自己的 cometix（下面 CSS 里的基础色）。选择存在注入程序目录的 look.json，所有窗口共用（见 inject.mjs 的 readLook）。
-  const LOOK_DEFAULT = { pal: 'cometix', skin: 'plain', bar: 'thin', dense: 'compact', icons: true };
+  // 图标（2026-11-22 加，v1.6）：参考 ccline v2 的 glyphs（整套换：nerd / unicode / ascii）和每项的 icon 覆盖。
+  //   整套（look.icons）：material 实心（默认）/ outline 线条（同一套字体，FILL 0）/ unicode 普通字符（不用联网加载字体）/ off 不显示。
+  //   单项（look.iconMap）：每一项只有两个：默认 + 一个备选（material / outline 时生效；unicode 用最后那个固定字符）。
+  //   11-22 用户嫌候选太多、有几个难看（脑子、机器人、芯片、刷新箭头、三个点），按 ccline 的做法收成每项一个默认图标，只留一个备选。
+  //   默认图标保持本项目原来那一套（用户要求别改），只有子代理的默认从机器人换成树形分支（用户嫌机器人难看）。
+  //   备选里模型的彗星取自 ccline 的模型图标；缓存、花费、首字、速度原来就和 ccline 一样。
+  //   候选图标都要写进 CSS 里字体请求的 icon_names（按字母排序），否则显示成英文名。'$' 开头的是内联 SVG：
+  //   '$coin' 对话花费（见 costIcon），'$comet' 彗星（见 cometIcon，Font Awesome Free 的 meteor，CC BY 4.0），
+  //   '$speedo' 速度的三段仪表盘（见 speedIcon，指针按 慢 / 中 / 快 三档指向）。
+  //   11-22 用户定：默认一律用原来那套，新画的（彗星、三段仪表盘）只放进备选。
+  const ICON_ITEMS = {
+    model: ['model', '模型', ['auto_awesome', '$comet'], '✦'],
+    cache: ['cache', '缓存', ['database', 'offline_bolt'], '≋'],
+    cost: ['cost', '这个对话的花费', ['$coin', 'paid'], '$'],
+    today: ['today', '今天的花费', ['calendar_month', 'today'], '▦'],
+    ttft: ['ttft', '首字时间', ['hourglass_top', 'timer'], '⧗'],
+    speed: ['speed', '生成速度', ['speed', '$speedo'], '»'],
+    h5: ['5h', '5 小时额度', ['schedule', 'history'], '◷'],
+    weekly: ['weekly', '每周额度', ['event', 'date_range'], '▤'],
+    agent: ['agent', '子代理', ['account_tree', 'person'], '◆'],
+  };
+  const ICON_NAME_ZH = { $comet: '彗星', $coin: '对话气泡里的 $', auto_awesome: '星光', database: '数据库', offline_bolt: '闪电', paid: '硬币',
+    calendar_month: '月历', today: '日历', hourglass_top: '沙漏', timer: '秒表', speed: '仪表盘', $speedo: '三段仪表盘（指针跟着速度档位走）', schedule: '时钟', history: '倒转的时钟',
+    event: '日历', date_range: '日期范围', account_tree: '树形分支', person: '人像' };
+  // 不能单独换的几个：[Material 名, unicode 字符]
+  const ICON_FIXED = { check: ['check', '✓'], ctx: ['data_usage', '◔'], quota1: ['timelapse', '◔'] };
+  const LOOK_DEFAULT = { pal: 'cometix', skin: 'plain', bar: 'thin', dense: 'compact', icons: 'material', iconMap: {} };
   const LOOK_CHOICES = {
     pal: ['cometix', 'catppuccin', 'tokyo-night', 'rose-pine', 'gruvbox', 'nord', 'dracula', 'mono'],
     skin: ['plain', 'pill', 'powerline'],
     bar: ['thin', 'cells', 'ring', 'none'],
     dense: ['compact', 'full'],
+    icons: ['material', 'outline', 'unicode', 'off'],
   };
   const cleanLook = (o) => {
-    const l = { ...LOOK_DEFAULT };
+    const l = { ...LOOK_DEFAULT, iconMap: {} };
     if (o && typeof o === 'object') {
       for (const k of Object.keys(LOOK_CHOICES)) if (LOOK_CHOICES[k].includes(o[k])) l[k] = o[k];
-      if (typeof o.icons === 'boolean') l.icons = o.icons;
+      if (typeof o.icons === 'boolean') l.icons = o.icons ? 'material' : 'off'; // v1.5 存的是 true / false
+      if (o.iconMap && typeof o.iconMap === 'object') {
+        for (const [k, v] of Object.entries(o.iconMap)) if (ICON_ITEMS[k] && ICON_ITEMS[k][2].includes(v) && v !== ICON_ITEMS[k][2][0]) l.iconMap[k] = v;
+      }
       if (+o.at > 0) l.at = +o.at;
     }
     return l;
@@ -652,7 +824,7 @@ function agyStatusBar(CFG) {
   const lookAttrs = (e, over) => {
     if (!e) return e;
     const l = { ...S.look, ...over };
-    const want = { pal: l.pal, skin: l.skin, bar: l.bar, icons: l.icons ? '1' : '0' };
+    const want = { pal: l.pal, skin: l.skin, bar: l.bar, icons: l.icons };
     for (const [k, v] of Object.entries(want)) if (e.dataset[k] !== v) e.dataset[k] = v;
     return e;
   };
@@ -674,6 +846,16 @@ function agyStatusBar(CFG) {
     if (f > 0) svg.append(circle('arc', Math.max(1.5, f * C)));
     s.append(svg);
     return s;
+  };
+  // 按外观取图标：返回 Material 图标名（seg 会建成字体图标）、内联 SVG 元素，或 unicode 字符元素。
+  // key 是 ICON_ITEMS 或 ICON_FIXED 里的名字；图标关掉时也照常返回，由 CSS（data-icons="off"）藏起来。
+  const ICON = (key, over) => {
+    const l = { ...S.look, ...over };
+    const item = ICON_ITEMS[key], fixed = ICON_FIXED[key];
+    if (l.icons === 'unicode') return el('span', 'ic uni', item ? item[3] : fixed[1]);
+    const name = item ? (l.iconMap && l.iconMap[key]) || item[2][0] : fixed[0];
+    if (name === '$speedo') return speedIcon(l.tps);
+    return name === '$coin' ? costIcon() : name === '$comet' ? cometIcon() : name;
   };
   // 额度进度条：thin 细条（默认，约是 10 格的一半宽）/ cells 10 格 / ring 小圆环 / none 不画（只留百分比）
   const meter = (frac, colorKind) => {
@@ -722,7 +904,7 @@ function agyStatusBar(CFG) {
       '\n接口返回的模型：' + (resp ? resp.name + (resp.full ? '（' + resp.full + '）' : '') : lastResp ? lastResp + '（这个模型上次的结果，本次还没查到）' : '（还没查到）') +
       '\n配置名：' + (cfg || '?') + '\n编号：' + (key || '?') +
       (odd ? '\n接口返回的模型名和界面名对不上，可能是灰测版本' : '');
-    return pieces.length ? seg('model', 'auto_awesome', pieces, tip) : null;
+    return pieces.length ? seg('model', ICON('model'), pieces, tip) : null;
   };
 
   // ---------- 一次模型调用：首字、速度、token ----------
@@ -731,7 +913,7 @@ function agyStatusBar(CFG) {
     if (!mu) return [];
     const out = [];
     const t0 = tms(md.createdAt), t1 = tms(md.viewableAt), t2 = tms(md.finishedGeneratingAt || md.completedAt);
-    if (t1 > t0) out.push(seg('timing', 'hourglass_top', [((t1 - t0) / 1000).toFixed(1) + 's'], '首字时间：从发出请求到第一个字出现（含思考）'));
+    if (t1 > t0) out.push(seg('timing', ICON('ttft'), [((t1 - t0) / 1000).toFixed(1) + 's'], '首字时间：从发出请求到第一个字出现（含思考）'));
     // 速度 = 输出 token（含思考）÷ 生成用时。思考 token 是在首字出现之前生成的，所以有思考时起点取
     // “首字时刻 − 思考时长”（不早于发出请求），没有思考时从首字出现算起。
     // （11-09 之前只用“首字→结束”做分母，思考 token 却算在分子里，Flash 算出过 1637 tok/s 这种错数。）
@@ -743,8 +925,9 @@ function agyStatusBar(CFG) {
     if (!(start > 0)) start = t0;
     const span = t2 - start;
     if (outTok > 0 && span > 50) {
-      out.push(seg('timing', 'speed', [Math.round(outTok / (span / 1000)) + ' tok/s'],
-        '生成速度：输出 ' + outTok.toLocaleString() + ' token' + (thinkTok > 0 ? '（含思考 ' + thinkTok.toLocaleString() + '）' : '') +
+      const tps = outTok / (span / 1000);
+      out.push(seg('timing', ICON('speed', { tps }), [Math.round(tps) + ' tok/s'],
+        '生成速度：' + SPEED_TIERS[speedTier(tps)][2] + '\n输出 ' + outTok.toLocaleString() + ' token' + (thinkTok > 0 ? '（含思考 ' + thinkTok.toLocaleString() + '）' : '') +
         ' ÷ 生成用时 ' + (span / 1000).toFixed(2) + ' 秒\n' +
         (thinkTok > 0 ? '有思考：从思考开始算（' + (thinkMs > 0 ? '思考 ' + (thinkMs / 1000).toFixed(1) + ' 秒' : '没有思考时长，从发出请求算') + '）'
           : '没有思考：从首字出现算起')));
@@ -755,9 +938,11 @@ function agyStatusBar(CFG) {
   const promptTokens = (mu) => (Number(mu.inputTokens) || 0) + (Number(mu.cacheReadTokens) || 0) + (Number(mu.cacheWriteTokens) || 0);
   // comps：后台压缩过上下文的步骤序号（状态流的 compactionInfo）。有压缩就在上下文这一项后面放一个小徽章（图标 + 次数）。
   // 2026-11-22 以前是文字 “compacted N×”，太宽，会把行末的 running 挤到下一行（issue #2）。
+  // 11-22 改成 issue #2 作者截图里的样子：浅黄小圆角块，循环箭头 ↻ + 次数（原来的压缩图标看着像 ÷）。用普通字符，不靠图标字体。
   const compBadge = (n) => {
     const b = el('span', 'comp');
-    b.append(el('span', 'ic', 'compress'), n + '×');
+    if (S.look.icons !== 'off') b.append(el('span', 'cyc', '↻'));
+    b.append(n + '×');
     return b;
   };
   const ctxSeg = (ctx, mu, comps) => {
@@ -770,13 +955,20 @@ function agyStatusBar(CFG) {
       const used = Number(ctx.estimatedTokensUsed) || 0;
       const max = Number(ctx.maxContextTokens);
       const pct = Math.round((used / max) * 100);
-      const detail = '上下文 ' + used.toLocaleString() + ' / ' + max.toLocaleString() + ' token（' + pct + '%）' + sentTip + compTip + '\n' +
-        (ctx.tokenGroups || []).map((g) => g.name + '：' + Number(g.numTokens).toLocaleString()).join('\n');
+      // 11-22：每一类后面加占整个上下文窗口的百分比（仿 Claude Code 的 Context 面板），名字、数量、百分比对齐成三列；最后是剩余
+      const groups = (ctx.tokenGroups || []).map((g) => [String(g.name || '?'), Number(g.numTokens) || 0]).sort((a, b) => b[1] - a[1]);
+      const pctOf = (n) => { const p = n / max * 100; return (p > 0 && p < 0.1 ? '<0.1' : p.toFixed(1)) + '%'; };
+      const w0 = Math.max(10, ...groups.map((g) => g[0].length), 4);
+      const w1 = Math.max(...groups.map((g) => g[1].toLocaleString().length), (max - used).toLocaleString().length);
+      const row = (name, n) => name.padEnd(w0) + '  ' + n.toLocaleString().padStart(w1) + '  ' + pctOf(n).padStart(6);
+      const bar = (() => { const k = Math.round(used / max * 30); return '█'.repeat(Math.min(30, k)) + '░'.repeat(Math.max(0, 30 - k)); })();
+      const detail = '上下文 ' + used.toLocaleString() + ' / ' + max.toLocaleString() + ' token（' + pct + '%）\n' + bar + sentTip + compTip +
+        (groups.length ? '\n\n' + groups.map((g) => row(g[0], g[1])).join('\n') + '\n' + row('Free space', Math.max(0, max - used)) : '');
       // 2026-11-22：图标换成随用量变满的圆环（仿 ccline 的 gauge）；紧凑模式（默认）不写上限，上限在悬停说明里
       const usedText = S.look.dense === 'full' ? fmtK(used) + ' / ' + fmtK(max) : fmtK(used);
       return seg('context', ringEl(used / max, 'ic svg gauge'), [pct + '%', usedText, compPiece], detail, level(pct, 70, 90, 'context'));
     }
-    if (sent > 0) return seg('context', 'data_usage', [fmtK(sent), compPiece], '上下文：最近一次调用发给模型的 token（输入 + 缓存读写）' + compTip);
+    if (sent > 0) return seg('context', ICON('ctx'), [fmtK(sent), compPiece], '上下文：最近一次调用发给模型的 token（输入 + 缓存读写）' + compTip);
     return null;
   };
   const cacheSeg = (mu) => {
@@ -785,7 +977,7 @@ function agyStatusBar(CFG) {
     const hit = Math.round((cache / (cache + input)) * 100);
     // 紧凑模式（默认）只写命中率：读到的 token 数和上下文用量差不多，重复了，放进悬停说明
     const pieces = S.look.dense === 'full' ? [fmtK(cache), hit + '% hit'] : [hit + '% hit'];
-    return seg('cache', 'database', pieces, '最近一次调用：从缓存读取 ' + cache.toLocaleString() + ' token，另有 ' + input.toLocaleString() +
+    return seg('cache', ICON('cache'), pieces, '最近一次调用：从缓存读取 ' + cache.toLocaleString() + ' token，另有 ' + input.toLocaleString() +
       ' token 没命中缓存，命中率 ' + hit + '%');
   };
   // idle：不在生成，只占位置不显示（见 CSS 的 .seg.k-run.idle）
@@ -837,15 +1029,32 @@ function agyStatusBar(CFG) {
           paceText = '\n这周已过去 ' + Math.round(elapsed * 100) + '%，用量比匀速' + (d < 0 ? '慢 ' : '快 ') + Math.abs(d) + ' 个百分点';
         }
       }
+      const est = weekly ? weekEst(b.bucketId) : null;
+      const who = S.account ? '\n账号 ' + S.account.m + (S.account.t ? '（' + S.account.t + '）' : '') : '';
       const tip = (g.displayName || '') + '：' + (weekly ? '每周' : '5 小时') + '额度已用 ' + pct + '%' +
-        (reset > 0 ? '，' + new Date(reset).toLocaleString() + ' 重置' : '') + paceText;
-      return seg('quota', weekly ? 'event' : 'schedule', pieces, tip, k);
+        (reset > 0 ? '，' + new Date(reset).toLocaleString() + ' 重置' : '') + paceText +
+        (est ? '\n\n预估：' + est.long + '\n' + SHARE_NOTE : '') + who;
+      return seg('quota', ICON(weekly ? 'weekly' : 'h5'), pieces, tip, k);
     });
   };
 
   // ---------- 费用：最近一次调用 + 这个对话累计（单价和算法见上面“费用估算”） ----------
-  const fmtUsd = (v) => '$' + (v < 0.01 ? v.toFixed(4) : v < 1 ? v.toFixed(3) : v < 100 ? v.toFixed(2) : v.toFixed(0));
-  const tokUsd = (n, price, usd) => n.toLocaleString() + ' × $' + price + '/M = ' + fmtUsd(usd);
+  // 金额（2026-11-22 改）：状态栏、面板、表格统一写法——0 是 $0.00，不到 1 分是 <$0.01，不到 $100 两位小数，
+  // 满 $100 写整数（加千分位）。以前不到 $0.01 写 4 位、不到 $1 写 3 位，0 元会显示成 “$0.0000 today”。
+  const fmtUsd = (v) => {
+    const x = Number(v) || 0;
+    if (x < 0.00005) return '$0.00';
+    if (x < 0.01) return '<$0.01';
+    if (x < 99.995) return '$' + x.toFixed(2);
+    return '$' + Math.round(x).toLocaleString('en-US');
+  };
+  // 悬停说明里的算式和单次调用用精确值（一次调用常常只有零点几分钱）
+  const fmtUsdFine = (v) => {
+    const x = Number(v) || 0;
+    if (x < 0.00005) return '$0';
+    return '$' + (x < 0.01 ? x.toFixed(4) : x < 1 ? x.toFixed(3) : x.toFixed(2));
+  };
+  const tokUsd = (n, price, usd) => n.toLocaleString() + ' × $' + price + '/M = ' + fmtUsdFine(usd);
   const treeCost = (ids) => {
     const t = { usd: 0, calls: 0, unpriced: 0, by: new Map(), cascades: 0 };
     for (const id of ids) {
@@ -898,17 +1107,22 @@ function agyStatusBar(CFG) {
     mergeBook(S.costBook, CFG && CFG.costDay);
     return S.costBook;
   };
+  // 对话的创建 / 最后修改时间：后台摘要（S.casMeta）里有就用它，没有就用注入程序给的本机对话文件清单（S.convFiles）。
+  // 11-22：后台摘要只列一部分对话（实测 21 个，本机有 79 个），原来摘要里没有的对话被当成“还没加载”，一直不算钱。
+  const fileMeta = (id) => { const f = (S.convFiles || []).find((x) => x[0] === id); return f ? { created: f[1], modified: f[2] } : null; };
+  const convMeta = (id) => S.casMeta.get(id) || fileMeta(id);
   const todayCost = () => {
     const d0 = dayStart();
     const by = {};
     const detBy = {};
     let calls = 0, undated = 0, loading = 0;
-    // 今天动过的对话 = 后台摘要里最后修改时间在 0 点以后的 + 注入程序从磁盘找到的（后台还没加载、摘要里暂时没有的）
+    // 今天动过的对话 = 后台摘要里最后修改时间在 0 点以后的 + 注入程序从磁盘找到的（对话日志和对话库文件，摘要里不一定有）
     const dayIds = new Set(S.todayIds || []);
     for (const [id, meta] of S.casMeta) if (meta.modified >= d0) dayIds.add(id);
+    for (const f of S.convFiles || []) if (f[2] >= d0) dayIds.add(f[0]);
     for (const id of dayIds) {
-      const meta = S.casMeta.get(id);
-      if (!meta) { loading++; continue; } // 刚让后台加载，等下一次摘要（几秒内）
+      const meta = convMeta(id);
+      if (!meta) { loading++; continue; } // 摘要和文件清单里都还没有（刚建的对话），等下一次
       if (!(meta.modified >= d0)) continue;
       const c = S.costs.get(id);
       if (!c || !c.list.length) { loading++; continue; }
@@ -964,7 +1178,7 @@ function agyStatusBar(CFG) {
     let tip = shown == null ? '' : (tot && tot.calls ? '这个对话累计 ' : '最近一次调用 ') + fmtUsd(shown) + '（按 API 标准价）';
     if (last && last.usd != null) {
       const p = last.pr.p;
-      tip += '\n\n最近一次调用 ' + fmtUsd(last.usd) + '（按 ' + last.pr.name + ' 价）' +
+      tip += '\n\n最近一次调用 ' + fmtUsdFine(last.usd) + '（按 ' + last.pr.name + ' 价）' +
         '\n  输入 ' + tokUsd(last.inp, p.in, last.parts.in) +
         (last.cr ? '\n  缓存读取 ' + tokUsd(last.cr, p.cache, last.parts.cache) : '') +
         (last.cw ? '\n  缓存写入 ' + tokUsd(last.cw, p.cw != null ? p.cw : p.in, last.parts.cw) : '') +
@@ -976,14 +1190,14 @@ function agyStatusBar(CFG) {
         [...tot.by].sort((a, b) => b[1].usd - a[1].usd).map(([n, b]) => '\n  ' + n + '：' + fmtUsd(b.usd) + '（' + b.n + ' 次）').join('') +
         (tot.unpriced ? '\n  另有 ' + tot.unpriced + ' 次调用没有单价，没有算进去' : '');
     }
-    if (shown != null) out.push(seg('cost', costIcon(), [fmtUsd(shown)], tip));
+    if (shown != null) out.push(seg('cost', ICON('cost'), [fmtUsd(shown)], tip));
     // 今天没花钱、但有历史记录时也显示（$0 today），好点开看前几天
     if (day.usd > 0 || hasHistory()) {
       const dtip = '今天累计 ' + fmtUsd(day.usd) + '（按 API 标准价，本地 0 点起，' + day.convs + ' 个对话，含子代理）' +
         (day.undated ? '\n  还有 ' + day.undated + ' 次调用正在查时间，暂时没算进今天' : '') +
         (day.loading ? '\n  还有 ' + day.loading + ' 个对话正在读取' : '') +
         '\n\n点击查看每天的用量和额度';
-      const ts = seg('cost', 'calendar_month', [fmtUsd(day.usd) + ' today'], dtip);
+      const ts = seg('cost', ICON('today'), [fmtUsd(day.usd) + ' today'], dtip);
       ts.classList.add('p-open');
       ts.addEventListener('click', () => togglePanel(ts));
       out.push(ts);
@@ -1001,6 +1215,32 @@ function agyStatusBar(CFG) {
       '<text x="12" y="15.4" text-anchor="middle" font-family="Arial,Helvetica,sans-serif" font-size="11.5" font-weight="700" fill="#000">$</text>' +
       '</mask></defs><path mask="url(#' + id + ')" fill="currentColor" ' +
       'd="M12 2.5C6.2 2.5 1.5 6.4 1.5 11.2c0 2.6 1.4 4.9 3.6 6.5l-.9 3.8 4.6-2.1c1 .3 2.1.4 3.2.4 5.8 0 10.5-3.9 10.5-8.7S17.8 2.5 12 2.5z"/></svg>';
+    return span;
+  };
+  // 生成速度的档位：低于 30 tok/s 慢，30～60 中，高于 60 快（11-22 用户定的）
+  const SPEED_TIERS = [[30, 'slow', '慢（低于 30 tok/s）'], [60, 'medium', '中（30～60 tok/s）'], [Infinity, 'fast', '快（高于 60 tok/s）']];
+  const speedTier = (tps) => { const x = Number(tps); return x > 0 ? SPEED_TIERS.findIndex((t) => (t[0] === 30 ? x < 30 : x <= t[0])) : 1; };
+  // 速度图标：上半圆分成三段（慢 / 中 / 快），指针指向当前档位那一段，这一段实色、另外两段淡色。
+  // 圆心 (12,16.5)、半径 8.6、线宽 4（15px 下和旁边的实心图标一样重）；三段之间留 12° 的缝；指针角度：慢 150°、中 90°（朝上）、快 30°。不知道速度时指中间。
+  const speedIcon = (tps) => {
+    const k = speedTier(tps);
+    const cx = 12, cy = 16.5, r = 8.6;
+    const pt = (deg, rr) => [(cx + rr * Math.cos(deg * Math.PI / 180)).toFixed(2), (cy - rr * Math.sin(deg * Math.PI / 180)).toFixed(2)];
+    const arc = (a1, a2) => { const p1 = pt(a1, r), p2 = pt(a2, r); return 'M' + p1[0] + ' ' + p1[1] + 'A' + r + ' ' + r + ' 0 0 1 ' + p2[0] + ' ' + p2[1]; };
+    const segs = [[180, 126], [114, 66], [54, 0]].map(([a1, a2], i) =>
+      '<path d="' + arc(a1, a2) + '" fill="none" stroke="currentColor" stroke-width="4" opacity="' + (i === k ? 1 : 0.3) + '"/>').join('');
+    const tip = pt([150, 90, 30][k], 7.2);
+    const span = el('span', 'ic svg speedo t-' + SPEED_TIERS[k][1]);
+    span.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true">' + segs +
+      '<line x1="' + cx + '" y1="' + cy + '" x2="' + tip[0] + '" y2="' + tip[1] + '" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"/>' +
+      '<circle cx="' + cx + '" cy="' + cy + '" r="2.5" fill="currentColor"/></svg>';
+    return span;
+  };
+  // 模型的图标：彗星（ccline 的模型图标也是它）。图形是 Font Awesome Free 6.7.2 的 meteor（solid），
+  // 许可 CC BY 4.0（https://fontawesome.com/license/free），版权 Fonticons, Inc.；README 的致谢里也写了。
+  const cometIcon = () => {
+    const span = el('span', 'ic svg comet');
+    span.innerHTML = '<svg viewBox="0 0 512 512" aria-hidden="true"><path fill="currentColor" d="M493.7 .9L299.4 75.6l2.3-29.3c1-12.8-12.8-21.5-24-15.1L101.3 133.4C38.6 169.7 0 236.6 0 309C0 421.1 90.9 512 203 512c72.4 0 139.4-38.6 175.7-101.3L480.8 234.3c6.5-11.1-2.2-25-15.1-24l-29.3 2.3L511.1 18.3c.6-1.5 .9-3.2 .9-4.8C512 6 506 0 498.5 0c-1.7 0-3.3 .3-4.8 .9zM192 192a128 128 0 1 1 0 256 128 128 0 1 1 0-256zm0 96a32 32 0 1 0 -64 0 32 32 0 1 0 64 0zm16 96a16 16 0 1 0 0-32 16 16 0 1 0 0 32z"/></svg>';
     return span;
   };
   const safeCost = (md, ids) => { try { return costSeg(md, ids); } catch (e) { return []; } }; // 出错只少这一项，不影响整条状态栏
@@ -1075,22 +1315,43 @@ function agyStatusBar(CFG) {
     }
     return { wk, peak, name };
   };
-  const liveWeekly = (grp) => { // 现在这一组的每周额度已用比例（状态栏查到的）
-    let v = null;
-    for (const g of (S.quota && S.quota.groups) || []) {
-      for (const b of g.buckets || []) {
-        if (String(b.bucketId || '').startsWith(grp + '-') && b.window === 'weekly' && !b.disabled && Number(b.remainingFraction) >= 0) {
-          v = Math.max(v || 0, 1 - Number(b.remainingFraction));
-        }
+  // 每周额度预估（2026-11-22 加，v1.6）。注入程序按细粒度读数算好两种速度：这周到现在的平均、最近 24 小时（至少隔 6 小时）。
+  // 有最近 24 小时的就用它（更接近现在的用法），没有就用这周平均；这周过去不到 1 天时这周平均很不准，标 rough。
+  // 只有这个号的额度只被这台电脑用时才准：和家人共享额度、或者别的电脑也在用这个号，别人用掉的也会算进速度。
+  const SHARE_NOTE = '只有这个号的额度只被这台电脑用时才准：如果和家人共享额度，或者别的电脑也在用这个号，别人用掉的也会算进速度里，预估会偏高。';
+  const weekEst = (bucketId) => {
+    const e = S.history && S.history.est && S.history.est[bucketId];
+    if (!e || !(e.used > 0)) return null; // 没用过的桶：重置时间跟着现在走，没法估
+    const use24 = e.proj24 != null && e.spanH >= 6;
+    const proj = use24 ? e.proj24 : e.projWeek;
+    const fullAt = use24 ? e.fullAt24 : e.fullAtWeek;
+    const rough = !use24 && e.elapsedH < 24;
+    const short = (proj > 1 && fullAt ? 'full ' + fmtWhen(fullAt) : Math.round(Math.min(proj, 9.99) * 100) + '% at reset') + (rough ? ' (rough)' : '');
+    const basis = use24 ? '按最近 ' + Math.round(e.spanH) + ' 小时的速度' : '按这周到现在（' + (e.elapsedH < 24 ? Math.round(e.elapsedH) + ' 小时' : (e.elapsedH / 24).toFixed(1) + ' 天') + '）的平均速度';
+    const long = basis + '，' + (proj > 1 && fullAt ? '会在 ' + new Date(fullAt).toLocaleString() + ' 左右用完' : '到重置时大约用到 ' + Math.round(proj * 100) + '%') +
+      (rough ? '（这周才过去不到 1 天，估得很粗）' : '') +
+      (use24 && e.projWeek != null ? '\n按这周平均速度算是 ' + Math.round(Math.min(e.projWeek, 9.99) * 100) + '%' : '');
+    return { proj, short, long, rough };
+  };
+  const weeklyBucket = (grp) => { // 这一组的每周额度桶：{ id（例如 gemini-weekly）, used 已用比例, reset 重置时间毫秒 }
+    for (const g of (S.quota && S.quota.groups) || []) for (const b of g.buckets || []) {
+      if (String(b.bucketId || '').startsWith(grp + '-') && b.window === 'weekly' && !b.disabled && Number(b.remainingFraction) >= 0) {
+        return { id: b.bucketId, used: Math.max(0, Math.min(1, 1 - Number(b.remainingFraction))), reset: tms(b.resetTime) };
       }
     }
-    return v;
+    return null;
   };
   const recTokens = (r) => {
     const t = [0, 0, 0, 0, 0]; // 调用数、输入、缓存读、缓存写、输出
     for (const m of Object.values((r && r.models) || {})) for (let i = 0; i < 5; i++) t[i] += +m[i + 1] || 0;
     return t;
   };
+  const tokSum = (t) => t[1] + t[2] + t[3] + t[4]; // 输入 + 缓存读 + 缓存写 + 输出
+  // 三位有效数字左右：1.35B、30.3M、271M、98.7k
+  const fmtTok = (n) => { n = Number(n) || 0; const f = (v, u) => (v < 10 ? v.toFixed(2) : v < 100 ? v.toFixed(1) : Math.round(v)) + u;
+    return n >= 1e9 ? f(n / 1e9, 'B') : n >= 1e6 ? f(n / 1e6, 'M') : n >= 1e3 ? f(n / 1e3, 'k') : String(n); };
+  const tokTip = (t) => 'token 合计 ' + tokSum(t).toLocaleString() + ' = 输入 ' + t[1].toLocaleString() + ' + 缓存读 ' + t[2].toLocaleString() +
+    (t[3] ? ' + 缓存写 ' + t[3].toLocaleString() : '') + ' + 输出 ' + t[4].toLocaleString() + '（输出含思考）';
   const pctTx = (f) => (f * 100 < 10 ? (f * 100).toFixed(1) : String(Math.round(f * 100))) + '%';
   const dayLabel = (name) => { const d = new Date(name + 'T12:00:00'); return { wd: WEEKDAY[d.getDay()], md: (d.getMonth() + 1) + '-' + d.getDate(), d: String(d.getDate()) }; };
   // ---------- 面板里的悬停卡片（2026-11-20 改）：代替系统提示框，立即弹出、跟着鼠标、带模型颜色 ----------
@@ -1120,6 +1381,7 @@ function agyStatusBar(CFG) {
       if (q.wk != null) out.push(el('div', 'q', label + ' 每周额度 +' + pctTx(q.wk) + (q.peak != null ? ' · 5 小时最高 ' + pctTx(q.peak) : '')));
     }
     if (r.bf) out.push(el('div', 'dim', '从 Antigravity 对话库补算，没有额度记录'));
+    else if (r.fix) out.push(el('div', 'dim', '实时记录少算了，花费和 token 已按 Antigravity 对话库重算'));
     out.push(el('div', 'dim', '钱按 API 标准价折算，不是实际扣费'));
     return out;
   };
@@ -1158,6 +1420,7 @@ function agyStatusBar(CFG) {
   const renderPanel = (panel) => {
     lookAttrs(panel);
     if (S.panelView === 'look') { renderLook(panel); return; }
+    if (S.panelView === 'calls') { renderCalls(panel); return; }
     const n = S.panelDays;
     const recs = lastDays(n).map((nm) => ({ nm, r: dayRecord(nm) }));
     const tips = new WeakMap();
@@ -1185,8 +1448,25 @@ function agyStatusBar(CFG) {
     th.append(el('span', 'ic', 'palette'), 'theme');
     setTip(th, '状态栏外观：配色、外形、进度条、信息密度');
     th.addEventListener('click', () => { S.panelView = 'look'; renderPanel(panel); });
-    head.append(el('span', 'p-fill'), th, x);
+    // 账号（v1.6）：打码邮箱 + 套餐；额度历史按账号分开记，钱和 token 是这台电脑上所有账号的合计
+    const ac = S.account || (S.history && S.history.acct);
+    const acEl = ac && ac.m ? el('span', 'p-acct', ac.m + (ac.t ? ' · ' + ac.t.replace(/^Google AI\s+/i, '') : '')) : null;
+    if (acEl) setTip(acEl, '当前账号 ' + ac.m + (ac.t ? '（' + ac.t + '）' : '') +
+      '\n额度（Gemini wk / Claude wk、底部的每周额度和预估）只算这个账号；花费和 token 是这台电脑上的合计，不分账号。');
+    head.append(el('span', 'p-fill'), ...(acEl ? [acEl] : []), th, x);
     panel.append(head);
+
+    // 今天的汇总（11-22 加）：花费、调用次数、token 合计、缓存命中率。今天这一行用页面里实时的账本（同表格第一行）
+    const tr0 = dayRecord(dayName());
+    const t0 = recTokens(tr0);
+    const kpi = el('div', 'p-kpi');
+    const kcell = (lab, val, tip, kind) => { const c = el('div', 'kc k-' + kind); c.append(el('span', 'kl', lab), el('span', 'kv', val)); setTip(c, tip); return c; };
+    kpi.append(
+      kcell('today', fmtUsd((tr0 && tr0.usd) || 0), '今天按 API 标准价折算的花费（不是实际扣费）', 'cost'),
+      kcell('calls', String(t0[0]), '今天的模型调用次数（含子代理）', 'model'),
+      kcell('tokens', fmtTok(tokSum(t0)), '今天的' + tokTip(t0), 'tokens'),
+      kcell('cache hit', t0[1] + t0[2] > 0 ? Math.round(t0[2] / (t0[1] + t0[2]) * 100) + '%' : '—', '今天的缓存命中率 = 缓存读 ÷（缓存读 + 输入）', 'cache'));
+    panel.append(kpi);
 
     // 柱状图：左旧右新，按模型分颜色叠起来（金额大的在下面）；柱顶标金额，虚线是有用量的天的日均
     const max = Math.max(1e-6, ...recs.map(({ r }) => (r && r.usd) || 0));
@@ -1251,7 +1531,7 @@ function agyStatusBar(CFG) {
       const avg = total / usedDays.length;
       const line = el('div', 'p-avg');
       line.style.bottom = (avg / max * 100) + '%';
-      line.append(el('span', '', 'avg ' + fmtUsdShort(avg)));
+      // 11-22：不再在线的右端写 “avg $xx”——会和最右边（今天）柱子顶上的金额叠在一起；日均写在底部小结里
       setTip(line, '有用量的 ' + usedDays.length + ' 天平均每天 ' + fmtUsd(avg));
       bars.append(line);
     }
@@ -1286,7 +1566,7 @@ function agyStatusBar(CFG) {
       const table = el('table');
       const thead = el('thead');
       const hr = el('tr');
-      const heads = [['Date', ''], ['Cost', '按 API 标准价折算的花费（不是实际扣费）'], ['Convs', '当天动过的对话数（含子代理）'], ['Calls', '模型调用次数'],
+      const heads = [['Date', ''], ['Cost', '按 API 标准价折算的花费（不是实际扣费）'], ['Convs', '当天动过的对话数（含子代理）'], ['Calls', '模型调用次数'], ['Tokens', 'token 合计 = 输入 + 缓存读 + 缓存写 + 输出'],
         ['In', '输入 token（不含缓存）'], ['Cache', '缓存读取 token'], ['Out', '输出 token（含思考）'], ['Hit', '缓存命中率 = 缓存读取 ÷（缓存读取 + 输入）'],
         ...GROUPS.map(([, label]) => [label + ' wk', '当天用掉了多少个百分点的' + label + '每周额度'])];
       for (const [h, t] of heads) { const th = el('th', '', h); setTip(th, t); hr.append(th); }
@@ -1300,7 +1580,9 @@ function agyStatusBar(CFG) {
         const td0 = el('td', '', lb.md + ' ' + lb.wd);
         tips.set(td0, () => dayCard(nm, r));
         const hit = t[1] + t[2] > 0 ? Math.round(t[2] / (t[1] + t[2]) * 100) + '%' : '—';
-        tr.append(td0, el('td', 'c', fmtUsd(r.usd || 0)), el('td', '', String(r.convs || 0)), el('td', '', String(t[0])),
+        const tdTok = el('td', 'tk', fmtK(tokSum(t)));
+        setTip(tdTok, tokTip(t));
+        tr.append(td0, el('td', 'c', fmtUsd(r.usd || 0)), el('td', '', String(r.convs || 0)), el('td', '', String(t[0])), tdTok,
           el('td', '', fmtK(t[1])), el('td', '', fmtK(t[2])), el('td', '', fmtK(t[4])), el('td', 'h', hit));
         for (const [grp] of GROUPS) {
           const q = groupQuota(r, grp);
@@ -1314,6 +1596,8 @@ function agyStatusBar(CFG) {
           tr.addEventListener('mouseenter', () => col.classList.add('sel'));
           tr.addEventListener('mouseleave', () => col.classList.remove('sel'));
         }
+        tr.classList.add('clk');
+        tr.addEventListener('click', () => { S.panelView = 'calls'; S.callsDay = nm; renderPanel(panel); });
         tbody.append(tr);
       }
       table.append(thead, tbody);
@@ -1324,33 +1608,212 @@ function agyStatusBar(CFG) {
 
     // 底部：这段时间的合计；每组额度：现在用了多少、这段时间用掉多少、折算下来 1% 每周额度大约值多少钱
     const foot = el('div', 'p-foot');
-    const l1 = el('div', 'k-cost', 'last ' + n + 'd ' + fmtUsd(total) + (usedDays.length ? ' · avg ' + fmtUsd(total / usedDays.length) + '/day · ' + usedDays.length + ' days' : ''));
-    setTip(l1, '最近 ' + n + ' 天合计（按 API 标准价折算）；平均值只算有用量的天');
+    const tN = [0, 0, 0, 0, 0];
+    for (const { r } of recs) recTokens(r).forEach((v, i) => { tN[i] += v; });
+    const l1 = el('div', 'k-cost', 'last ' + n + 'd ' + fmtUsd(total) + (tokSum(tN) ? ' · ' + fmtTok(tokSum(tN)) + ' tokens' : '') +
+      (usedDays.length ? ' · avg ' + fmtUsd(total / usedDays.length) + '/day · ' + usedDays.length + ' days' : ''));
+    setTip(l1, '最近 ' + n + ' 天合计（按 API 标准价折算）；平均值只算有用量的天' + (tokSum(tN) ? '\n' + tokTip(tN) + '，' + tN[0].toLocaleString() + ' 次调用' : ''));
     foot.append(l1);
+    // 每组每周额度一行（11-22 改：按重置周期算）。周期 = 重置时间往前推 7 天 → 重置时间，例如 11-22 09:41 → 11-29 09:41。
+    // 原来写的是“最近 n 个自然日里用掉多少”和按这些天算的“每 1% 折合多少钱”，和额度的周期对不上（用户指出）。
+    //   已用：状态栏查到的这个周期的已用比例；没用过的桶（已用 0）重置时间跟着现在走，周期还没开始，只写 0% used。
+    //   整周额度大约值多少（cap，11-22 用户要的“预计周限额 800 刀、900M 用量”）：这个周期开始那天起，每天这一组模型的
+    //   花费和 token 合计 ÷ 已用比例，推出用满 100% 大约对应多少钱、多少 token。按天合计，周期开始那天整天都算在内。
+    //   已用不到 5% 时误差很大，标 rough；额度按模型和 token 种类怎么折算 Google 没公布，这里按花费和 token 同比例推，只是参考。
     for (const [grp, label] of GROUPS) {
-      let wk = 0, wkDays = 0, usd = 0;
-      for (const { r } of recs) {
-        const q = groupQuota(r, grp);
-        if (q.wk == null) continue;
-        wk += q.wk;
-        wkDays++;
-        for (const [name, m] of Object.entries((r && r.models) || {})) if (modelGroup(name) === grp) usd += m[0];
-      }
-      const now = liveWeekly(grp);
-      if (now == null && !wkDays) continue;
-      const parts = [label + ' weekly'];
-      if (now != null) parts.push('now ' + Math.round(now * 100) + '%');
-      if (wkDays) parts.push('+' + pctTx(wk) + ' in ' + n + 'd');
-      if (wk >= 0.02 && usd > 0) parts.push('≈ ' + fmtUsd(usd / (wk * 100)) + ' per 1%');
+      const wb = weeklyBucket(grp);
+      if (!wb) continue;
+      const parts = [label + ' weekly', Math.round(wb.used * 100) + '% used'];
+      let tip = label + ' 组每周额度（周期按重置时间算）：';
+      let est = null;
+      if (wb.used > 0 && wb.reset > 0) {
+        const start = wb.reset - WEEK_MS;
+        parts.push('resets ' + fmtWhen(wb.reset));
+        est = weekEst(wb.id);
+        if (est) parts.push('est ' + est.short);
+        // 这个周期开始那天到今天，每天这一组模型的花费和 token（输入 + 缓存读 + 缓存写 + 输出）
+        let usd = 0, tok = 0;
+        const d = new Date(start);
+        d.setHours(12, 0, 0, 0);
+        const today = dayName();
+        for (let i = 0; i < 9; i++) {
+          const nm = d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());
+          for (const [name, m] of Object.entries(((dayRecord(nm) || {}).models) || {})) {
+            if (modelGroup(name) === grp) { usd += +m[0] || 0; tok += (+m[2] || 0) + (+m[3] || 0) + (+m[4] || 0) + (+m[5] || 0); }
+          }
+          if (nm === today) break;
+          d.setDate(d.getDate() + 1);
+        }
+        const capOk = wb.used >= 0.01 && usd > 0;
+        const capUsd = capOk ? usd / wb.used : 0, capTok = capOk ? tok / wb.used : 0;
+        const capRough = wb.used < 0.05;
+        if (capOk) parts.splice(2, 0, 'cap ≈ ' + fmtUsd(capUsd) + ' / ' + fmtTok(capTok) + ' tok' + (capRough ? ' (rough)' : ''));
+        const sd = new Date(start), rd = new Date(wb.reset);
+        const md = (x) => (x.getMonth() + 1) + '-' + x.getDate() + ' ' + pad(x.getHours()) + ':' + pad(x.getMinutes());
+        tip += '\n这个周期 ' + md(sd) + ' 开始，' + md(rd) + ' 重置；现在已用 ' + pctTx(wb.used) + '。' +
+          (usd > 0 ? '\n这个周期里' + label + '模型用了 ' + fmtUsd(usd) + '、' + fmtTok(tok) + ' token（从 ' + (sd.getMonth() + 1) + '-' + sd.getDate() + ' 起按天合计，周期开始那天整天都算在内）。' : '') +
+          (capOk ? '\n\n整周额度（cap）：按这个比例，用满 100% 大约相当于 ' + fmtUsd(capUsd) + '、' + fmtTok(capTok) + ' token；' +
+            '还剩约 ' + fmtUsd(capUsd - usd) + '、' + fmtTok(Math.max(0, capTok - tok)) + ' token。' +
+            (capRough ? '\n现在才用了 ' + pctTx(wb.used) + '，推算误差很大，用得越多越准。' : '') +
+            '\n钱按 API 标准价折算，不是实际扣费；Google 没公布额度按模型和 token 种类怎么折算，这里按同比例推，只是参考。' +
+            '\n和家人共享额度、或者别的电脑也在用这个号时，别人用掉的算进了已用比例、却不在这台电脑的花费里，推出来的总量会偏小。' : '');
+      } else tip += '\n已用 0%：这个号这一组还没开始用，周期从第一次用的时候开始算，重置时间跟着现在走。';
+      if (est) tip += '\n\n预估（est）：' + est.long + '\n' + SHARE_NOTE;
+      if (S.account) tip += '\n\n账号 ' + S.account.m;
       const line = el('div', 'k-quota', parts.join(' · '));
-      setTip(line, label + ' 组每周额度：现在已用 ' + (now != null ? Math.round(now * 100) + '%' : '（还没查到）') +
-        (wkDays ? '；最近 ' + n + ' 天里有记录的 ' + wkDays + ' 天共用掉 ' + pctTx(wk) : '') +
-        (wk >= 0.02 && usd > 0 ? '\n这几天' + label + '模型折算 ' + fmtUsd(usd) + '，平均每 1% 每周额度约 ' + fmtUsd(usd / (wk * 100)) +
-          '\n只是估算：钱按 API 标准价折算；额度按注入程序观察到的变化累计，Antigravity 没开着时用掉的额度会算到下次观察到的那一天' : ''));
+      setTip(line, tip);
       foot.append(line);
     }
     panel.append(foot);
     attachCard(panel, tips);
+  };
+  // ---------- 调用明细页（2026-11-22 加，v1.6）：点每日用量表格里的某一天打开，仿 CC Switch 的请求日志 ----------
+  // 数据全部来自本机后台（只读，不经过 Google，不耗额度）：
+  //   哪些对话这一天动过：创建时间 ≤ 这天结束、最后修改 ≥ 这天开始。来源有两个：后台的对话摘要（S.casMeta，有标题），
+  //     和注入程序给的本机对话库文件清单（S.convFiles，见 inject.mjs 的 convFiles）——摘要只列一部分对话，没列出的按 ID 照样取得到；
+  //   每次调用：GetCascadeTrajectoryGeneratorMetadata 的 token 用量、模型、timeToFirstToken（首字）、streamingDuration（生成用时）；
+  //   调用开始的时刻：元数据里没有（几个 ID 都是不带时间的随机 UUID，executionId 是一轮共用的），
+  //     要按 stepIndices[0] 去 GetCascadeTrajectorySteps 里找那一步的 createdAt，所以每个对话还要取一次步骤（只留每步的开始时间）。
+  // 结果按对话缓存在 S.detCache；对话又被改过（最后修改时间变了）就只补取新增的调用和步骤。
+  // 已经删掉的对话没有了，所以以前某天的明细合计可能比当天合计少。
+  S.detCache = S.detCache || new Map(); // 对话 ID → { modified, gens: [调用], times: Map(步骤序号 → 毫秒), stepNext, busy }
+  const durS = (d) => parseFloat(d) || 0; // "22.72s" → 22.72
+  const slimCall = (m) => {
+    const cm = (m && m.chatModel) || {}, u = cm.usage || {};
+    const usage = {};
+    for (const k of USAGE_KEYS) if (u[k] !== undefined) usage[k] = u[k];
+    return { exec: m && m.executionId, step: Array.isArray(m && m.stepIndices) ? m.stepIndices[0] : -1, resp: cm.responseModel || '', key: u.model || cm.model || '',
+      disp: String(cm.modelDisplayName || '').slice(0, 60), usage, ttft: durS(cm.timeToFirstToken), stream: durS(cm.streamingDuration),
+      retries: Array.isArray(cm.retryInfos) ? cm.retryInfos.length : 0, cid: (cm.customMetadata && cm.customMetadata.cascade_id) || '' };
+  };
+  // 取（或补取）一个对话的调用和每步开始时间
+  const loadConv = async (id) => {
+    const meta = S.casMeta.get(id) || fileMeta(id) || {};
+    let c = S.detCache.get(id);
+    if (c && c.done && c.modified === meta.modified) return c;
+    if (!c) { c = { gens: [], times: new Map(), stepNext: 0 }; S.detCache.set(id, c); }
+    const off = Math.max(0, c.gens.length - 1); // 最后一条可能是当时还没结束的调用，重取覆盖
+    const g = await lsCall('GetCascadeTrajectoryGeneratorMetadata', { cascadeId: id, generatorMetadataOffset: off });
+    const list = (g && Array.isArray(g.generatorMetadata)) ? g.generatorMetadata : null;
+    if (!list) throw Error('no call metadata');
+    list.forEach((m, i) => { c.gens[off + i] = slimCall(m); });
+    // 步骤：从还没有时间的最早那次调用的步骤开始取到最后（第一次取时一般是整个对话）
+    const need = c.gens.filter((x) => x && x.step >= 0 && !c.times.has(x.step)).map((x) => x.step);
+    if (need.length) {
+      const from = Math.max(0, Math.min(...need, c.stepNext));
+      const r = await lsCall('GetCascadeTrajectorySteps', { cascadeId: id, stepOffset: from });
+      const st = (r && Array.isArray(r.steps)) ? r.steps : [];
+      st.forEach((x, i) => { const md = (x && x.metadata) || {}; if (md.createdAt) c.times.set(from + i, tms(md.createdAt)); });
+      c.stepNext = Math.max(from, from + st.length - 2);
+    }
+    c.modified = meta.modified;
+    c.done = true;
+    return c;
+  };
+  // 一天的明细：找对话 → 逐个取（一次一个，不同时压后台），边取边画进度
+  const dayBounds = (nm) => { const a = new Date(nm + 'T00:00:00').getTime(); return [a, a + 86400e3]; };
+  S.loadCalls = async (nm, onProgress) => {
+    const [d0, d1] = dayBounds(nm);
+    const ids = [...new Set([...S.casMeta.entries()].filter(([, m]) => m.created < d1 && m.modified >= d0).map(([id]) => id)
+      .concat((S.convFiles || []).filter((f) => f[1] < d1 && f[2] >= d0).map((f) => f[0])))];
+    const rows = [];
+    let done = 0, failed = 0;
+    for (const id of ids) {
+      try {
+        const c = await loadConv(id);
+        for (const x of c.gens) {
+          if (!x) continue;
+          const at = c.times.get(x.step) || 0;
+          if (at >= d0 && at < d1) rows.push({ ...x, at, conv: id });
+        }
+      } catch (e) { failed++; }
+      done++;
+      if (onProgress) onProgress(done, ids.length);
+    }
+    rows.sort((a, b) => b.at - a.at);
+    return { rows, convs: ids.length, failed };
+  };
+  const convLabel = (id) => {
+    const sub = S.subInfo.get(id);
+    const title = (S.casMeta.get(id) || {}).title || '';
+    if (sub) return '↳ ' + (sub.typeName || 'subagent') + (sub.role ? ' · ' + sub.role : '');
+    return title || id.slice(0, 8);
+  };
+  const renderCalls = (panel) => {
+    panel.replaceChildren();
+    const nm = S.callsDay || dayName();
+    const lb = dayLabel(nm);
+    const head = el('div', 'p-head');
+    const back = el('button', 'p-btn', '← usage');
+    setTip(back, '回到每日用量');
+    back.addEventListener('click', () => { S.panelView = 'usage'; renderPanel(panel); });
+    head.append(back, setTip(el('span', 'p-title', 'Calls · ' + lb.wd + ' ' + lb.md), '这一天每次模型调用的明细，最新的在上面'));
+    const sum = el('span', 'p-range', '');
+    const x = el('button', 'p-btn p-x', '×');
+    setTip(x, '关闭（Esc）');
+    x.addEventListener('click', closePanel);
+    head.append(sum, el('span', 'p-fill'), x);
+    panel.append(head);
+    const status = el('div', 'p-empty', 'loading…');
+    panel.append(status);
+    const wrap = el('div', 'p-table calls');
+    panel.append(wrap);
+    const note = el('div', 'p-note');
+    panel.append(note);
+    const draw = (res) => {
+      const rows = res.rows;
+      const usdOf = (r) => { const cc = callCost(r.usage, callNames(r.resp, r.key, r.exec), r.at); return cc ? cc : { usd: null }; };
+      // 合计按这一天的全部调用算；表格只画最新的 MAX 次
+      let total = 0, priced = 0;
+      const costs = new Map();
+      for (const r of rows) { const cc = usdOf(r); costs.set(r, cc); if (cc.usd != null) { total += cc.usd; priced++; } }
+      const table = el('table');
+      const hr = el('tr');
+      const heads = [['Time', '调用开始的时间'], ['Conversation', '哪个对话（↳ 是子代理）'], ['Model', '模型（界面名；悬停看接口名和配置名）'], ['Cost', '按 API 标准价折算（不是实际扣费）'],
+        ['In', '新增输入（不含缓存）'], ['Out', '输出（含思考）'], ['Cache', '缓存读取'], ['Write', '缓存写入（只有 Claude 有）'], ['Hit', '命中率 = 缓存读 ÷（缓存读 + 输入）'],
+        ['tok/s', '生成速度：输出 token（含思考）÷ 总耗时。思考在首字之前就生成了，所以按总耗时算'], ['TTFT', '首字时间（后台记录的 timeToFirstToken）'], ['Total', '首字 + 生成用时']];
+      for (const [h, t] of heads) { const th = el('th', '', h); setTip(th, t); hr.append(th); }
+      const thead = el('thead'); thead.append(hr);
+      const tbody = el('tbody');
+      const MAX = 600;
+      for (const r of rows.slice(0, MAX)) {
+        const u = r.usage, inp = +u.inputTokens || 0, cr = +u.cacheReadTokens || 0, cw = +u.cacheWriteTokens || 0;
+        const out = Math.max(+u.outputTokens || 0, (+u.thinkingOutputTokens || 0) + (+u.responseOutputTokens || 0));
+        const cc = costs.get(r);
+        const t = new Date(r.at);
+        const tr = el('tr');
+        const model = r.disp || (r.key && S.enumModel.get(r.key)) || r.resp || r.key.replace(/^MODEL_/, '');
+        const tdConv = el('td', 'cv', clip(convLabel(r.conv), 48)); // 实际宽度由 CSS 限制（放不下出省略号）
+        setTip(tdConv, convLabel(r.conv) + '\n对话 ' + r.conv.slice(0, 8) + ' · 第 ' + (r.step + 1) + ' 步');
+        // 表里写短名（去掉 Gemini 4 / Claude 前缀），完整的界面名、接口名、配置名在悬停说明里
+        const tdModel = el('td', 'md', clip(model.replace(/^Gemini \d+(\.\d+)?\s+/, '').replace(/^Claude\s+/, ''), 20));
+        setTip(tdModel, '界面名：' + (r.disp || '?') + '\n接口返回的模型：' + (r.resp || '?') + '\n配置名：' + ((r.key && S.enumModel.get(r.key)) || '?') + '\n编号：' + (r.key || '?') +
+          (cc.pr ? '\n单价按 ' + cc.pr.name + (cc.pr.note ? '（' + cc.pr.note + '）' : '') : '\n价格表里没有这个模型，没算钱') + (r.retries ? '\n重试过 ' + r.retries + ' 次' : ''));
+        const tdCost = el('td', 'c', cc.usd != null ? fmtUsdFine(cc.usd) : '—');
+        const hit = cr + inp > 0 ? Math.round(cr / (cr + inp) * 100) + '%' : '—';
+        const totalS = r.ttft + r.stream;
+        const tps = totalS > 0.05 && out > 0 ? String(Math.round(out / totalS)) : '—'; // 单位 tok/s 写在表头
+        tr.append(el('td', '', pad(t.getHours()) + ':' + pad(t.getMinutes()) + ':' + pad(t.getSeconds())), tdConv, tdModel, tdCost,
+          el('td', '', inp.toLocaleString()), el('td', '', out.toLocaleString()), el('td', '', fmtK(cr)), el('td', '', cw ? fmtK(cw) : '—'), el('td', 'h', hit),
+          el('td', '', tps), el('td', '', r.ttft ? r.ttft.toFixed(1) + 's' : '—'), el('td', '', r.ttft || r.stream ? (r.ttft + r.stream).toFixed(1) + 's' : '—'));
+        tbody.append(tr);
+      }
+      table.append(thead, tbody);
+      wrap.replaceChildren(table);
+      sum.textContent = rows.length + ' calls · ' + fmtUsd(total);
+      status.textContent = rows.length ? '' : 'no calls found for this day';
+      status.hidden = !!rows.length;
+      const dayUsd = ((dayRecord(nm) || {}).usd) || 0;
+      note.textContent = (rows.length > MAX ? '只显示最新的 ' + MAX + ' 次。' : '') +
+        (res.failed ? res.failed + ' 个对话没取到。' : '') +
+        (dayUsd > 0 && total < dayUsd * 0.95 ? '明细合计 ' + fmtUsd(total) + '，当天合计 ' + fmtUsd(dayUsd) + '：差的部分可能是已经删掉的对话，或者 Antigravity 关着时补算进当天的用量。' : '') +
+        (priced < rows.length ? (rows.length - priced) + ' 次调用的模型不在价格表里，没算钱。' : '');
+    };
+    const key = nm;
+    S.callsKey = key;
+    S.loadCalls(nm, (d, n) => { if (S.callsKey === key && n > 1) status.textContent = 'loading ' + d + '/' + n + ' conversations…'; })
+      .then((res) => { if (S.callsKey === key && panel.isConnected && S.panelView === 'calls') draw(res); })
+      .catch((e) => { status.textContent = 'failed: ' + e.message; });
   };
   // Theme 页（2026-11-22 加）：上面是配色画廊，每张卡片是当前状态栏的实时副本（套上那套配色和当前外形），点一下就换；
   // 下面是外形、进度条、信息密度、图标。选了马上生效，注入程序 30 秒内存进 look.json 并推给其他窗口。
@@ -1413,12 +1876,29 @@ function agyStatusBar(CFG) {
         return b;
       })));
     }
-    panel.append(row('icons', '图标', [true, false].map((v) => {
-      const b = el('button', 'p-btn' + (S.look.icons === v ? ' on' : ''), v ? 'on' : 'off');
-      setTip(b, v ? '显示图标（默认）' : '不显示图标，更窄');
+    const ICON_SET_TIP = { material: '实心图标（默认）', outline: '线条图标（同一套字体的空心版）', unicode: '普通字符，不用联网加载图标字体', off: '不显示图标，更窄' };
+    panel.append(row('icons', '图标整套', LOOK_CHOICES.icons.map((v) => {
+      const b = el('button', 'p-btn' + (S.look.icons === v ? ' on' : ''), v);
+      setTip(b, ICON_SET_TIP[v]);
       b.addEventListener('click', () => S.setLook({ icons: v }));
       return b;
     })));
+    // 单项图标（11-22 改）：一排 9 个按钮，每个显示这一项现在用的图标，点一下在“默认 / 备选”之间换。
+    // 原来是 9 行、每行 4 个候选，用户嫌太多。整套是 unicode 或 off 时单项不生效，这一排变淡。
+    const pick = el('div', 'lk-row lk-icons' + (S.look.icons === 'unicode' || S.look.icons === 'off' ? ' dim' : ''));
+    pick.append(setTip(el('span', 'lk-lab', 'swap'), '点一个图标，在默认和备选之间换'));
+    for (const [key, [lab, zh, names]] of Object.entries(ICON_ITEMS)) {
+      const cur = (S.look.iconMap && S.look.iconMap[key]) || names[0];
+      const other = names.find((n) => n !== cur) || names[0];
+      const b = el('button', 'p-btn lk-ib' + (cur !== names[0] ? ' on' : ''));
+      const ic = ICON(key, { icons: 'material', iconMap: { [key]: cur } });
+      b.append(typeof ic === 'string' ? el('span', 'ic' + (S.look.icons === 'outline' ? ' ol' : ''), ic) : ic);
+      setTip(b, lab + '（' + zh + '）：现在是' + (ICON_NAME_ZH[cur] || cur) + (cur === names[0] ? '（默认）' : '') +
+        '\n点一下换成' + (ICON_NAME_ZH[other] || other) + (other === names[0] ? '（默认）' : ''));
+      b.addEventListener('click', () => S.setLook({ iconMap: { ...S.look.iconMap, [key]: other } }));
+      pick.append(b);
+    }
+    panel.append(pick);
     panel.append(el('div', 'lk-note', '配色跟着 Antigravity 的浅色 / 深色自动切换。选择保存在 look.json，所有窗口共用；点右上角 reset 恢复默认。'));
   };
 
@@ -1426,19 +1906,35 @@ function agyStatusBar(CFG) {
   const solidBg = (start) => {
     for (let e = start; e; e = e.parentElement) {
       const c = getComputedStyle(e).backgroundColor;
-      if (c && c !== 'transparent' && !/rgba\([^)]*,\s*0\)$/.test(c)) return c;
+      if (opaque(c)) return c;
     }
     return '';
+  };
+  // 只认完全不透明的颜色（11-22 改）：原来只排除了完全透明，鼠标停在表格行上时拿到了行高亮的半透明色
+  // （color-mix(… 22%, transparent)，计算值是 color(srgb … / 0.22)），提示框变成半透明、看不清。
+  const opaque = (c) => {
+    if (!c || c === 'transparent') return false;
+    const m = /^rgba?\(([^)]*)\)$/.exec(c);
+    if (m) { const p = m[1].split(/[\s,/]+/).filter(Boolean); return p.length < 4 || parseFloat(p[3]) >= 0.999; }
+    const a = /\/\s*([\d.]+)(%?)\s*\)$/.exec(c);
+    if (a) return parseFloat(a[1]) / (a[2] ? 100 : 1) >= 0.999;
+    return true;
   };
   const placePanel = (panel) => {
     const bar = S.panelBar && S.panelBar.isConnected ? S.panelBar : document.querySelector(B);
     if (!bar) return;
     const r = bar.getBoundingClientRect();
-    const w = Math.min(780, Math.max(r.width, 560), window.innerWidth - 24);
+    // 11-22 改：宽度跟下面的输入框一样（原来最宽 780px，明细表太挤）；左边和输入框对齐。
+    // 能用的高度（状态栏上方到窗口顶）记在 --p-avail，调用明细页的表格按它撑满。
+    const box = bar.nextElementSibling && bar.nextElementSibling.getBoundingClientRect();
+    const left = box && box.width > 0 ? box.left : r.left;
+    const w = Math.min(Math.max(box && box.width > 0 ? box.width : r.width, r.width, 560), window.innerWidth - 24);
     panel.style.width = w + 'px';
-    panel.style.left = Math.max(12, Math.min(r.left, window.innerWidth - w - 12)) + 'px';
+    panel.style.left = Math.max(12, Math.min(left, window.innerWidth - w - 12)) + 'px';
     panel.style.bottom = Math.max(8, window.innerHeight - r.top + 6) + 'px';
-    panel.style.maxHeight = Math.max(180, r.top - 24) + 'px';
+    const avail = Math.max(180, r.top - 24);
+    panel.style.maxHeight = avail + 'px';
+    panel.style.setProperty('--p-avail', avail + 'px');
     const bg = solidBg(bar.nextElementSibling) || solidBg(bar);
     if (bg) { panel.style.background = bg; panel.style.setProperty('--p-bg-live', bg); } // 固定表头、悬停卡片、日均标签也用这个底色
   };
@@ -1512,7 +2008,7 @@ function agyStatusBar(CFG) {
     return ph.doneAt > 0 && Date.now() - ph.doneAt < DONE_SHOW_MS;
   };
   // inherit = 子代理沿用主代理的全部工具（不是“接管”对话）
-  const agentSeg = (id, info) => seg('agent', 'smart_toy',
+  const agentSeg = (id, info) => seg('agent', ICON('agent'),
     [info.typeName || 'subagent', info.role && info.role !== info.typeName ? info.role : '', info.inherit ? 'inherit' : ''],
     '子代理 ' + id +
     (info.modelTier ? '\n档次：' + info.modelTier.replace(/^MODEL_TIER_/, '') : '') +
@@ -1524,7 +2020,149 @@ function agyStatusBar(CFG) {
     const at = ag && ag.lastAt > 0 ? ag.lastAt : (ph && ph.doneAt) || 0;
     if (!(at > 0)) return null;
     const d = new Date(at);
-    return seg('muted', 'check', ['done ' + pad(d.getHours()) + ':' + pad(d.getMinutes())], '这个子代理最近一次模型调用结束的时间');
+    return seg('muted', ICON('check'), ['done ' + pad(d.getHours()) + ':' + pad(d.getMinutes())], '这个子代理最近一次模型调用结束的时间');
+  };
+  // ---------- 活动行和子代理行（2026-11-22 加，v1.6）：agy 正在做什么 ----------
+  // 数据来自上面的 S.act（noteAct 从状态流里记的步骤）。只在页面里显示，不改任何请求。
+  const fmtDur = (ms) => {
+    const s = Math.max(0, Math.round(ms / 1000));
+    if (s < 60) return s + 's';
+    if (s < 3600) return Math.floor(s / 60) + 'm' + pad(s % 60) + 's';
+    return Math.floor(s / 3600) + 'h' + pad(Math.floor((s % 3600) / 60)) + 'm';
+  };
+  const LIVE = /GENERATING|PENDING|RUNNING|WAIT/;
+  // 当前步骤：还没完成的步骤里序号最大的；都完成了就取最后一步
+  const actView = (id) => {
+    const a = S.act.get(id);
+    if (!a || !a.steps.size) return null;
+    const ks = [...a.steps.keys()].sort((x, y) => x - y);
+    const live = ks.filter((k) => LIVE.test(a.steps.get(k).status));
+    const curK = live.length ? live[live.length - 1] : ks[ks.length - 1];
+    const firstAt = Math.min(...ks.map((k) => a.steps.get(k).t0 || Infinity));
+    return { a, ks, curK, cur: a.steps.get(curK), firstAt: Number.isFinite(firstAt) ? firstAt : 0 };
+  };
+  const stepName = (s) => (s.type === 'PLANNER_RESPONSE' ? 'model' : s.tool || s.type.toLowerCase());
+  const curText = (v) => {
+    const s = v.cur;
+    if (s.type === 'USER_INPUT') return 'starting'; // 刚发出消息，模型还没开始回复
+    if (s.type === 'PLANNER_RESPONSE') {
+      if (s.status === 'GENERATING') return s.writing ? 'writing' : 'thinking';
+      return 'planning'; // 模型这次回复已经完成，下一步还没开始
+    }
+    return stepName(s) + (s.text ? ': ' + s.text : '');
+  };
+  const timeline = (v) => v.ks.slice(-8).map((k) => {
+    const s = v.a.steps.get(k);
+    const d = s.t0 ? fmtDur((s.t1 || Date.now()) - s.t0) + (s.t1 ? '' : '…') : '';
+    const t = s.t0 ? new Date(s.t0) : null;
+    return (t ? pad(t.getHours()) + ':' + pad(t.getMinutes()) + ':' + pad(t.getSeconds()) : '--:--:--') + '  第 ' + (k + 1) + ' 步 ' + stepName(s) +
+      (s.text ? ' — ' + s.text : '') + (d ? '（' + d + '）' : '') + (s.err ? '  ✗ 出错' : '');
+  }).join('\n');
+  // 11-22 试过把“正在做什么”（thinking / writing / run_command …）放进主栏 running 那一项和子代理行末尾，用户反馈这些
+  // 界面上本来就看得到、没有用，行里也放不下，撤掉了。现在只在子代理那一项的悬停说明里写正在做哪一步、最近几步。
+
+  // ---------- 子代理的数据（11-22 加）----------
+  // 子代理的状态流只有打开它的窗格时才有，主窗格里看不到它的上下文、缓存和步骤。所以子代理在跑时每 3 秒向本机后台
+  // 取一次它最近的步骤（GetCascadeTrajectorySteps，只读，不经过 Google，不耗额度），交给 takeSteps：
+  // 步骤里有每次模型调用的 token（上下文、缓存命中率用）和工具参数（活动用）。跑完后再取最后一次。
+  // 第一次从倒数约 8 步开始取（步骤序号来自调用元数据 S.costs；还没查到就等下一轮），以后从上次取到的地方往后取。
+  S.subSteps = S.subSteps || new Map(); // 子代理 ID → { next 下次从第几步取, busy, at 上次取的时间, final 跑完后取过了 }
+  S.fetchSubSteps = (id) => {
+    const c = S.subSteps.get(id) || { next: -1, busy: false, at: 0, final: false };
+    S.subSteps.set(id, c);
+    if (c.busy) return;
+    if (c.next < 0) {
+      const cl = S.costs.get(id);
+      if (!cl || !cl.at) { if (!cl) S.fetchCost(id); return; }
+      const lastStep = cl.list.reduce((m, x) => (x && x.step >= 0 && x.step > m ? x.step : m), 0);
+      c.next = Math.max(0, lastStep - 8);
+    }
+    c.busy = true;
+    c.at = Date.now();
+    const from = c.next;
+    lsCall('GetCascadeTrajectorySteps', { cascadeId: id, stepOffset: from })
+      .then((j) => {
+        const steps = (j && Array.isArray(j.steps)) ? j.steps : [];
+        if (steps.length) {
+          takeSteps({ stepsUpdate: { steps, indices: steps.map((_, i) => from + i), totalLength: from + steps.length } }, id);
+          c.next = Math.max(from, from + steps.length - 2); // 最后两步可能还在变，下次重取
+        }
+        S.render();
+      })
+      .then(() => { c.busy = false; }, () => { c.busy = false; });
+  };
+  // 定时器每秒调一次：当前显示的对话树里，在跑的子代理隔 3 秒取一次，刚跑完的再取最后一次
+  S.pollSubs = () => {
+    const now = Date.now();
+    const roots = new Set();
+    for (const box of document.querySelectorAll('[data-testid="agent-input-box"]')) {
+      const pid = paneConvId(box);
+      roots.add(pid ? rootOf(pid) : currentRoot());
+    }
+    for (const id of S.subInfo.keys()) {
+      const root = rootOf(id);
+      if (!roots.has(root)) continue;
+      const c = S.subSteps.get(id);
+      if (subRunning(id, root)) { if (!c || now - c.at > 3000) S.fetchSubSteps(id); }
+      else if (c && !c.final && now - c.at > 1500) { c.final = true; S.fetchSubSteps(id); }
+    }
+  };
+  // 子代理的上下文：它的状态流不在时没有 contextWindowUsage，按最近一次调用发给模型的 token 估算；
+  // 上限取同一个模型在别的对话里见过的上限（S.ctxMax，build 里记），没见过就只写 token 数。
+  S.ctxMax = S.ctxMax || new Map(); // 模型编号 → 上下文上限
+  const noteCtxMax = (md, ctx) => { const k = modelKey(md); if (k && ctx && Number(ctx.maxContextTokens) > 0) S.ctxMax.set(k, Number(ctx.maxContextTokens)); };
+  const estCtx = (md) => {
+    const mu = md && md.modelUsage;
+    const max = S.ctxMax.get(modelKey(md));
+    if (!mu || !max) return null;
+    return { estimatedTokensUsed: promptTokens(mu), maxContextTokens: max, est: true };
+  };
+
+  // 子代理行（v1.6 重做）：树形，每个子代理一行——
+  //   “├ ⑂ research · Paper Reviewer | ☄ Gemini 4 Neon · XHigh | ◔ 45% · 120k | ≋ 97% hit | $0.40 | ● read_file: x · step 12 · 1m05s”
+  //   跑完：“└ … | ✓ done 1m40s · 9 steps”。接口返回的模型名只在和界面名对不上时显示；模型列表里没有、
+  //   又没查到接口名的模型（如 PLACEHOLDER_M530）不显示模型。首字、速度在名字的悬停说明里。
+  const plainText = (e) => { const c = e.cloneNode(true); c.querySelectorAll('.ic').forEach((x) => x.remove()); return c.textContent.replace(/\s+/g, ' ').trim(); };
+  const subRow = (id, info, root, last) => {
+    const ag = S.agents.get(id) || {};
+    const smd = ag.last;
+    const smu = smd && smd.modelUsage;
+    const sconv = S.convs.get(id) || {};
+    if (sconv.ctx) noteCtxMax(smd, sconv.ctx);
+    let ms = modelSeg(smd, info.model, info.modelTier);
+    if (ms && /PLACEHOLDER|MODEL_/.test(plainText(ms))) ms = null;
+    if (ms && ms.querySelectorAll('.tx').length > 1) ms.querySelectorAll('.tx.real:not(.odd)').forEach((x) => { const d = x.previousElementSibling; if (d && d.classList.contains('dot')) d.remove(); x.remove(); });
+    const calls = callSegs(smd).map(plainText);
+    const name = seg('agent', ICON('agent'), [info.typeName || 'subagent', info.role && info.role !== info.typeName ? clip(info.role, 32) : ''],
+      '子代理' + (info.typeName ? ' ' + info.typeName : '') + (info.role ? '：' + info.role : '') +
+      (info.modelTier ? '\n档次：' + info.modelTier.replace(/^MODEL_TIER_/, '') : '') + (info.inherit ? '\n沿用主代理的全部工具' : '') +
+      (calls.length ? '\n最近一次调用：' + calls.join(' · ') : ''));
+    name.prepend(el('span', 'tree', last ? '└' : '├'));
+    const ctx = sconv.ctx || estCtx(smd);
+    const cs = ctxSeg(ctx, smu, sconv.compactions);
+    if (cs && ctx && ctx.est) cs.setAttribute('data-agy-tip', cs.getAttribute('data-agy-tip') + '\n\n（估算：按这个子代理最近一次调用发给模型的 token，上限取同一模型在别的对话里的上限）');
+    // 花费只要这个子代理自己的；“今天花费”那一项主代理的行上已经有了（11-22 子代理行上重复出现过）
+    const row = [name, ms, cs, cacheSeg(smu), ...safeCost(smd, [id]).filter((g) => !g.classList.contains('p-open'))];
+    const v = actView(id);
+    const meta = S.casMeta.get(id);
+    const startAt = (meta && meta.created) || (v && v.firstAt) || 0;
+    if (subRunning(id, root)) {
+      if (v) {
+        const waiting = /WAIT/.test(v.cur.status);
+        const g = seg(waiting ? 'warn' : 'run', el('span', 'pulse'), [waiting ? 'waiting' : startAt ? fmtDur(Date.now() - startAt) : 'running'],
+          '这个子代理正在：' + curText(v) + '（第 ' + (v.curK + 1) + ' 步' + (waiting ? '，在等你批准' : '') + '）' +
+          (startAt ? '\n已经跑了 ' + fmtDur(Date.now() - startAt) : '') + '\n\n最近几步：\n' + timeline(v));
+        g.classList.add('sst');
+        row.push(g);
+      } else row.push(runSeg('running'));
+    } else {
+      const end = (v && Math.max(...v.ks.map((k) => v.a.steps.get(k).t1 || v.a.steps.get(k).t0 || 0))) || ag.lastAt || 0;
+      const pieces = [startAt && end > startAt ? 'done ' + fmtDur(end - startAt) : 'done', v && v.a.total ? v.a.total + ' steps' : ''];
+      const g = seg('muted', ICON('check'), pieces, v ? '这个子代理做过的最后几步：\n' + timeline(v) : '这个子代理已经结束');
+      g.classList.add('sst');
+      row.push(g);
+    }
+    return row.filter(Boolean);
   };
   const quotaPieces = (key) => {
     const qs = quotaSegs(key);
@@ -1534,7 +2172,7 @@ function agyStatusBar(CFG) {
     const frac = Math.max(0, Math.min(1, Number(q.remainingFraction)));
     const pct = Math.round(frac * 100);
     const k = pct <= 10 ? 'crit' : pct <= 30 ? 'warn' : 'quota';
-    return [seg('quota', 'timelapse', [meter(frac, k), pct + '%', q.resetTime ? fmtReset(q.resetTime) : ''],
+    return [seg('quota', ICON('quota1'), [meter(frac, k), pct + '%', q.resetTime ? fmtReset(q.resetTime) : ''],
       '这个模型的剩余额度' + (q.resetTime ? '，' + fmtReset(q.resetTime) + ' 重置' : ''), k)];
   };
   const toLines = (rows, cls) => rows.filter((r) => r.length).map((r) => {
@@ -1554,8 +2192,10 @@ function agyStatusBar(CFG) {
       const mu = md && md.modelUsage;
       const sconv = S.convs.get(paneId) || {};
       const line1 = [agentSeg(paneId, info), modelSeg(md, info.model, info.modelTier),
-        ctxSeg(sconv.ctx, mu, sconv.compactions), cacheSeg(mu), ...safeCost(md, [paneId]), stateSeg(paneId, root)].filter(Boolean);
+        ctxSeg(sconv.ctx || estCtx(md), mu, sconv.compactions), cacheSeg(mu), ...safeCost(md, [paneId]),
+        stateSeg(paneId, root)].filter(Boolean);
       const line2 = [...callSegs(md), ...quotaPieces(modelKey(md) || info.model)];
+      S.actShown = false;
       return toLines([line1, line2]);
     }
 
@@ -1566,6 +2206,7 @@ function agyStatusBar(CFG) {
     const rc = (root && S.convs.get(root)) || null;
     // 还没有模型调用（首页或新对话刚开始）：显示模型按钮当前选中的模型
     const selKey = md ? '' : selectedKey();
+    if (rc && rc.ctx) noteCtxMax(md, rc.ctx);
     const line1 = [modelSeg(md, selKey), ctxSeg(rc && rc.ctx, mu, rc && rc.compactions), cacheSeg(mu),
       ...safeCost(md, root ? treeIds(root) : []), root ? runSeg('', !isRunning(root)) : null].filter(Boolean);
     const line2 = [...callSegs(md), ...quotaPieces(modelKey(md) || selKey)];
@@ -1581,15 +2222,16 @@ function agyStatusBar(CFG) {
       }
     }
     subs.sort((a, b) => (b.running - a.running) || ((b.ag.lastAt || 0) - (a.ag.lastAt || 0)));
-    const subRows = subs.slice(0, MAX_SUBS).map(({ id, info, ag }) => {
-      const smd = ag.last;
-      const smu = smd && smd.modelUsage;
-      const sconv = S.convs.get(id) || {};
-      return [agentSeg(id, info), modelSeg(smd, info.model, info.modelTier), ctxSeg(sconv.ctx, smu, sconv.compactions),
-        cacheSeg(smu), ...callSegs(smd), stateSeg(id, root)].filter(Boolean);
-    });
-    if (subs.length > MAX_SUBS) subRows.push([seg('muted', '', ['+' + (subs.length - MAX_SUBS) + ' more subagents'])]);
+    const shownSubs = subs.slice(0, MAX_SUBS);
+    const more = subs.length - shownSubs.length;
+    const subRows = shownSubs.map(({ id, info }, i) => subRow(id, info, root, i === shownSubs.length - 1 && !more));
+    if (more > 0) {
+      const m = seg('muted', '', ['+' + more + ' more subagents']);
+      m.prepend(el('span', 'tree', '└'));
+      subRows.push([m]);
+    }
 
+    S.actShown = subRows.length > 0; // 子代理行里有在走的用时，每秒重画
     const lines = toLines([line1, line2]).concat(toLines(subRows, 'sub'));
     // fetch 包装晚到（注入器在窗口打开很久后才连上，没有自动刷新）：用量不生效，提示手动刷新
     if (S.early === false) {
@@ -1650,7 +2292,7 @@ function agyStatusBar(CFG) {
   }).join('\n');
   const style = document.createElement('style');
   style.textContent = `
-@import url("https://fonts.googleapis.com/css2?family=Material+Symbols+Rounded:opsz,wght,FILL,GRAD@20..24,400..500,0..1,0&icon_names=auto_awesome,calendar_month,check,compress,data_usage,database,event,hourglass_top,palette,schedule,smart_toy,speed,timelapse&display=block");
+@import url("https://fonts.googleapis.com/css2?family=Material+Symbols+Rounded:opsz,wght,FILL,GRAD@20..24,400..500,0..1,0&icon_names=account_tree,auto_awesome,calendar_month,check,data_usage,database,date_range,event,history,hourglass_top,offline_bolt,paid,palette,person,schedule,speed,timelapse,timer,today&display=block");
 ${B}, ${P}, ${T}{
   --k-model:#5c64d6; --k-context:#8839ef; --k-cache:#1b8fbf; --k-timing:#c4566a; --k-tokens:#158a90;
   --k-quota:#e0620d; --k-warn:#c9800f; --k-crit:#d20f39; --k-run:#40a02b; --k-muted:#8c8fa1;
@@ -1685,16 +2327,30 @@ ${B} .ic.svg svg{width:1em; height:1em; display:block}
 ${B} .dot{margin:0 .45em; opacity:.55}
 ${B} .real{opacity:.72; font-weight:400}
 /* 压缩过上下文：小徽章（图标 + 次数），详细说明在上下文这一项的悬停提示里（issue #2：原来的 “compacted 1×” 太宽，会把 running 挤到下一行） */
-${B} .comp{display:inline-flex; align-items:center; color:var(--k-warn); font-weight:600; padding:0 .3em 0 .15em; border-radius:4px; line-height:1.35;
+${B} .comp{display:inline-flex; align-items:center; color:var(--k-warn); font-weight:600; font-size:11px; padding:0 .4em; border-radius:4px; line-height:1.45;
   background:color-mix(in srgb, var(--k-warn) 15%, transparent)}
-${B} .comp .ic{font-size:13px; margin-right:.1em}
-/* running 一直占着位置，空闲时只是看不见：开始、结束生成时状态栏的行数不变，不会上下跳 */
+${B} .comp .cyc{margin-right:.12em; font-weight:700}
+/* running 一直占着位置，空闲时只是看不见：开始、结束生成时状态栏的行数不变，不会上下跳。
+   11-22：第一行太长时 running 会被挤到第二行（issue #2 的老问题，花费数字变长后又出现了）。改成按 0 宽排：永远留在第一行，
+   行里有空位就显示全，空位不够就截短。plain 外形的分隔竖线画在项的左外侧，这一项要裁掉溢出，所以把竖线挪进项里 */
+${B} .ln > .seg.k-run{flex:1 1 0; min-width:0; max-width:max-content; overflow:hidden}
+${B} .ln > .seg.k-run > *{flex-shrink:0}
+${B}[data-skin="plain"] .ln > .seg.k-run{margin-left:.55em; padding-left:1.05em}
+${B}[data-skin="plain"] .ln > .seg.k-run::before{left:0}
 ${B} .seg.k-run.idle{visibility:hidden}
 ${B} .pace-ok{color:var(--k-run)}
 ${B} .pace-hi{color:var(--k-warn)}
 ${B} .real.odd{opacity:1; font-weight:600; color:var(--k-warn)}
 ${B} .real.prev{font-style:italic}
 ${B} .ln.sub{margin-left:-.5em; font-size:11.5px} /* 子代理行比主代理行缩进 1.1em */
+/* 子代理行末尾的状态（● 9m47s / ✓ done …）：按 0 宽排，所以永远不会被挤到第二行；行里剩多少空就占多少，放不下就截掉末尾。
+   plain 外形的分隔竖线画在项的左外侧，这一项要裁掉溢出，所以把竖线挪进项里（左内边距） */
+${B} .seg.sst{flex:1 1 0; min-width:0; max-width:max-content; overflow:hidden}
+${B} .seg.sst > *{flex-shrink:0}
+${B}[data-skin="plain"] .seg.sst{margin-left:.55em; padding-left:1.05em}
+${B}[data-skin="plain"] .seg.sst::before{left:0}
+/* 子代理行开头的树形线 ├ └ */
+${B} .tree{color:var(--k-muted); margin-right:.4em; font-weight:400; opacity:.8}
 ${B} .gap{display:inline-block; width:.5em}
 ${B} .cells{display:inline-flex; gap:2px; margin-right:.1em}
 ${B} .cells i{display:block; width:5px; height:10px; border-radius:1.5px; background:var(--cell-off)}
@@ -1709,7 +2365,10 @@ ${B} .meter.ring svg, ${B} .gauge svg{width:100%; height:100%; display:block; tr
 ${B} .ic.gauge svg{width:.92em; height:.92em}
 ${B} .ring .trk, ${B} .gauge .trk{fill:none; stroke:var(--cell-off); stroke-width:3.6}
 ${B} .ring .arc, ${B} .gauge .arc{fill:none; stroke:var(--kc); stroke-width:3.6; stroke-linecap:round}
-${B}[data-icons="0"] .ic{display:none}
+${B}[data-icons="off"] .ic{display:none}
+/* 图标整套（见 ICON_ITEMS）：outline 是同一套字体的线条版；unicode 用普通字符，不依赖在线字体 */
+${B}[data-icons="outline"] .ic:not(.svg){font-variation-settings:"FILL" 0,"wght" 500,"opsz" 20}
+${B} .ic.uni{font-family:"Cascadia Mono",Consolas,"Segoe UI Symbol","Apple Symbols",ui-monospace,monospace; font-size:14px; font-weight:700; text-align:center; font-variation-settings:normal}
 /* 外形 pill：每项一个圆角底色块，不画竖线 */
 ${B}[data-skin="pill"] .ln{margin-left:0; clip-path:none; gap:3px 5px}
 ${B}[data-skin="pill"] .seg{margin-left:0; padding:0 .6em; border-radius:999px; line-height:1.6; background:color-mix(in srgb, var(--kc) 13%, transparent)}
@@ -1761,7 +2420,14 @@ ${P} .lk-empty{color:var(--k-muted); padding:.2rem 0}
 ${P} .lk-row{display:flex; align-items:center; flex-wrap:wrap; gap:.35rem; margin-top:.4rem}
 ${P} .lk-lab{width:6.2em; color:var(--k-text)}
 ${P} .lk-note{margin-top:.55rem; color:var(--k-muted); font-size:11px}
+${P} .ic.svg{display:inline-flex; align-items:center; overflow:visible} ${P} .ic.svg svg{width:1em; height:1em; display:block}
+${P} .ic.ol{font-variation-settings:"FILL" 0,"wght" 500,"opsz" 20}
+${P} .lk-icons.dim{opacity:.45}
+${P} .lk-icons .lk-row{margin-top:.25rem}
+${P} .lk-ib{padding:.1em .35em; line-height:1}
+${P} .lk-ib .ic{margin-right:0; font-size:17px; vertical-align:middle}
 ${P} .p-range{color:var(--k-muted); margin-left:.35rem}
+${P} .p-acct{color:var(--k-muted); font-size:11px; margin-right:.2rem; white-space:nowrap; cursor:default}
 /* 柱状图：上面留 16px 给柱顶的金额；每根柱子从下往上叠（column-reverse），柱顶那段圆角 */
 ${P} .p-chart{height:122px; padding-top:16px; box-sizing:border-box; border-bottom:1px solid var(--sep)}
 ${P} .p-bars{position:relative; display:flex; align-items:stretch; gap:3px; height:100%}
@@ -1776,7 +2442,6 @@ ${P} .p-bars.focus .p-part{opacity:.2}
 ${P} .p-bars.focus .p-part.hl{opacity:1; filter:brightness(1.08)}
 ${P} .p-val{flex:none; align-self:center; font-size:10px; line-height:14px; color:var(--k-cost); white-space:nowrap; pointer-events:none}
 ${P} .p-avg{position:absolute; left:0; right:0; height:0; border-top:1px dashed color-mix(in srgb, var(--k-cost) 55%, transparent); pointer-events:none}
-${P} .p-avg span{position:absolute; right:0; bottom:2px; padding:0 3px; font-size:10px; line-height:1.2; color:var(--k-cost); background:var(--p-bg-live, var(--p-bg)); border-radius:3px}
 ${P} .p-labels{display:flex; gap:3px; margin:.2rem 0 .45rem}
 ${P} .p-labels span{flex:1; min-width:0; display:flex; flex-direction:column; align-items:center; font-size:10.5px; line-height:1.25; white-space:nowrap}
 ${P} .p-labels b{font-weight:500}
@@ -1787,6 +2452,12 @@ ${P} .p-legend{display:flex; flex-wrap:wrap; gap:.15rem 1rem; margin-bottom:.45r
 ${P} .p-legend > span{color:var(--kc); display:inline-flex; align-items:center; cursor:default}
 ${P} .p-legend i{display:inline-block; width:8px; height:8px; border-radius:2px; background:var(--kc); margin-right:.35em}
 ${P} .p-legend .v{margin-left:.45em; opacity:.75}
+/* 今天的汇总卡片：四格，上面小字标签、下面数值（颜色跟状态栏里同类的项一样） */
+${P} .p-kpi{display:grid; grid-template-columns:repeat(4, minmax(0, 1fr)); gap:.4rem; margin:.1rem 0 .55rem}
+${P} .p-kpi .kc{display:flex; flex-direction:column; gap:.05rem; padding:.3rem .55rem; border:1px solid var(--sep); border-radius:8px; cursor:default; min-width:0}
+${P} .p-kpi .kl{color:var(--k-muted); font-size:11px}
+${P} .p-kpi .kv{color:var(--kc); font-size:17px; font-weight:600; line-height:1.25; white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
+${P} td.tk{color:var(--k-tokens)}
 /* 表格：限高滚动，表头固定；鼠标停在某一行，对应的柱子高亮；点柱子时对应的行闪一下 */
 ${P} .p-table{overflow:auto; max-height:12.5em}
 ${P} table{width:100%; border-collapse:collapse}
@@ -1796,6 +2467,15 @@ ${P} th:first-child, ${P} td:first-child{text-align:left; padding-left:0}
 ${P} td.c{color:var(--k-cost)} ${P} td.h{color:var(--k-cache)} ${P} td.q{color:var(--k-quota)}
 ${P} tbody tr:hover td{background:color-mix(in srgb, var(--sep) 22%, transparent)}
 ${P} tr.today td{font-weight:600}
+${P} tr.clk{cursor:pointer}
+/* 调用明细页：表格更高；对话、模型两列左对齐 */
+${P} .p-table.calls{max-height:max(14em, calc(var(--p-avail, 40em) - 6.5rem))} /* 撑满面板能用的高度（标题行和底部说明留 6.5rem） */
+${P} .p-table.calls th, ${P} .p-table.calls td{padding:.05rem .32rem; font-size:11px}
+${P} .p-table.calls td.cv, ${P} .p-table.calls td.md{text-align:left; overflow:hidden; text-overflow:ellipsis}
+${P} .p-table.calls td.cv{max-width:clamp(10em, 24vw, 26em)} ${P} .p-table.calls td.md{max-width:12em}
+${P} .p-table.calls th:nth-child(2), ${P} .p-table.calls th:nth-child(3){text-align:left}
+${P} .p-note{margin-top:.4rem; color:var(--k-muted); font-size:11px}
+${P} .p-note:empty{display:none}
 ${P} tr.flash td{animation:agyFlash 1.2s ease-out}
 @keyframes agyFlash{0%{background:color-mix(in srgb, var(--k-cost) 24%, transparent)}100%{background:transparent}}
 ${P} .p-empty{padding:.4rem 0}
@@ -1981,10 +2661,15 @@ ${T}{position:fixed; z-index:2147483600; pointer-events:none; box-sizing:border-
       const casEvery = S.casActive || (S.lastConv && isRunning(S.lastConv)) ? 3000 : 15000;
       if (S.lsHeaders && document.visibilityState !== 'hidden' && Date.now() - (S.casAskAt || 0) >= casEvery) S.fetchCascades();
       if (S.lsHeaders && document.visibilityState !== 'hidden') { try { S.refreshCosts(); } catch (e) { /* 费用估算出错不影响其他显示 */ } }
+      if (S.lsHeaders && document.visibilityState !== 'hidden') { try { S.pollSubs(); } catch (e) { /* 子代理步骤取不到不影响其他显示 */ } }
+      if (S.lsHeaders && !S.account && Date.now() - (S.acctAskAt || 0) > 60000) {
+        S.acctAskAt = Date.now();
+        lsCall('GetUserStatus', {}).then((j) => { if (j) S.onMessage('GetUserStatus', j); });
+      }
       const nowSel = selectedLabel();
       if (location.pathname !== path) { path = location.pathname; S.navAt = Date.now(); sel = nowSel; ensure(true); }
       else if (hidden()) { if (ticks % 30 === 0) dirty = true; ensure(false); } // 后台：只保证状态栏还在，回到前台再重画
-      else if (nowSel !== sel || ticks % 30 === 0) { sel = nowSel; ensure(true); } // 换了模型也重画
+      else if (nowSel !== sel || ticks % 30 === 0 || S.actShown) { sel = nowSel; ensure(true); } // 换了模型也重画；活动行在显示时每秒重画（用时在走）
       else ensure(false);
       if (ticks % 30 === 0 && !hidden()) refreshPanel(); // 面板开着时每 30 秒刷新一次（注入程序也是每 30 秒推一次历史）
     }, 1000);
