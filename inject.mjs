@@ -110,7 +110,30 @@ const EMPTY = { dict: null, rules: [] };
 
 // 传给状态栏的参数。costDay：今天花费的账本（见下面“今天花费的账本”）；history：最近 31 天的用量（见“每天用量历史”）。
 function barConfig() {
-  return { costDay: readCostBook(), history: recentHistory() };
+  return { costDay: readCostBook(), history: recentHistory(), look: readLook() };
+}
+
+// ---------- 状态栏外观（2026-11-22 加） ----------
+// look.json：{ pal 配色, skin 外形, bar 进度条, dense 信息密度, icons 图标, at 选择时间 }。
+// 用户在每日用量面板的 Theme 页里选，页面记在 window.__agyStats.lookPick（页面的本地存储按端口分开，每次启动都换端口，存不住）；
+// 注入程序每 30 秒读回来存进这个文件，再推给其他窗口（S.setLook(look, true)）；新注入时通过 CFG.look 交给状态栏。
+// 选项的取值由状态栏校验（cleanLook），这里只挑出这几个字段、限制长度。
+const LOOK_FILE = path.join(DIR, 'look.json');
+let lookCache;
+function readLook() {
+  if (lookCache === undefined) {
+    try { lookCache = JSON.parse(fs.readFileSync(LOOK_FILE, 'utf8')); } catch { lookCache = null; }
+  }
+  return lookCache;
+}
+function saveLook(pick) {
+  const keep = {};
+  for (const k of ['pal', 'skin', 'bar', 'dense']) if (typeof pick[k] === 'string') keep[k] = pick[k].slice(0, 24);
+  if (typeof pick.icons === 'boolean') keep.icons = pick.icons;
+  keep.at = +pick.at || Date.now();
+  lookCache = keep;
+  try { fs.writeFileSync(LOOK_FILE, JSON.stringify(keep)); log(`look saved: ${keep.pal} / ${keep.skin} / ${keep.bar} / ${keep.dense}`); }
+  catch (e) { log(`write look.json failed: ${e.message}`); }
 }
 
 // ---------- 今天花费的账本（2026-11-16 加） ----------
@@ -186,13 +209,17 @@ const QUOTA_EXPR = `S.quota && Array.isArray(S.quota.groups) ? { at: S.quota.at,
 async function syncCost() {
   const ids = JSON.stringify(todayConversations());
   const hist = JSON.stringify(recentHistory());
+  const look = readLook();
+  const lookJs = JSON.stringify(look);
   let quota = null;
+  let pick = null;
   let any = false;
   for (const s of sessions.values()) {
     try {
       const r = await s.send('Runtime.evaluate', {
         expression: `(() => { const S = window.__agyStats; if (!S) return null; S.todayIds = ${ids}; S.history = ${hist};
-          return JSON.stringify({ book: S.costBook || null, quota: ${QUOTA_EXPR} }); })()`,
+          if (S.setLook && ${lookJs}) S.setLook(${lookJs}, true);
+          return JSON.stringify({ book: S.costBook || null, quota: ${QUOTA_EXPR}, pick: S.lookPick || null }); })()`,
         returnByValue: true,
       });
       const v = r && r.result && r.result.value;
@@ -201,9 +228,18 @@ async function syncCost() {
       any = true;
       if (o.book) mergeCostBook(o.book);
       if (o.quota && (!quota || o.quota.at > quota.at)) quota = o.quota;
+      if (o.pick && o.pick.at > 0 && (!pick || o.pick.at > pick.at)) pick = o.pick;
     } catch { /* 窗口刚关或还没注入：下次再读 */ }
   }
   if (any) updateHistory(readCostBook(), quotaBuckets(quota));
+  // 某个窗口里换了外观：存下来，马上推给其他窗口
+  if (pick && pick.at > ((look && look.at) || 0)) {
+    saveLook(pick);
+    const js = JSON.stringify(readLook());
+    for (const s of sessions.values()) {
+      try { await s.send('Runtime.evaluate', { expression: `window.__agyStats && window.__agyStats.setLook && window.__agyStats.setLook(${js}, true)` }); } catch {}
+    }
+  }
 }
 
 // ---------- 每天用量历史（2026-11-20 加） ----------
@@ -219,12 +255,40 @@ let historyJson = '';
 function readHistory() {
   if (!history) {
     try { history = JSON.parse(fs.readFileSync(HISTORY_FILE, 'utf8')); } catch { history = null; }
-    if (!history || !history.days || typeof history.days !== 'object') history = { v: 1, days: {} };
+    if (!history || !history.days || typeof history.days !== 'object') history = { v: 2, days: {} };
+    historyJson = JSON.stringify(history);
     // liveFrom：从哪一天起是注入程序实时记的；更早的天数只能补算（见下面“补算以前的用量”）
     if (!history.liveFrom) history.liveFrom = Object.keys(history.days).filter((k) => !history.days[k].bf).sort()[0] || dayName();
-    historyJson = JSON.stringify(history);
+    if (!(history.v >= 2)) migrateHistory(history); // 换算后下次 saveHistory 会写回文件
   }
   return history;
+}
+// v1 → v2（2026-11-22）：额度记录换成按净变化算（见 noteQuota）。
+// 每周额度按天重算：和前一条记录在同一个周期里，u = 当天最后的值 − 前一条的最后值；换了周期，u = 当天最后的值。
+// 5 小时额度一天会换好几个周期，记录里只剩最后一个周期的值，没法重算，保持原来的 u（面板也不显示它）。
+function migrateHistory(h) {
+  const last = {};
+  for (const k of Object.keys(h.days).sort()) {
+    const qs = h.days[k] && h.days[k].quota;
+    if (!qs || typeof qs !== 'object') continue;
+    for (const [id, q] of Object.entries(qs)) {
+      if (!q || typeof q !== 'object') continue;
+      if (q.u === undefined) { q.u = r4(migrateQuota(q)); delete q.f; delete q.a; }
+      const p = last[id];
+      const l = +q.l || 0;
+      if (q.w === 'weekly' && p) {
+        q.s = samePeriod(p.r, q.r) ? +p.l || 0 : 0;
+        q.c = 0;
+        q.u = r4(Math.max(0, l - q.s));
+      } else {
+        q.s = r4(Math.max(0, l - (+q.u || 0))); // 保持原来的 u：u = c + (l − s)
+        q.c = r4(Math.max(0, (+q.u || 0) - l));
+      }
+      last[id] = q;
+    }
+  }
+  h.v = 2;
+  log('usage history: quota records migrated to v2 (net change per period)');
 }
 function saveHistory() {
   const json = JSON.stringify(history);
@@ -273,30 +337,33 @@ function prevQuota(h, today, id) {
   }
   return null;
 }
-// 记一次额度观察，u = 当天用掉的部分，只累计上涨。
-// 2026-11-20 改：已用比例在同一个周期里也会往回降（实测 Gemini 每周额度 19.04% → 18.34%，重置时间没变，
-// 可能是滑动窗口里旧用量过期），v1.4.0 把“变小”当成重置、把起点清成 0，当天用量会多算成整个周期的用量。
-// 现在只认重置时间往后跳了 1 小时以上才算进入新周期；下降不扣，也不当成重置。
-// 当天第一次见到某个桶：前面有记录、还在同一个周期里，就从那条记录最后的值接着算（中间没观察到的上涨算到今天）；
-// 周期已经换了就把现在的值全算进来（新周期从 0 开始）；以前从没见过就从 0 算。
-// v1.4.0 旧格式（f 起点 / a 已累计）的修正：f 被清成 0 而 a > 0 的，是被误判成重置的，只认 a；否则取 m − f（加上 a）。
+// 记一次额度观察。u = 当天用掉的部分 = 每个周期里“当天最后的值 − 当天开始时的值”之和。
+//   s：这一段（当天、同一个周期）开始时的已用比例；c：当天前面几段（换周期以前）已经结算的用量；u = c + max(0, l − s)。
+// 2026-11-22 改（v1.4.1 的“只累计上涨”会多算）：已用比例在同一个周期里会来回起伏，不只是往下降。
+//   实测：同一个周期、正在生成回复，6 分钟里 Gemini 每周额度 1.699% → 1.594%、5 小时额度 1.907% → 1.487%；
+//   11-22 这一天每周额度最高 3.93%、最后 1.53%，只累计上涨记成了 +7.07%（状态栏显示只用了 2%）。
+//   原因没有官方说法（可能是请求开始时先按估算扣、结束后按实际退回）；按净变化算，起伏不会被重复计算。
+// 换周期：重置时间前后差 1 小时以上（没用过的桶重置时间是“现在 + 7 天 / 5 小时”，跟着时间走，
+//   Antigravity 关着超过 1 小时再打开也会判成换周期，那时前后都是 0，不影响结果）。
+// 当天第一次见到某个桶：前面有记录、还在同一个周期里，就从那条记录最后的值接着算（中间没观察到的部分算到今天）；
+//   周期已经换了就从 0 算；以前从没见过就从现在的值算（看不到之前用了多少）。
+// v1.4.0 旧格式（f 起点 / a 已累计）和 v1.4.1 的格式（只有 u）在 migrateHistory 里一次性换算。
 const migrateQuota = (q) => (+q.f === 0 && +q.a > 0 ? +q.a : Math.max(0, (+q.m || 0) - (+q.f || 0)) + (+q.a || 0));
+const samePeriod = (r1, r2) => Math.abs((+r1 || 0) - (+r2 || 0)) < 3600e3;
 function noteQuota(day, buckets, prev) {
   if (!day.quota || typeof day.quota !== 'object') day.quota = {};
   for (const b of buckets) {
     let q = day.quota[b.id];
-    if (q && q.u === undefined) { q.u = r4(migrateQuota(q)); delete q.f; delete q.a; }
     if (!q) {
       const p = prev(b.id);
-      const same = p && Math.abs((+p.r || 0) - b.reset) < 3600e3;
-      const u = p ? (same ? Math.max(0, b.used - (+p.l || 0)) : b.used) : 0;
-      q = day.quota[b.id] = { n: b.name, w: b.w, l: r4(b.used), u: r4(u), m: r4(b.used), r: b.reset };
-    } else if (b.reset - (+q.r || 0) > 3600e3) {
-      q.u = r4((+q.u || 0) + b.used); // 进入新周期：新周期里的已用部分都是新用的
-    } else if (b.used > q.l) {
-      q.u = r4((+q.u || 0) + b.used - q.l); // 只累计上涨；下降不扣
+      const s = p ? (samePeriod(p.r, b.reset) ? +p.l || 0 : 0) : b.used;
+      q = day.quota[b.id] = { n: b.name, w: b.w, l: r4(b.used), m: r4(b.used), r: b.reset, s: r4(s), c: 0 };
+    } else {
+      if (q.s === undefined) { q.s = r4(Math.max(0, (+q.l || 0) - (+q.u || 0))); q.c = 0; } // 迁移漏掉的旧记录：保持原来的 u
+      if (!samePeriod(q.r, b.reset)) { q.c = r4((+q.c || 0) + Math.max(0, (+q.l || 0) - q.s)); q.s = 0; } // 换周期：上一段结算，新一段从 0 起
     }
     q.l = r4(b.used);
+    q.u = r4((+q.c || 0) + Math.max(0, q.l - q.s));
     q.m = r4(Math.max(+q.m || 0, b.used));
     q.r = b.reset;
     if (b.name) q.n = b.name;

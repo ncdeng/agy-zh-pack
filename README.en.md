@@ -63,33 +63,54 @@ Delete `%LOCALAPPDATA%\AgyZhPack\i18n\zh-CN.json`, then press `Ctrl+R` once in A
 
 ### Usage status bar
 
-Two fixed lines above the input box. Each item is a colored icon with text in the same color. Like ccline, the status bar text is in English. Hover over any item to see a detailed tooltip (in Chinese).
+Two fixed lines above the input box. Each item is a colored icon with text in the same color. Like ccline, the status bar text is in English. Hover over any item to see a detailed tooltip (in Chinese). You can change the colors and the style; see [Look](#look).
 
 | Line | Example | Meaning |
 |---|---|---|
 | Line 1 | `gemini-flash-worker-agy` | Model: the name in the UI, plus the model name that the API actually returns. For Gemini models, it turns yellow when the two do not match |
-| | `89% · 456k / 512k · 3×` | Context: percent used, used / limit. If the conversation was auto-compacted, a small badge with a compress icon follows; the number is how many times (hover to see at which steps) |
-| | `450k · 99% hit` | Cache: tokens read from cache in the last call, and the hit ratio |
+| | `89% · 456k · 3×` | Context: the icon is a ring that fills as the context fills, then percent used and tokens used; the limit is in the tooltip. If the conversation was auto-compacted, a small badge with a compress icon follows; the number is how many times (hover to see at which steps) |
+| | `99% hit` | Cache: the cache hit ratio of the last call; the tooltip shows how many tokens were read from cache |
 | | `$17.81` | Total cost of this conversation (subagents included). Hover to see the input, cache and output tokens of the last call and the cost of each |
 | | `$17.85 today` | Total cost today (from local midnight, all conversations). Click it to open the [daily usage panel](#daily-usage-panel) |
 | | `running` | The model is generating. When it is not generating, this item keeps an empty space, so the bar does not wrap and jump when generation starts or stops |
 | Line 2 | `6.9s` | Time to first token |
 | | `169 tok/s` | Output speed |
-| | `0% · 16:44` | 5-hour limit: percent used (10-cell bar) and reset time |
+| | `0% · 16:44` | 5-hour limit: percent used (with a bar) and reset time |
 | | `41% · Sat 16:08 · ↑15%` | Weekly limit: percent used, reset time, and how far ahead (↑) or behind (↓) an even pace you are |
 | Subagents | `self · … · running` | Each running subagent gets its own line. The line closes about 10 seconds after the subagent ends. In a subagent window, the bar shows that subagent's own data |
 
-The look follows the cometix theme of [CCometixLine](https://github.com/Haleclipse/CCometixLine) (ccline, a status line for Claude Code) by Haleclipse: two lines, colored icons with text in the same color, `|` between items, `·` between numbers in one item, and 10-cell bars for the limits. This project does not use ccline code. The status bar was written again for Antigravity.
+The look follows the cometix theme of [CCometixLine](https://github.com/Haleclipse/CCometixLine) (ccline, a status line for Claude Code) by Haleclipse: two lines, colored icons with text in the same color, `|` between items, `·` between numbers in one item, and bars for the limits. This project does not use ccline code. The status bar was written again for Antigravity.
+
+#### Look
+
+Click `$x today` to open the [daily usage panel](#daily-usage-panel), then click `theme` at the top right. At the top is a gallery of color palettes. Each card is a live copy of your status bar; click a card to use that palette. The other options are below it. A change applies at once.
+
+| Option | Values | Default |
+|---|---|---|
+| Palette | Cometix, Catppuccin, Tokyo Night, Rosé Pine, Gruvbox, Nord, Dracula, Mono | Cometix (this project's own palette) |
+| Style | `plain`: text with vertical-line separators; `pill`: a rounded background for each item; `powerline`: arrow-shaped color blocks | `plain` |
+| Bars (limits) | `thin`: a thin bar; `cells`: 10 cells; `ring`: a small ring; `none`: no bar | `thin` |
+| Detail | `compact`: no context limit, cache shows only the hit ratio; `full`: context with limit, cache with tokens read | `compact` |
+| Icons | `on`, `off` | `on` |
+
+- Each palette has a light and a dark version. The version follows the light or dark theme of Antigravity. The colors come from the published definitions of each palette (see [Credits](#credits)). Nord has only an official dark version, so its light version uses darker forms of the pale colors.
+- Your choice is kept in `look.json` in the install folder. The injector saves it within 30 seconds and sends it to the other windows. Delete the file to go back to the defaults.
+- The layers (palette, style, bar glyphs, detail) and the "gauge instead of icon" idea (the context icon is a ring that fills) follow ccline v2. This project does not use ccline code.
 
 #### Daily usage panel
 
-Click `$x today` in the status bar. A panel opens above the status bar. Click it again, click outside the panel, or press `Esc` to close it.
+Click `$x today` in the status bar. A panel opens above the status bar. Click it again, click outside the panel, or press `Esc` to close it. The `theme` button at the top right opens the [Look](#look) settings.
 
 - **Bar chart**: the estimated cost of each day in the last 7 or 30 days, with one color for each model. Hover over a bar to see that day's details.
 - **Table**: one row for each day, with cost, conversations, calls, input / cache / output tokens, cache hit ratio, and how many percentage points of the weekly limit were used that day (Gemini group and Claude group separately).
 - **Bottom lines**: the total and daily average for the period; for each limit group, how much is used now and how much was used in the period, plus an estimate of how much cost one percent of the weekly limit is worth.
 
-The data is kept in `usage-history.json` in the install folder for 90 days. It holds only amounts, call counts, token counts and limit ratios, not conversation content. After the install, the injector fills in earlier days once: it opens Antigravity's own conversation databases read-only (`%USERPROFILE%\.gemini\antigravity\conversations\*.db` on Windows, `~/.gemini/antigravity/conversations/*.db` on macOS), reads the time, model and token counts of each call, groups them by day, and the status bar prices them with its price table. Filled-in days have no limit data (nobody recorded it then). This needs Node.js 22.13 / 23.4 or later (the built-in `node:sqlite`; versions 22.5 to 22.12 need a start flag for it). On Windows, the `node.exe` in the package meets this. On macOS, the injector uses the Node.js that you installed. If the version is too old, only the fill-in step is skipped; the panel and the daily live records still work. It depends on Antigravity's internal storage format, so if that format changes, earlier days cannot be filled in; other features are not affected. The weekly limit is counted from the changes that the injector sees: limit used while Antigravity is closed (for example with the agy CLI) is counted on the next day that the injector sees it.
+The data is kept in `usage-history.json` in the install folder for 90 days. It holds only amounts, call counts, token counts and limit ratios, not conversation content. After the install, the injector fills in earlier days once: it opens Antigravity's own conversation databases read-only (`%USERPROFILE%\.gemini\antigravity\conversations\*.db` on Windows, `~/.gemini/antigravity/conversations/*.db` on macOS), reads the time, model and token counts of each call, groups them by day, and the status bar prices them with its price table. Filled-in days have no limit data (nobody recorded it then). This needs Node.js 22.13 / 23.4 or later (the built-in `node:sqlite`; versions 22.5 to 22.12 need a start flag for it). On Windows, the `node.exe` in the package meets this. On macOS, the injector uses the Node.js that you installed. If the version is too old, only the fill-in step is skipped; the panel and the daily live records still work. It depends on Antigravity's internal storage format, so if that format changes, earlier days cannot be filled in; other features are not affected.
+
+The weekly limit used in a day is the net change in each limit period: the last used ratio seen that day minus the used ratio at the start of the day. If a new period starts during the day, the parts are added. The reason: in one period the used ratio goes up and down (in one test, it went from 1.699% to 1.594% in 6 minutes while the model was generating). v1.4.x added only the increases, so an increase after a drop was counted again and the daily number was too high. After you upgrade to v1.5.0, earlier weekly records are calculated again with the new method.
+
+- Limit used while Antigravity is closed (for example with the agy CLI) is counted on the next day that the injector sees it.
+- The limit belongs to the account. If the account uses Google family sharing, or is also used on another computer, the limit includes other people's usage. Then the "cost of 1%" estimate is too low (their usage raises the limit, but their cost is not in this computer's cost).
 
 #### How cost is calculated
 
@@ -190,6 +211,7 @@ v1.0.0 changed the look directly at install time (131% zoom, strong contrast, sy
 
 | Antigravity version | What was tested | Date |
 |---|---|---|
+| 2.34.0 | Look (v1.5.0): on a real Windows computer, the new status bar (context ring, compact text, thin bars) shows correctly; the Theme page shows 8 palette cards and the 4 option rows (style, bars, detail, icons) with no errors; a choice is written to `look.json` after 28 seconds; in an offline preview page, all 8 palettes in light and dark, the 3 styles, the 4 bar types and icons off show correctly. On a real Mac: the new status bar, the Theme page and the icon font work with no errors. Weekly limit as net change per period: in one period, while the model was generating, the Gemini weekly limit went from 1.699% to 1.594% and the 5-hour limit from 1.907% to 1.487% in 6 minutes; the real history on our computer was calculated again offline, and 11-22 went from +7.24% to +1.59% (the status bar showed 2%); 3 more cases were simulated (ups and downs in one period, a new period during the day, a limit not seen before). **Not tested**: the dark theme of Antigravity on a real computer (only in the offline preview), subagent lines with the new look | 2026-11-22 |
 | 2.34.0 | Status bar (issue #2): hover text now uses our own tooltip box. On a real Mac with a simulated mouse: shown after 0.6 seconds; it stays through 6 forced re-renders in a row; it closes when the mouse moves away; button tooltips in the daily panel work; the compress icon font loads. On Windows after a hot update, the status bar and panel have no native `title`; when not generating, the empty `running` space is on line 1 and the bar has 2 lines. Quick quota retry: after a restart of Antigravity on the Mac, the first request got the limits in 3.3 seconds and no retry was needed. **Not tested**: how the badge looks and wraps in a compacted conversation, the retry when the first quota request fails | 2026-11-22 |
 | 2.34.0 | Translation: added 167 new UI strings and 16 rules from 2.34.0 (Orchestrator settings, permission and sandbox options, plugin panels, sidebar customization, send-key setting, home page suggestion cards; the limit descriptions on the Models settings screen are translated by rules, and the maximum text length for rules went from 80 to 120); after the change, scans of the Windows home and conversation pages and the macOS settings screens (General, Models) show only names and developer options in English | 2026-11-22 |
 | 2.34.0 | macOS on a real computer (13-inch Intel MacBook Pro 2020, macOS 15.7.9, Node.js 24.14.0): `install-agent` installs the LaunchAgent and starts the injector; `launch-agy` starts Antigravity with the debugging port; after injection into the onboarding page, the window reloads once; translation, the status bar (model, today's cost, 5-hour and weekly limits) and the daily usage panel work; fill-in is skipped correctly when there are no conversation databases. **Not tested**: autostart after a restart, the notification when Antigravity starts without the flag, color toggle | 2026-11-22 |
@@ -257,6 +279,7 @@ This creates `dist/Antigravity中文美化包/` and a zip with the same name. Wh
 | `i18n/zh-CN.rules.json` | Regex rules: relative times, thinking time and other text with numbers |
 | `cost-day.json` | Ledger for today's cost (not in the repo; created by the injector) |
 | `usage-history.json` | Daily usage history, kept for 90 days (not in the repo; created by the injector) |
+| `look.json` | Your status bar look (not in the repo; created when you choose a look on the Theme page) |
 | `package/app/setup.mjs` | Install, uninstall, color toggle |
 | `package/build.mjs` | Builds the package |
 | `package/third_party/node-LICENSE.txt` | License of the Node.js included in the package |
@@ -269,9 +292,9 @@ This creates `dist/Antigravity中文美化包/` and a zip with the same name. Wh
 
 ## Credits
 
-- The look and the English wording of the status bar follow the cometix theme of [CCometixLine](https://github.com/Haleclipse/CCometixLine) (ccline) by Haleclipse. Thanks to Haleclipse for such a good-looking status line.
+- The look and the English wording of the status bar follow the cometix theme of [CCometixLine](https://github.com/Haleclipse/CCometixLine) (ccline) by Haleclipse. The layers of the v1.5.0 look (palette, style, bars, detail) and the context ring follow ccline v2. Thanks to Haleclipse for such a good-looking status line.
 - The display of the 5-hour and weekly limits follows agyline.
-- Status bar colors: Catppuccin (Latte for light, Mocha for dark).
+- The default palette, Cometix, is based on [Catppuccin](https://catppuccin.com) (Latte for light, Mocha for dark). The other palettes use the published colors of Catppuccin, [Tokyo Night](https://github.com/folke/tokyonight.nvim), [Rosé Pine](https://rosepinetheme.com), [Gruvbox](https://github.com/morhetz/gruvbox), [Nord](https://www.nordtheme.com) and [Dracula](https://draculatheme.com) (its light version is the official Alucard).
 - Icons: Material Symbols (Apache License 2.0).
 - The package includes Node.js (MIT license, see `package/third_party/node-LICENSE.txt`).
 

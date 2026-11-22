@@ -622,6 +622,73 @@ function agyStatusBar(CFG) {
   };
   const level = (pct, warnAt, critAt, normal) => (pct >= critAt ? 'crit' : pct >= warnAt ? 'warn' : normal);
 
+  // ---------- 外观（2026-11-22 加）：配色、外形、进度条、信息密度、图标 ----------
+  // 参考 CCometixLine v2（哈雷）的分层：配色（palette）× 外形（skin：plain / pill / powerline）× 进度条字形 × 文字模板的详略，
+  // 以及“仪表代替图标”（上下文的图标画成随用量变满的圆环）。本项目没有用它的代码（它的仓库没有许可证）；
+  // 各配色取自配色方案自己公开的色值（都是 MIT 许可），每套都有浅色、深色两版，跟着 Antigravity 的明暗切换。
+  // 默认是本项目自己的 cometix（下面 CSS 里的基础色）。选择存在注入程序目录的 look.json，所有窗口共用（见 inject.mjs 的 readLook）。
+  const LOOK_DEFAULT = { pal: 'cometix', skin: 'plain', bar: 'thin', dense: 'compact', icons: true };
+  const LOOK_CHOICES = {
+    pal: ['cometix', 'catppuccin', 'tokyo-night', 'rose-pine', 'gruvbox', 'nord', 'dracula', 'mono'],
+    skin: ['plain', 'pill', 'powerline'],
+    bar: ['thin', 'cells', 'ring', 'none'],
+    dense: ['compact', 'full'],
+  };
+  const cleanLook = (o) => {
+    const l = { ...LOOK_DEFAULT };
+    if (o && typeof o === 'object') {
+      for (const k of Object.keys(LOOK_CHOICES)) if (LOOK_CHOICES[k].includes(o[k])) l[k] = o[k];
+      if (typeof o.icons === 'boolean') l.icons = o.icons;
+      if (+o.at > 0) l.at = +o.at;
+    }
+    return l;
+  };
+  { // 注入时带来的 look.json 比页面里记着的新，就用它（再次注入时页面里的选择保留）
+    const fromFile = cleanLook(CFG && CFG.look);
+    if (!S.look || (fromFile.at || 0) > (S.look.at || 0)) S.look = fromFile;
+    else S.look = cleanLook(S.look); // 旧版本留下的对象：补上新加的字段
+  }
+  // 把外观写到元素的 data-* 上（CSS 按这些属性选配色和外形）；没变就不写，免得触发别人的 MutationObserver
+  const lookAttrs = (e, over) => {
+    if (!e) return e;
+    const l = { ...S.look, ...over };
+    const want = { pal: l.pal, skin: l.skin, bar: l.bar, icons: l.icons ? '1' : '0' };
+    for (const [k, v] of Object.entries(want)) if (e.dataset[k] !== v) e.dataset[k] = v;
+    return e;
+  };
+  // 小圆环（SVG）：额度进度条的 ring 样式和上下文的仪表图标共用。从 12 点钟方向顺时针画
+  const SVGNS = 'http://www.w3.org/2000/svg';
+  const ringEl = (frac, cls) => {
+    const f = Math.max(0, Math.min(1, frac));
+    const s = el('span', cls);
+    const svg = document.createElementNS(SVGNS, 'svg');
+    svg.setAttribute('viewBox', '0 0 20 20');
+    const C = 2 * Math.PI * 7;
+    const circle = (c, len) => {
+      const e = document.createElementNS(SVGNS, 'circle');
+      e.setAttribute('cx', '10'); e.setAttribute('cy', '10'); e.setAttribute('r', '7'); e.setAttribute('class', c);
+      if (len != null) e.setAttribute('stroke-dasharray', len.toFixed(2) + ' 99');
+      return e;
+    };
+    svg.append(circle('trk'));
+    if (f > 0) svg.append(circle('arc', Math.max(1.5, f * C)));
+    s.append(svg);
+    return s;
+  };
+  // 额度进度条：thin 细条（默认，约是 10 格的一半宽）/ cells 10 格 / ring 小圆环 / none 不画（只留百分比）
+  const meter = (frac, colorKind) => {
+    const f = Math.max(0, Math.min(1, frac));
+    const kind = S.look.bar;
+    if (kind === 'none') return null;
+    if (kind === 'cells') return cells(f, colorKind);
+    if (kind === 'ring') return ringEl(f, 'meter ring k-' + colorKind);
+    const b = el('span', 'meter thin k-' + colorKind);
+    const i = el('i');
+    i.style.width = (f * 100).toFixed(1) + '%';
+    b.append(i);
+    return b;
+  };
+
   // ---------- 模型 ----------
   const modelKey = (md) => (md && ((md.modelUsage && md.modelUsage.model) || md.generatorModel)) || '';
   // 配置名（plannerConfig.modelName，例如 gemini-4-argon-high）
@@ -703,9 +770,11 @@ function agyStatusBar(CFG) {
       const used = Number(ctx.estimatedTokensUsed) || 0;
       const max = Number(ctx.maxContextTokens);
       const pct = Math.round((used / max) * 100);
-      const detail = '上下文 ' + used.toLocaleString() + ' / ' + max.toLocaleString() + ' token' + sentTip + compTip + '\n' +
+      const detail = '上下文 ' + used.toLocaleString() + ' / ' + max.toLocaleString() + ' token（' + pct + '%）' + sentTip + compTip + '\n' +
         (ctx.tokenGroups || []).map((g) => g.name + '：' + Number(g.numTokens).toLocaleString()).join('\n');
-      return seg('context', 'data_usage', [pct + '%', fmtK(used) + ' / ' + fmtK(max), compPiece], detail, level(pct, 70, 90, 'context'));
+      // 2026-11-22：图标换成随用量变满的圆环（仿 ccline 的 gauge）；紧凑模式（默认）不写上限，上限在悬停说明里
+      const usedText = S.look.dense === 'full' ? fmtK(used) + ' / ' + fmtK(max) : fmtK(used);
+      return seg('context', ringEl(used / max, 'ic svg gauge'), [pct + '%', usedText, compPiece], detail, level(pct, 70, 90, 'context'));
     }
     if (sent > 0) return seg('context', 'data_usage', [fmtK(sent), compPiece], '上下文：最近一次调用发给模型的 token（输入 + 缓存读写）' + compTip);
     return null;
@@ -714,7 +783,10 @@ function agyStatusBar(CFG) {
     if (!mu || !(Number(mu.cacheReadTokens) > 0)) return null;
     const cache = Number(mu.cacheReadTokens), input = Number(mu.inputTokens) || 0;
     const hit = Math.round((cache / (cache + input)) * 100);
-    return seg('cache', 'database', [fmtK(cache), hit + '% hit'], '最近一次调用中，从缓存读取的 token 和命中率');
+    // 紧凑模式（默认）只写命中率：读到的 token 数和上下文用量差不多，重复了，放进悬停说明
+    const pieces = S.look.dense === 'full' ? [fmtK(cache), hit + '% hit'] : [hit + '% hit'];
+    return seg('cache', 'database', pieces, '最近一次调用：从缓存读取 ' + cache.toLocaleString() + ' token，另有 ' + input.toLocaleString() +
+      ' token 没命中缓存，命中率 ' + hit + '%');
   };
   // idle：不在生成，只占位置不显示（见 CSS 的 .seg.k-run.idle）
   const runSeg = (text, idle) => {
@@ -755,7 +827,7 @@ function agyStatusBar(CFG) {
       const reset = tms(b.resetTime);
       const weekly = b.window === 'weekly';
       const k = pct >= 90 ? 'crit' : pct >= 70 ? 'warn' : 'quota';
-      const pieces = [cells(used, k), pct + '%', reset > 0 ? fmtWhen(reset) : ''];
+      const pieces = [meter(used, k), pct + '%', reset > 0 ? fmtWhen(reset) : ''];
       let paceText = '';
       if (weekly && reset > 0) {
         const elapsed = 1 - Math.max(0, Math.min(1, (reset - Date.now()) / WEEK_MS));
@@ -1084,6 +1156,8 @@ function agyStatusBar(CFG) {
   };
 
   const renderPanel = (panel) => {
+    lookAttrs(panel);
+    if (S.panelView === 'look') { renderLook(panel); return; }
     const n = S.panelDays;
     const recs = lastDays(n).map((nm) => ({ nm, r: dayRecord(nm) }));
     const tips = new WeakMap();
@@ -1107,7 +1181,11 @@ function agyStatusBar(CFG) {
     const x = el('button', 'p-btn p-x', '×');
     setTip(x, '关闭（Esc）');
     x.addEventListener('click', closePanel);
-    head.append(el('span', 'p-fill'), x);
+    const th = el('button', 'p-btn');
+    th.append(el('span', 'ic', 'palette'), 'theme');
+    setTip(th, '状态栏外观：配色、外形、进度条、信息密度');
+    th.addEventListener('click', () => { S.panelView = 'look'; renderPanel(panel); });
+    head.append(el('span', 'p-fill'), th, x);
     panel.append(head);
 
     // 柱状图：左旧右新，按模型分颜色叠起来（金额大的在下面）；柱顶标金额，虚线是有用量的天的日均
@@ -1274,6 +1352,73 @@ function agyStatusBar(CFG) {
     panel.append(foot);
     attachCard(panel, tips);
   };
+  // Theme 页（2026-11-22 加）：上面是配色画廊，每张卡片是当前状态栏的实时副本（套上那套配色和当前外形），点一下就换；
+  // 下面是外形、进度条、信息密度、图标。选了马上生效，注入程序 30 秒内存进 look.json 并推给其他窗口。
+  const OPT_INFO = {
+    skin: ['style', '外形', { plain: '纯文字，竖线分隔（默认）', pill: '每项一个圆角底色块', powerline: '箭头色块，像终端里的 powerline' }],
+    bar: ['bars', '额度进度条', { thin: '细条（默认，约是 10 格的一半宽）', cells: '10 格（以前的样子）', ring: '小圆环，最省地方', none: '不画，只留百分比' }],
+    dense: ['detail', '信息密度', { compact: '上下文只写比例和用量、缓存只写命中率，其余在悬停说明里（默认）', full: '上下文带上限、缓存带读到的 token 数（以前的样子）' }],
+  };
+  const renderLook = (panel) => {
+    panel.replaceChildren();
+    const head = el('div', 'p-head');
+    head.append(setTip(el('span', 'p-title', 'Theme'), '状态栏外观。选好马上生效，保存在注入程序目录的 look.json，所有窗口共用'));
+    const back = el('button', 'p-btn', '← usage');
+    setTip(back, '回到每日用量');
+    back.addEventListener('click', () => { S.panelView = 'usage'; renderPanel(panel); });
+    const x = el('button', 'p-btn p-x', '×');
+    setTip(x, '关闭（Esc）');
+    x.addEventListener('click', closePanel);
+    head.append(back, el('span', 'p-fill'), x);
+    panel.append(head);
+
+    panel.append(el('div', 'lk-sec', 'Palette'));
+    const src = S.panelBar && S.panelBar.isConnected ? S.panelBar : document.querySelector(B);
+    const grid = el('div', 'lk-grid');
+    for (const pal of LOOK_CHOICES.pal) {
+      const on = S.look.pal === pal;
+      const card = el('button', 'lk-card' + (on ? ' on' : ''));
+      setTip(card, PAL_INFO[pal][1]);
+      const name = el('div', 'lk-name');
+      name.append(el('span', '', PAL_INFO[pal][0]));
+      if (pal === LOOK_DEFAULT.pal) name.append(el('span', 'lk-tag', 'default'));
+      if (on) name.append(el('span', 'lk-tag cur', 'in use'));
+      const prev = lookAttrs(el('div', BAR_CLASS + ' lk-prev'), { pal });
+      if (src && src.children.length) {
+        for (const ln of src.children) {
+          const c = ln.cloneNode(true);
+          c.querySelectorAll('[data-agy-tip]').forEach((e) => e.removeAttribute('data-agy-tip'));
+          prev.append(c);
+        }
+      } else prev.append(el('div', 'lk-empty', 'open a conversation to see a live preview'));
+      card.append(name, prev);
+      card.addEventListener('click', () => S.setLook({ pal }));
+      grid.append(card);
+    }
+    panel.append(grid);
+
+    const row = (lab, tip, buttons) => {
+      const r = el('div', 'lk-row');
+      r.append(setTip(el('span', 'lk-lab', lab), tip), ...buttons);
+      return r;
+    };
+    for (const [key, [lab, zh, names]] of Object.entries(OPT_INFO)) {
+      panel.append(row(lab, zh, LOOK_CHOICES[key].map((v) => {
+        const b = el('button', 'p-btn' + (S.look[key] === v ? ' on' : ''), v);
+        setTip(b, names[v]);
+        b.addEventListener('click', () => S.setLook({ [key]: v }));
+        return b;
+      })));
+    }
+    panel.append(row('icons', '图标', [true, false].map((v) => {
+      const b = el('button', 'p-btn' + (S.look.icons === v ? ' on' : ''), v ? 'on' : 'off');
+      setTip(b, v ? '显示图标（默认）' : '不显示图标，更窄');
+      b.addEventListener('click', () => S.setLook({ icons: v }));
+      return b;
+    })));
+    panel.append(el('div', 'lk-note', '配色跟着 Antigravity 的浅色 / 深色自动切换。选择保存在 look.json，所有窗口共用；删掉这个文件就回到默认。'));
+  };
+
   // 背景色取输入框一带不透明的颜色，和当前主题一致；取不到用 CSS 里的默认色
   const solidBg = (start) => {
     for (let e = start; e; e = e.parentElement) {
@@ -1303,6 +1448,7 @@ function agyStatusBar(CFG) {
   const togglePanel = (anchor) => {
     if (document.querySelector(P)) { closePanel(); return; }
     const p = el('div', PANEL_CLASS);
+    S.panelView = 'usage'; // 每次打开都从每日用量开始
     p.setAttribute('data-agy-no-i18n', '');
     document.body.append(p);
     S.panelBar = anchor.closest(B);
@@ -1385,7 +1531,7 @@ function agyStatusBar(CFG) {
     const frac = Math.max(0, Math.min(1, Number(q.remainingFraction)));
     const pct = Math.round(frac * 100);
     const k = pct <= 10 ? 'crit' : pct <= 30 ? 'warn' : 'quota';
-    return [seg('quota', 'timelapse', [cells(frac, k), pct + '%', q.resetTime ? fmtReset(q.resetTime) : ''],
+    return [seg('quota', 'timelapse', [meter(frac, k), pct + '%', q.resetTime ? fmtReset(q.resetTime) : ''],
       '这个模型的剩余额度' + (q.resetTime ? '，' + fmtReset(q.resetTime) + ' 重置' : ''), k)];
   };
   const toLines = (rows, cls) => rows.filter((r) => r.length).map((r) => {
@@ -1460,14 +1606,53 @@ function agyStatusBar(CFG) {
   const B = '.' + BAR_CLASS;
   const TIP_CLASS = 'agy-tip'; // 悬停提示框（见 setTip 一节）
   const T = '.' + TIP_CLASS;
+  // 配色（2026-11-22 加）。每套 [显示名, 悬停说明, 浅色, 深色]；浅色、深色各 18 个值，顺序见 PAL_VARS。
+  // cometix 是默认，用下面 CSS 里的基础色，不在这里。pl-ink 是 powerline 外形里色块上的字色。
+  // 色值出处：Catppuccin（catppuccin.com，Latte / Mocha）、Tokyo Night（folke/tokyonight.nvim，Day / Night）、
+  // Rosé Pine（rosepinetheme.com，Dawn / Main）、Gruvbox（morhetz/gruvbox，light / dark）、Nord（nordtheme.com，
+  // 官方只有深色，浅色版把偏淡的几种和 nord0 混合调深）、Dracula（draculatheme.com，浅色是官方的 Alucard）。
+  const PAL_VARS = ['--k-model', '--k-context', '--k-cache', '--k-timing', '--k-tokens', '--k-quota', '--k-warn', '--k-crit', '--k-run',
+    '--k-muted', '--k-agent', '--k-cost', '--k-argon', '--sep', '--cell-off', '--k-text', '--p-bg', '--pl-ink'];
+  const nd = (c, p) => `color-mix(in srgb, ${c} ${p}%, #2e3440)`; // Nord 浅色：和 nord0 混合调深
+  const PALETTES = {
+    catppuccin: ['Catppuccin', 'Catppuccin：浅色 Latte / 深色 Mocha',
+      ['#7287fd', '#8839ef', '#04a5e5', '#e64553', '#179299', '#fe640b', '#df8e1d', '#d20f39', '#40a02b', '#8c8fa1', '#df8e1d', '#ea76cb', '#1e66f5', '#bcc0cc', '#ccd0da', '#4c4f69', '#eff1f5', '#ffffff'],
+      ['#b4befe', '#cba6f7', '#89dceb', '#eba0ac', '#94e2d5', '#fab387', '#f9e2af', '#f38ba8', '#a6e3a1', '#7f849c', '#f9e2af', '#f5c2e7', '#89b4fa', '#585b70', '#45475a', '#cdd6f4', '#1e1e2e', '#1e1e2e']],
+    'tokyo-night': ['Tokyo Night', 'Tokyo Night：浅色 Day / 深色 Night',
+      ['#2e7de9', '#9854f1', '#007197', '#387068', '#118c74', '#b15c00', '#8c6c3e', '#c64343', '#587539', '#848cb5', '#8c6c3e', '#f52a65', '#188092', '#a8aecb', '#c4c8da', '#3760bf', '#e1e2e7', '#ffffff'],
+      ['#7aa2f7', '#bb9af7', '#7dcfff', '#73daca', '#1abc9c', '#ff9e64', '#e0af68', '#db4b4b', '#9ece6a', '#737aa2', '#e0af68', '#f7768e', '#2ac3de', '#3b4261', '#292e42', '#c0caf5', '#1a1b26', '#1a1b26']],
+    'rose-pine': ['Rosé Pine', 'Rosé Pine：浅色 Dawn / 深色 Main',
+      ['#907aa9', '#d7827e', '#56949f', '#286983', '#56949f', '#ea9d34', '#ea9d34', '#b4637a', '#286983', '#797593', '#ea9d34', '#b4637a', '#286983', '#cecacd', '#dfdad9', '#575279', '#faf4ed', '#fffaf3'],
+      ['#c4a7e7', '#ebbcba', '#9ccfd8', '#9ccfd8', '#9ccfd8', '#f6c177', '#f6c177', '#eb6f92', '#31748f', '#908caa', '#f6c177', '#eb6f92', '#31748f', '#524f67', '#403d52', '#e0def4', '#191724', '#191724']],
+    gruvbox: ['Gruvbox', 'Gruvbox：浅色 light / 深色 dark',
+      ['#076678', '#8f3f71', '#427b58', '#b57614', '#427b58', '#af3a03', '#b57614', '#9d0006', '#79740e', '#928374', '#b57614', '#9d0006', '#076678', '#d5c4a1', '#ebdbb2', '#3c3836', '#fbf1c7', '#fbf1c7'],
+      ['#83a598', '#d3869b', '#8ec07c', '#fabd2f', '#8ec07c', '#fe8019', '#fabd2f', '#fb4934', '#b8bb26', '#a89984', '#fabd2f', '#fb4934', '#83a598', '#504945', '#3c3836', '#ebdbb2', '#282828', '#282828']],
+    nord: ['Nord', 'Nord：官方只有深色，浅色版把偏淡的颜色调深了',
+      ['#5e81ac', nd('#b48ead', 80), nd('#88c0d0', 60), nd('#8fbcbb', 60), nd('#8fbcbb', 60), nd('#d08770', 85), nd('#ebcb8b', 60), '#bf616a', nd('#a3be8c', 65), '#7b88a1', nd('#ebcb8b', 60), nd('#bf616a', 90), '#5e81ac', '#d8dee9', '#e5e9f0', '#2e3440', '#eceff4', '#ffffff'],
+      ['#81a1c1', '#b48ead', '#88c0d0', '#8fbcbb', '#8fbcbb', '#d08770', '#ebcb8b', '#bf616a', '#a3be8c', '#7b88a1', '#ebcb8b', '#bf616a', '#5e81ac', '#434c5e', '#3b4252', '#d8dee9', '#2e3440', '#2e3440']],
+    dracula: ['Dracula', 'Dracula：浅色是官方的 Alucard / 深色 Dracula',
+      ['#644ac9', '#a3144d', '#036a96', '#644ac9', '#036a96', '#a34d14', '#846e15', '#cb3a2a', '#14710a', '#6c664b', '#846e15', '#846e15', '#644ac9', '#cfcfde', '#ece7d2', '#1f1f1f', '#fffbeb', '#fffbeb'],
+      ['#bd93f9', '#ff79c6', '#8be9fd', '#bd93f9', '#8be9fd', '#ffb86c', '#f1fa8c', '#ff5555', '#50fa7b', '#6272a4', '#f1fa8c', '#f1fa8c', '#bd93f9', '#44475a', '#44475a', '#f8f8f2', '#282a36', '#282a36']],
+    mono: ['Mono', '单色：只用深浅不同的灰，警告和超限才上色',
+      ['#3f4248', '#55585e', '#6b6e74', '#55585e', '#6b6e74', '#4a4d53', '#b8790e', '#c4223b', '#55585e', '#8b8e94', '#6b6e74', '#3f4248', '#2f3237', '#cfcfd2', '#e4e4e7', '#3f4248', '#ffffff', '#ffffff'],
+      ['#d4d6da', '#bfc2c7', '#a8abb1', '#bfc2c7', '#a8abb1', '#c9ccd1', '#f9e2af', '#f38ba8', '#bfc2c7', '#7d8086', '#a8abb1', '#d4d6da', '#e6e8eb', '#4a4d53', '#3a3d42', '#d4d6da', '#1f2023', '#1f2023']],
+  };
+  const PAL_INFO = { cometix: ['Cometix', '本项目默认：仿 ccline 的 cometix 预设。浅色以 Catppuccin Latte 为底、把偏淡的颜色调深，深色是 Catppuccin Mocha'] };
+  for (const [k, p] of Object.entries(PALETTES)) PAL_INFO[k] = [p[0], p[1]];
+  const DARK = (sel) => `body.theme-dark ${sel}, :root[style*="color-scheme: dark"] ${sel}`;
+  const PAL_CSS = Object.entries(PALETTES).map(([k, [, , light, dark]]) => {
+    const sels = [B, P, T].map((x) => `${x}[data-pal="${k}"]`);
+    const vars = (vals) => PAL_VARS.map((v, i) => `${v}:${vals[i]}`).join('; ');
+    return `${sels.join(', ')}{${vars(light)}}\n${sels.map(DARK).join(', ')}{${vars(dark)}}`;
+  }).join('\n');
   const style = document.createElement('style');
   style.textContent = `
-@import url("https://fonts.googleapis.com/css2?family=Material+Symbols+Rounded:opsz,wght,FILL,GRAD@20..24,400..500,0..1,0&icon_names=auto_awesome,calendar_month,check,compress,data_usage,database,event,hourglass_top,schedule,smart_toy,speed,timelapse&display=block");
+@import url("https://fonts.googleapis.com/css2?family=Material+Symbols+Rounded:opsz,wght,FILL,GRAD@20..24,400..500,0..1,0&icon_names=auto_awesome,calendar_month,check,compress,data_usage,database,event,hourglass_top,palette,schedule,smart_toy,speed,timelapse&display=block");
 ${B}, ${P}, ${T}{
   --k-model:#5c64d6; --k-context:#8839ef; --k-cache:#1b8fbf; --k-timing:#c4566a; --k-tokens:#158a90;
   --k-quota:#e0620d; --k-warn:#c9800f; --k-crit:#d20f39; --k-run:#40a02b; --k-muted:#8c8fa1;
   --k-agent:#df8e1d; --k-cost:#c03d8e; --k-argon:#1e66f5;
-  --sep:#c9c6bc; --cell-off:#e6e2d8; --p-bg:#fffefb; --k-text:#4c4f69;
+  --sep:#c9c6bc; --cell-off:#e6e2d8; --p-bg:#fffefb; --k-text:#4c4f69; --pl-ink:#ffffff;
 }
 ${B}{
   display:flex; flex-direction:column; gap:1px; padding:0 .9rem .35rem;
@@ -1480,8 +1665,10 @@ body.theme-dark ${T}, :root[style*="color-scheme: dark"] ${T}{
   --k-model:#b4befe; --k-context:#cba6f7; --k-cache:#89dceb; --k-timing:#f2cdcd; --k-tokens:#94e2d5;
   --k-quota:#fab387; --k-warn:#f9e2af; --k-crit:#f38ba8; --k-run:#a6e3a1; --k-muted:#7f849c;
   --k-agent:#f9e2af; --k-cost:#f5c2e7; --k-argon:#89b4fa; --p-bg:#1e1e2e; --k-text:#cdd6f4;
-  --sep:#585b70; --cell-off:#45475a;
+  --sep:#585b70; --cell-off:#45475a; --pl-ink:#1e1e2e;
 }
+/* 其他配色（data-pal，见 PALETTES）：浅色、深色各一条，选择器比上面的基础色更具体 */
+${PAL_CSS}
 /* 分隔符：每项左边留 1.6em，竖线画在这段空隙里；整行左移 1.6em 并把左边 1.6em 裁掉，
    这样窄窗口换行后，排在行首那一项的竖线正好被裁掉，不会出现“| 缓存 …”这种行首竖线 */
 ${B} .ln{display:flex; flex-wrap:wrap; align-items:center; row-gap:1px; margin-left:-1.6em; clip-path:inset(-6px -6px -6px 1.6em)}
@@ -1511,6 +1698,33 @@ ${B} .cells i{display:block; width:5px; height:10px; border-radius:1.5px; backgr
 ${B} .cells i.on{background:var(--kc)}
 ${B} .pulse{width:7px; height:7px; border-radius:50%; background:var(--kc); margin-right:.45em; animation:agyPulse 1.2s ease-in-out infinite}
 @keyframes agyPulse{0%,100%{opacity:1}50%{opacity:.25}}
+/* 进度条的另外两种样式（见 meter）：细条、小圆环；上下文的仪表图标也是圆环 */
+${B} .meter.thin{display:inline-block; width:34px; height:5px; border-radius:3px; background:var(--cell-off); overflow:hidden; margin-right:.1em}
+${B} .meter.thin i{display:block; height:100%; border-radius:3px; background:var(--kc)}
+${B} .meter.ring{display:inline-flex; width:13px; height:13px}
+${B} .meter.ring svg, ${B} .gauge svg{width:100%; height:100%; display:block; transform:rotate(-90deg)}
+${B} .ic.gauge svg{width:.92em; height:.92em}
+${B} .ring .trk, ${B} .gauge .trk{fill:none; stroke:var(--cell-off); stroke-width:3.6}
+${B} .ring .arc, ${B} .gauge .arc{fill:none; stroke:var(--kc); stroke-width:3.6; stroke-linecap:round}
+${B}[data-icons="0"] .ic{display:none}
+/* 外形 pill：每项一个圆角底色块，不画竖线 */
+${B}[data-skin="pill"] .ln{margin-left:0; clip-path:none; gap:3px 5px}
+${B}[data-skin="pill"] .seg{margin-left:0; padding:0 .6em; border-radius:999px; line-height:1.6; background:color-mix(in srgb, var(--kc) 13%, transparent)}
+${B}[data-skin="pill"] .seg::before{content:none}
+/* 外形 powerline：箭头色块，字用 --pl-ink；第一块左边是平的 */
+${B}[data-skin="powerline"] .ln{margin-left:0; clip-path:none; row-gap:3px}
+${B}[data-skin="powerline"] .seg{margin-left:-.3em; padding:0 .95em 0 1.05em; line-height:1.75; background:var(--kc); color:var(--pl-ink);
+  clip-path:polygon(0 0, calc(100% - .6em) 0, 100% 50%, calc(100% - .6em) 100%, 0 100%, .6em 50%)}
+${B}[data-skin="powerline"] .seg:first-child{margin-left:0; padding-left:.7em; border-radius:5px 0 0 5px;
+  clip-path:polygon(0 0, calc(100% - .6em) 0, 100% 50%, calc(100% - .6em) 100%, 0 100%)}
+${B}[data-skin="powerline"] .seg::before{content:none}
+${B}[data-skin="powerline"] .seg .pace-ok, ${B}[data-skin="powerline"] .seg .pace-hi, ${B}[data-skin="powerline"] .seg .real.odd{color:inherit; font-weight:700}
+${B}[data-skin="powerline"] .seg .real{opacity:.82}
+${B}[data-skin="powerline"] .cells i, ${B}[data-skin="powerline"] .meter.thin{background:color-mix(in srgb, var(--pl-ink) 30%, transparent)}
+${B}[data-skin="powerline"] .cells i.on, ${B}[data-skin="powerline"] .meter.thin i, ${B}[data-skin="powerline"] .pulse{background:var(--pl-ink)}
+${B}[data-skin="powerline"] .ring .trk, ${B}[data-skin="powerline"] .gauge .trk{stroke:color-mix(in srgb, var(--pl-ink) 30%, transparent)}
+${B}[data-skin="powerline"] .ring .arc, ${B}[data-skin="powerline"] .gauge .arc{stroke:var(--pl-ink)}
+${B}[data-skin="powerline"] .comp{color:inherit; background:color-mix(in srgb, var(--pl-ink) 22%, transparent)}
 ${B} .k-model{--kc:var(--k-model)} ${B} .k-context{--kc:var(--k-context)} ${B} .k-cache{--kc:var(--k-cache)}
 ${B} .k-timing{--kc:var(--k-timing)} ${B} .k-tokens{--kc:var(--k-tokens)} ${B} .k-quota{--kc:var(--k-quota)}
 ${B} .k-agent{--kc:var(--k-agent)} ${B} .k-cost{--kc:var(--k-cost)} ${B} .k-warn{--kc:var(--k-warn)} ${B} .k-crit{--kc:var(--k-crit)} ${B} .k-run{--kc:var(--k-run)} ${B} .k-muted{--kc:var(--k-muted)}
@@ -1527,6 +1741,23 @@ ${P} .p-fill{flex:1}
 ${P} .p-btn{font:inherit; color:var(--k-muted); background:transparent; border:1px solid var(--sep); border-radius:6px; padding:0 .45em; cursor:pointer; line-height:1.5}
 ${P} .p-btn.on{color:var(--k-cost); border-color:var(--k-cost)}
 ${P} .p-x{border:none; font-size:16px; padding:0 .25em}
+${P} .ic{font-family:"Material Symbols Rounded"; font-weight:normal; font-style:normal; font-size:14px; line-height:1; vertical-align:-2px;
+  margin-right:.25em; font-variation-settings:"FILL" 1,"wght" 500,"opsz" 20; display:inline-block; width:1em; overflow:hidden}
+/* Theme 页（2026-11-22 加）：配色画廊（每张卡片是当前状态栏的实时副本）+ 外形、进度条、信息密度、图标的选择 */
+${P} .lk-sec{margin:.55rem 0 .3rem; color:var(--k-text); font-weight:600}
+${P} .lk-grid{display:grid; grid-template-columns:1fr; gap:.4rem}
+${P} .lk-card{display:block; box-sizing:border-box; width:100%; text-align:left; font:inherit; color:inherit; background:transparent; cursor:pointer;
+  border:1px solid var(--sep); border-radius:8px; padding:.3rem .55rem .35rem; overflow:hidden}
+${P} .lk-card:hover{border-color:var(--k-muted)}
+${P} .lk-card.on{border-color:var(--k-cost); box-shadow:inset 0 0 0 1px var(--k-cost)}
+${P} .lk-name{display:flex; align-items:center; gap:.45em; color:var(--k-text); font-weight:600; margin-bottom:.15rem}
+${P} .lk-tag{font-size:10px; font-weight:500; color:var(--k-muted); border:1px solid var(--sep); border-radius:4px; padding:0 .35em; line-height:1.4}
+${P} .lk-card.on .lk-tag.cur{color:var(--k-cost); border-color:var(--k-cost)}
+${P} .lk-prev{padding:0; font-size:11px; pointer-events:none}
+${P} .lk-empty{color:var(--k-muted); padding:.2rem 0}
+${P} .lk-row{display:flex; align-items:center; flex-wrap:wrap; gap:.35rem; margin-top:.4rem}
+${P} .lk-lab{width:6.2em; color:var(--k-text)}
+${P} .lk-note{margin-top:.55rem; color:var(--k-muted); font-size:11px}
 ${P} .p-range{color:var(--k-muted); margin-left:.35rem}
 /* 柱状图：上面留 16px 给柱顶的金额；每根柱子从下往上叠（column-reverse），柱顶那段圆角 */
 ${P} .p-chart{height:122px; padding-top:16px; box-sizing:border-box; border-bottom:1px solid var(--sep)}
@@ -1619,7 +1850,7 @@ ${T}{position:fixed; z-index:2147483600; pointer-events:none; box-sizing:border-
   const placeTip = () => {
     const t = tip.target;
     if (!t || !t.isConnected) { hideTip(); return; }
-    const box = tipBox();
+    const box = lookAttrs(tipBox());
     const text = t.getAttribute('data-agy-tip') || '';
     if (box.textContent !== text) box.textContent = text;
     const bg = solidBg(t);
@@ -1687,6 +1918,7 @@ ${T}{position:fixed; z-index:2147483600; pointer-events:none; box-sizing:border-
         box.parentElement.insertBefore(bar, box);
         fresh = true;
       }
+      lookAttrs(bar);
       if (force || fresh) bar.replaceChildren(...build(paneConvId(box)));
     }
     tipAfterRender();
@@ -1704,6 +1936,21 @@ ${T}{position:fixed; z-index:2147483600; pointer-events:none; box-sizing:border-
   };
   S.render = render;
   const onVisible = () => { if (!hidden() && dirty) { dirty = false; render(); refreshPanel(); } };
+
+  // 换外观：fromFile = 注入程序推过来的 look.json（比页面里记着的新才用）；否则是在 Theme 页里点的，
+  // 记在 S.lookPick 等注入程序读走（见 inject.mjs 的 syncCost）。换完马上重画状态栏和面板（进度条样式、详略会改内容）。
+  S.setLook = (o, fromFile) => {
+    const l = cleanLook({ ...S.look, ...o });
+    if (fromFile) {
+      if (!((l.at || 0) > (S.look.at || 0))) return;
+    } else {
+      l.at = Date.now();
+      S.lookPick = l;
+    }
+    S.look = l;
+    ensure(true);
+    refreshPanel();
+  };
 
   // 每秒检查一次：输入框被重新创建就补上状态栏，切换了对话就重画；每 30 秒重画一次（额度重置时间会变）；
   // 按需查后台对话摘要（子代理是否还在跑，见 S.fetchCascades）

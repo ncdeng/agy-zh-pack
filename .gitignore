@@ -19,3 +19,6 @@ usage-history.json
 originals.json
 launchd.out.log
 launchd.err.log
+
+# 状态栏外观选择（注入程序自动生成），每台机器自己的
+look.json
