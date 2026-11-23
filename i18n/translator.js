@@ -83,7 +83,7 @@ function agyI18n(DICT, RULES) {
 
   // 改了本文件的逻辑就把版本号加 1：已打开的窗口会停掉旧翻译器、换成新的，不用刷新。
   // 版本号相同时只更新词典和规则。
-  const VERSION = 9;
+  const VERSION = 10;
   const existing = window.__agyI18n;
   if (existing && existing.version === VERSION) {
     existing.update(DICT, RULES);
@@ -162,7 +162,8 @@ function agyI18n(DICT, RULES) {
   const origAttr = (inherited && inherited.origAttr) || new WeakMap(); // 元素 → { 属性名: [原文, 译文] }
 
   // 报错信息的英文原文放进父元素的 title（元素自己有 title 时不动）。标记 data-agy-orig，翻译属性时跳过这个 title；
-  // 只认两个词以上的原文，单独的 “Failed” 这类状态词不加。同一个元素里有几段文字时，只有设置它的那段文字能清掉它。
+  // 只认两个词以上的原文，单独的 “Failed” 这类状态词不加。同一个元素里有几段文字时，只有设置它的那段文字能清掉它；
+  // 那段文字被删掉、或被换成别的节点时（v10），在 onMutations 里按 removedNodes 清掉。
   const ERROR_RE = /\b(fail(ed|ure|s)?|errors?|unable|cannot|can't|couldn't|could not|invalid|not found|denied|timed out|exceeded|unexpected)\b/i;
   const ORIG = 'data-agy-orig';
   const origOwner = (inherited && inherited.origOwner) || new WeakMap(); // 元素 → 设置 title 的文字节点
@@ -249,6 +250,8 @@ function agyI18n(DICT, RULES) {
       if (m.type === 'characterData') {
         doText(m.target, false);
       } else if (m.type === 'childList') {
+        // 先处理删掉的：设置原文提示的文字节点没了，提示就过时了（新加的节点是报错的话，下面会重新设置）
+        for (const n of m.removedNodes) if (n.nodeType === 3) markOrig(m.target, null, n);
         for (const n of m.addedNodes) {
           if (n.nodeType === 3) doText(n, false);
           else if (n.nodeType === 1) {
