@@ -1,0 +1,24 @@
+{
+  "command": "node",
+  "args": ["main.mjs"],
+  "env": {
+    "NODE_USE_ENV_PROXY": "1"
+  },
+  "restart_policy": "always",
+  "display_name": "agy-zh",
+  "description": "注入界面汉化和用量状态栏；侧边栏面板显示运行状态、在线更新和版本更新。",
+  "has_web_ui": true,
+  "agent_permissions": {
+    "allows_user_interactions": false
+  },
+  "ui_config": {
+    "display_name": "agy-zh",
+    "views": [
+      {
+        "path": "/",
+        "entrypoint": "SIDECAR_UI_ENTRYPOINT_AUX_PANE",
+        "title": "agy-zh"
+      }
+    ]
+  }
+}

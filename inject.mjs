@@ -20,6 +20,15 @@
 //   不放“启动”文件夹，因为 Windows 会把那里的程序排队延后，开机后约 7 分钟才跑。
 // 停用：删掉计划任务（或“启动”文件夹里的 .vbs），并在任务管理器里结束运行 inject.mjs 的 node.exe。
 //
+// 插件模式（v2.0 起的安装方式）：Antigravity 插件 agy-zh-pack 的 sidecar（sidecars/core/main.mjs）设好环境变量后 import 本脚本，
+//   由 Antigravity 的后台负责启停（Antigravity 开着才运行，退出后约 1～2 秒自动拉起），不再用计划任务 / LaunchAgent。
+//   - AGY_ZH_PLUGIN=1；AGY_ZH_DATA_DIR = 数据目录（~/.gemini/antigravity/plugin_data/agy-zh-pack）。
+//     插件目录更新时会整个换掉，所以账本、历史、外观、在线数据、日志、style.css 都放数据目录；不设就和本脚本同目录（源码运行、v1.x）。
+//   - 端口文件取 Antigravity 给 sidecar 的 AGY_BROWSER_ACTIVE_PORT_FILE。
+//   - 已经有一个注入程序在跑（比如还没卸载的 v1.x）：不退出（退出会被反复拉起），待命，每 20 秒再试一次。
+//   - 没带调试端口启动时不弹通知，由 sidecar 弹框问要不要重开（lib/relaunch.mjs）；Windows 上照旧检查快捷方式参数。
+//   - globalThis.__agyZh：交给 sidecar 的状态和操作（侧边栏面板、更新用），见文件末尾。
+//
 // 测试用环境变量：AGY_PORT_FILE（端口文件路径）、AGY_URL_PREFIX（要注入的页面地址前缀）。
 
 import fs from 'node:fs';
@@ -32,14 +41,17 @@ import { fileURLToPath } from 'node:url';
 const IS_WIN = process.platform === 'win32';
 const IS_MAC = process.platform === 'darwin';
 const DIR = path.dirname(fileURLToPath(import.meta.url));
-const CSS_FILE = path.join(DIR, 'style.css');
-const LOG_FILE = path.join(DIR, 'inject.log');
+const PLUGIN = process.env.AGY_ZH_PLUGIN === '1';
+const DATA = process.env.AGY_ZH_DATA_DIR || DIR; // 数据目录（见文件开头“插件模式”）
+try { fs.mkdirSync(DATA, { recursive: true }); } catch {}
+const CSS_FILE = path.join(DATA, 'style.css');
+const LOG_FILE = path.join(DATA, 'inject.log');
 const DEFAULT_PORT_FILE = IS_WIN
   ? path.join(process.env.APPDATA || '', 'Antigravity', 'DevToolsActivePort')
   : IS_MAC
     ? path.join(os.homedir(), 'Library', 'Application Support', 'Antigravity', 'DevToolsActivePort')
     : path.join(process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config'), 'Antigravity', 'DevToolsActivePort');
-const PORT_FILE = process.env.AGY_PORT_FILE || DEFAULT_PORT_FILE;
+const PORT_FILE = process.env.AGY_PORT_FILE || process.env.AGY_BROWSER_ACTIVE_PORT_FILE || DEFAULT_PORT_FILE;
 const URL_PREFIX = process.env.AGY_URL_PREFIX || 'https://127.0.0.1:';
 const PIPE_UID = typeof process.getuid === 'function' ? process.getuid() : 'user';
 const PIPE = IS_WIN
@@ -57,11 +69,14 @@ function log(msg) {
 
 // ---------- 单实例：占用命名管道（Windows）或 Unix Socket（macOS/Linux），占不到说明已有实例在跑 ----------
 const lock = net.createServer();
+let lockHeld = false;
+let lockServer = null; // 实际占着锁的 server
 function onListening() {
-  log(`started pid=${process.pid} platform=${process.platform} v${PACK_VERSION}`);
+  lockHeld = true;
+  log(`started pid=${process.pid} platform=${process.platform} v${PACK_VERSION}` + (PLUGIN ? ' (plugin)' : ''));
   if (!IS_WIN) {
     const cleanup = () => {
-      try { lock.close(); } catch {}
+      try { if (lockServer) lockServer.close(); } catch {}
       try { fs.rmSync(PIPE, { force: true }); } catch {}
       process.exit(0);
     };
@@ -70,9 +85,32 @@ function onListening() {
   }
   main();
 }
-if (IS_WIN) {
+// 插件模式拿锁：拿到就开始工作；已有注入程序在跑（比如还没卸载的 v1.x）就待命再试：头 30 秒每 2 秒试一次，以后每 20 秒。
+// 头 30 秒试得勤，是因为 Antigravity 重启 sidecar（改了 sidecar.json、插件更新）时会先拉起新的、再结束旧的，
+// 新的启动时锁还在旧的手里（11-22 Windows 实测），原来要等 20 秒才接上。
+// 不能退出：Antigravity 会把退出的 sidecar 反复拉起。macOS / Linux 上套接字文件还在但没人听（上次没清掉）就删掉重来。
+let standbyLogged = false;
+const acquireStart = Date.now();
+function acquire() {
+  const l = net.createServer();
+  const retry = () => {
+    if (!standbyLogged) { standbyLogged = true; log(`another injector is running, standing by (pid=${process.pid})`); }
+    setTimeout(acquire, Date.now() - acquireStart < 30000 ? 2000 : 20000);
+  };
+  l.on('error', (err) => {
+    l.close();
+    if (IS_WIN || err.code !== 'EADDRINUSE') { retry(); return; }
+    const probe = net.createConnection(PIPE);
+    probe.once('connect', () => { probe.destroy(); retry(); });
+    probe.once('error', () => { try { fs.rmSync(PIPE, { force: true }); } catch {} setTimeout(acquire, 1000); });
+  });
+  l.listen(PIPE, () => { lockServer = l; onListening(); });
+}
+if (PLUGIN) {
+  acquire();
+} else if (IS_WIN) {
   lock.on('error', () => process.exit(0));
-  lock.listen(PIPE, onListening);
+  lock.listen(PIPE, () => { lockServer = lock; onListening(); });
 } else {
   let retried = false;
   lock.on('error', (err) => {
@@ -83,7 +121,7 @@ if (IS_WIN) {
       probe.once('error', (pe) => {
         if (pe.code === 'ECONNREFUSED' || pe.code === 'ENOENT') {
           try { fs.rmSync(PIPE, { force: true }); } catch {}
-          lock.listen(PIPE, onListening);
+          lock.listen(PIPE, () => { lockServer = lock; onListening(); });
         } else {
           process.exit(0);
         }
@@ -92,7 +130,7 @@ if (IS_WIN) {
     }
     process.exit(0);
   });
-  lock.listen(PIPE, onListening);
+  lock.listen(PIPE, () => { lockServer = lock; onListening(); });
 }
 
 // ---------- 要注入的文件：样式 + 汉化（词典、规则、翻译器） ----------
@@ -119,7 +157,7 @@ function barConfig() {
 // 用户在每日用量面板的 Theme 页里选，页面记在 window.__agyStats.lookPick（页面的本地存储按端口分开，每次启动都换端口，存不住）；
 // 注入程序每 30 秒读回来存进这个文件，再推给其他窗口（S.setLook(look, true)）；新注入时通过 CFG.look 交给状态栏。
 // 选项的取值由状态栏校验（cleanLook），这里只挑出这几个字段、限制长度。
-const LOOK_FILE = path.join(DIR, 'look.json');
+const LOOK_FILE = path.join(DATA, 'look.json');
 let lookCache;
 function readLook() {
   if (lookCache === undefined) {
@@ -147,7 +185,7 @@ function saveLook(pick) {
 // 页面的本地存储按端口分开，Antigravity 每次启动都换端口，存在页面里的账本会丢；后台重启后对话摘要里也只剩打开过的对话。
 // 所以注入程序每 30 秒把页面里的账本读出来，合并进同目录的 cost-day.json（同一个对话取较大的数，换了一天就清空），
 // 注入时再交给状态栏。只存对话 ID、金额和按模型的调用数、token 数（det，2026-11-20 加）。
-const COST_FILE = path.join(DIR, 'cost-day.json');
+const COST_FILE = path.join(DATA, 'cost-day.json');
 const COST_SYNC_MS = 30000;
 const dayName = () => {
   const d = new Date();
@@ -292,7 +330,7 @@ async function syncCost() {
 //   models：{ 价目名: [美元, 调用数, 输入, 缓存读, 缓存写, 输出] }，由当天账本的 det 合计而来；
 //   quota：{ 桶 ID: { n 组名, w 窗口, l 最近一次的已用比例, u 当天用掉的（只累计上涨）, m 当天最高, r 重置时间（毫秒） } }，比例 0～1。
 // 状态栏的每日用量面板显示 u。（v1.4.0 的格式是 f 起点 / a 已累计，u = a + l − f；见 migrateQuota。）
-const HISTORY_FILE = path.join(DIR, 'usage-history.json');
+const HISTORY_FILE = path.join(DATA, 'usage-history.json');
 const HISTORY_KEEP_DAYS = 90;
 const HISTORY_PUSH_DAYS = 31;
 let history = null;
@@ -484,7 +522,7 @@ function recentHistory() {
 // quota-samples.json：{ v: 1, a: { 账号键: [[时间毫秒, 桶 ID, 已用比例, 重置时间毫秒], …] } }，每个账号留最近 8 天。
 // 页面大约每 3 分钟查一次额度，每查到一次（时间戳变了）记一笔，只记每周额度。用来算最近 24 小时的用量速度（预估用）。
 // 每天的历史只有“当天用掉多少”，看不出一天里什么时候用的，所以另记这个。
-const SAMPLES_FILE = path.join(DIR, 'quota-samples.json');
+const SAMPLES_FILE = path.join(DATA, 'quota-samples.json');
 const SAMPLES_KEEP_MS = 8 * 86400e3;
 let samples = null;
 let samplesAt = {};
@@ -714,7 +752,7 @@ function loadAssets() {
       continue;
     }
     try {
-      const text = fs.readFileSync(file, 'utf8').replace(/^﻿/, ''); // 去掉 UTF-8 BOM
+      const text = fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, ''); // 去掉 UTF-8 BOM
       assets[key] = JSON_KEYS.has(key) ? JSON.parse(text) : text;
     } catch (e) {
       log(`read ${path.basename(file)} failed: ${e.message}`);
@@ -768,8 +806,8 @@ function pageScript() {
 // - Theme 页的 updates 选 off（look.json 的 online = 'off'）：不再联网，也不用 remote/ 里存的，只用安装包自带的。
 // - 换了版本（安装了新的安装包）以后，remote/ 里存的词典和规则先不用，等下一次取到再用（新安装包里的可能更新）。
 // - 测试：环境变量 AGY_REMOTE_BASE 换成别的地址（例如本机起的 http://127.0.0.1:端口/），只试这一个地址。
-const PACK_VERSION = '1.7.0';
-const REMOTE_DIR = path.join(DIR, 'remote');
+const PACK_VERSION = '2.0.0';
+const REMOTE_DIR = path.join(DATA, 'remote');
 const REMOTE_STATE = path.join(REMOTE_DIR, 'state.json');
 const REMOTE_BASES = process.env.AGY_REMOTE_BASE ? [process.env.AGY_REMOTE_BASE] : [
   'https://cdn.jsdelivr.net/gh/ncdeng/agy-zh-pack@main/',
@@ -839,6 +877,7 @@ function checkMeta(o) {
   return { latest: o.latest, date: DAY_RE.test(String(o.date)) ? o.date : '' };
 }
 const REMOTE_CHECK = { dict: checkDict, rules: checkRules, prices: checkPrices, meta: checkMeta };
+const WITH_SCHEMA = new Set(['prices', 'meta']); // 这两种文件要求 schema: 1
 const remoteFile = (rel) => path.join(REMOTE_DIR, path.basename(rel));
 function saveRemoteState() {
   try { fs.mkdirSync(REMOTE_DIR, { recursive: true }); fs.writeFileSync(REMOTE_STATE, JSON.stringify(remote.state)); } catch (e) { log(`write remote state failed: ${e.message}`); }
@@ -851,7 +890,12 @@ function loadRemoteCache() {
   for (const [key, rel] of REMOTE_FILES) {
     remote[key] = null;
     if (!samePack && (key === 'dict' || key === 'rules')) continue;
-    try { remote[key] = REMOTE_CHECK[key](JSON.parse(fs.readFileSync(remoteFile(rel), 'utf8'))); } catch {}
+    try {
+      const o = JSON.parse(fs.readFileSync(remoteFile(rel), 'utf8'));
+      // v1.7.0～2.0.0 测试版存的是校验后的对象，没带 schema，重启后校验不过、价格表退回内置的（11-22 修）。旧缓存补上再校验
+      if (isObj(o) && o.schema === undefined && WITH_SCHEMA.has(key)) o.schema = 1;
+      remote[key] = REMOTE_CHECK[key](o);
+    } catch {}
   }
   mergedCache = null;
   const st = remote.state;
@@ -890,7 +934,8 @@ function remoteForPage() {
     },
   };
 }
-// 在页面里取一个文件，返回文字；取不到抛错
+// 在页面里取一个文件，返回文字；取不到抛错。除了在线更新的词典/价格（都是小 JSON），代码更新下载插件文件也走这里，
+// 所以上限和 lib/update.mjs 的 MAX_FILE 一样（字符数不会超过字节数，清单里合法的 UTF-8 文本文件都取得回来）
 async function pageFetch(sess, url) {
   const expr = `(async () => {
     const c = new AbortController();
@@ -899,7 +944,7 @@ async function pageFetch(sess, url) {
       const r = await fetch(${JSON.stringify(url)}, { cache: 'no-cache', credentials: 'omit', referrerPolicy: 'no-referrer', signal: c.signal });
       if (!r.ok) return JSON.stringify({ s: r.status });
       const text = await r.text();
-      return JSON.stringify({ s: r.status, text: text.length > 2000000 ? null : text });
+      return JSON.stringify({ s: r.status, text: text.length > 5 * 1024 * 1024 ? null : text });
     } catch (e) { return JSON.stringify({ s: 0, e: String((e && e.message) || e).slice(0, 120) }); }
     finally { clearTimeout(t); }
   })()`;
@@ -936,12 +981,12 @@ async function checkRemote() {
     for (const [key, rel] of REMOTE_FILES) {
       if (typeof got[key] !== 'string') continue;
       let val;
-      try { val = REMOTE_CHECK[key](JSON.parse(got[key].replace(/^﻿/, ''))); }
+      try { val = REMOTE_CHECK[key](JSON.parse(got[key].replace(/^\uFEFF/, ''))); }
       catch (e) { problems.push(`${key} rejected: ${e.message}`); continue; }
       if (JSON.stringify(val) === JSON.stringify(remote[key])) continue;
       remote[key] = val;
       fs.mkdirSync(REMOTE_DIR, { recursive: true });
-      fs.writeFileSync(remoteFile(rel), JSON.stringify(val));
+      fs.writeFileSync(remoteFile(rel), JSON.stringify(WITH_SCHEMA.has(key) ? { schema: 1, ...val } : val)); // 带上 schema，下次启动读缓存时校验得过
       changed.push(key);
     }
     Object.assign(st, { okAt: Date.now(), host: base, err: problems.join('; ').slice(0, 300), pack: PACK_VERSION });
@@ -1094,7 +1139,7 @@ function watchDebugPortMac() {
 }
 function watchDebugPort() {
   if (process.env.AGY_PORT_FILE || watching || Date.now() - watchAt < WATCH_MS) return;
-  if (IS_MAC) { watchDebugPortMac(); return; }
+  if (IS_MAC) { if (!PLUGIN) watchDebugPortMac(); return; }
   if (!IS_WIN || !fs.existsSync(PORT_SCRIPT)) return;
   const running = fs.existsSync(LOCK_FILE);
   if (running !== agySeen) { agySeen = running; log(running ? 'Antigravity lockfile present, debug-port watch on' : 'Antigravity not running (no lockfile), debug-port watch paused'); }
@@ -1109,7 +1154,7 @@ function watchDebugPort() {
     if (added.length) log(`shortcut flag re-added: ${added.join(' | ')}`);
     for (const l of lines) {
       const m = /^nodebug=(\d+)$/.exec(l);
-      if (!m || notified.has(m[1])) continue;
+      if (PLUGIN || !m || notified.has(m[1])) continue; // 插件模式：由 sidecar 弹框（lib/relaunch.mjs）
       notified.add(m[1]);
       log(`Antigravity pid=${m[1]} was started without --remote-debugging-port, showing a notification`);
       spawn('powershell.exe', psArgs('-Mode', 'notify', '-Title', 'Antigravity 汉化暂时没生效',
@@ -1117,6 +1162,13 @@ function watchDebugPort() {
       { detached: true, stdio: 'ignore', windowsHide: true }).unref();
     }
   });
+}
+
+// 调试端口的情况：ok 能连上；since 这个状态从什么时候开始（给侧边栏面板和“没带调试端口就问要不要重开”用）
+const portState = { ok: null, since: Date.now(), okAt: 0 };
+function portSeen(ok) {
+  if (ok) portState.okAt = Date.now();
+  if (ok !== portState.ok) { portState.ok = ok; portState.since = Date.now(); }
 }
 
 // ---------- 主循环 ----------
@@ -1135,14 +1187,15 @@ async function tick() {
   let port;
   try {
     port = fs.readFileSync(PORT_FILE, 'utf8').split(/\r?\n/)[0].trim();
-  } catch { watchDebugPort(); return; } // 应用没在运行，或这次启动没带调试端口参数
-  if (!/^\d+$/.test(port)) return;
+  } catch { portSeen(false); watchDebugPort(); return; } // 应用没在运行，或这次启动没带调试端口参数
+  if (!/^\d+$/.test(port)) { portSeen(false); return; }
 
   let targets;
   try {
     const res = await fetch(`http://127.0.0.1:${port}/json/list`, { signal: AbortSignal.timeout(1500) });
     targets = await res.json();
-  } catch { watchDebugPort(); return; } // 端口文件是旧的，应用已退出
+  } catch { portSeen(false); watchDebugPort(); return; } // 端口文件是旧的，应用已退出
+  portSeen(true);
 
   for (const t of targets) {
     if (t.type !== 'page' || !t.url.startsWith(URL_PREFIX) || sessions.has(t.id)) continue;
@@ -1160,3 +1213,36 @@ function main() {
   };
   loop();
 }
+
+// ---------- 交给插件 sidecar 的状态和操作（v2.0） ----------
+// sidecar（sidecars/core/main.mjs）和本脚本在同一个进程里；侧边栏面板、在线更新、代码更新都通过这里拿状态、做操作。
+globalThis.__agyZh = {
+  version: PACK_VERSION,
+  dataDir: DATA,
+  log,
+  status: () => ({
+    version: PACK_VERSION, plugin: PLUGIN, lockHeld, pid: process.pid,
+    windows: sessions.size, port: { ...portState, file: PORT_FILE },
+    online: onlineOn(), remote: remoteForPage(),
+    i18n: !!assets.dict, statusbar: !!assets.statusbar, style: !!assets.css,
+  }),
+  // 在线更新：马上查一次
+  checkRemoteNow: () => { remoteNextAt = 0; },
+  // 在线更新开关（和 Theme 页的 updates 一样，存在 look.json）
+  setOnline: (on) => {
+    const l = readLook() || {};
+    if ((l.online !== 'off') === !!on) return;
+    saveLook({ ...l, online: on ? 'auto' : 'off', at: Date.now() });
+    mergedCache = null;
+    if (on) remoteNextAt = Date.now() + 1000;
+    for (const s of sessions.values()) apply(s).catch(() => {});
+  },
+  // 从 Antigravity 页面里取一个文件（走 Antigravity 的网络和代理）；没有连上的窗口时抛错
+  fetchText: async (url) => {
+    const sess = [...sessions.values()].find((x) => x.ws && x.ws.readyState === 1 && x.scriptId);
+    if (!sess) throw Error('no Antigravity window connected');
+    return pageFetch(sess, url);
+  },
+  remoteBases: () => REMOTE_BASES.slice(),
+  lastGoodBase: () => (remote.state && remote.state.host) || '',
+};

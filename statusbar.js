@@ -1452,10 +1452,11 @@ function agyStatusBar(CFG) {
     panel.onmouseleave = () => { card.hidden = true; owner = null; };
   };
 
-  const renderPanel = (panel) => {
+  // refresh：定时刷新（每 30 秒、在线更新推过来时），不是用户点的
+  const renderPanel = (panel, refresh) => {
     lookAttrs(panel);
     if (S.panelView === 'look') { renderLook(panel); return; }
-    if (S.panelView === 'calls') { renderCalls(panel); return; }
+    if (S.panelView === 'calls') { renderCalls(panel, refresh); return; }
     const n = S.panelDays;
     const recs = lastDays(n).map((nm) => ({ nm, r: dayRecord(nm) }));
     const tips = new WeakMap();
@@ -1781,9 +1782,14 @@ function agyStatusBar(CFG) {
     if (sub) return '↳ ' + (sub.typeName || 'subagent') + (sub.role ? ' · ' + sub.role : '');
     return title || id.slice(0, 8);
   };
-  const renderCalls = (panel) => {
-    panel.replaceChildren();
+  // 11-22 用户反馈：有对话在跑时，开着明细每 30 秒闪一次——原来每次刷新都清空面板、显示 loading、重新取完再画，
+  // 在跑的对话每次都要重取，表格会消失一会儿，滚动位置也回到顶部。现在定时刷新时表格留着，后台重新取，
+  // 取完和上次比，有变化才换表格内容；换的时候保持滚动位置（看着的那几行不动，新调用加在上面）。取失败就保留旧的。
+  const renderCalls = (panel, refresh) => {
     const nm = S.callsDay || dayName();
+    if (refresh && panel.dataset.calls === nm && S.callsReload) { S.callsReload(); return; }
+    panel.replaceChildren();
+    panel.dataset.calls = nm;
     const lb = dayLabel(nm);
     const head = el('div', 'p-head');
     const back = el('button', 'p-btn', '← usage');
@@ -1802,8 +1808,13 @@ function agyStatusBar(CFG) {
     panel.append(wrap);
     const note = el('div', 'p-note');
     panel.append(note);
+    let sig = '';
     const draw = (res) => {
       const rows = res.rows;
+      // 指纹：调用数、每次调用的时间和 token、耗时；没变化就不动表格
+      const nsig = rows.length + '|' + res.failed + '|' + rows.slice(0, 600).map((r) => r.at + ':' + (+r.usage.outputTokens || 0) + ':' + (+r.usage.inputTokens || 0) + ':' + r.stream).join(',');
+      if (nsig === sig) return;
+      sig = nsig;
       const usdOf = (r) => { const cc = callCost(r.usage, callNames(r.resp, r.key, r.exec), r.at); return cc ? cc : { usd: null }; };
       // 合计按这一天的全部调用算；表格只画最新的 MAX 次
       let total = 0, priced = 0;
@@ -1841,7 +1852,11 @@ function agyStatusBar(CFG) {
         tbody.append(tr);
       }
       table.append(thead, tbody);
+      const old = wrap.querySelector('table');
+      const keep = old ? { top: wrap.scrollTop, h: wrap.scrollHeight } : null;
       wrap.replaceChildren(table);
+      // 往下翻过时保持看着的那几行不动（新调用加在最上面，表格变高多少就往下挪多少）；在顶部就留在顶部看最新的
+      if (keep && keep.top > 0) wrap.scrollTop = keep.top + (wrap.scrollHeight - keep.h);
       sum.textContent = rows.length + ' calls · ' + fmtUsd(total);
       status.textContent = rows.length ? '' : 'no calls found for this day';
       status.hidden = !!rows.length;
@@ -1853,9 +1868,17 @@ function agyStatusBar(CFG) {
     };
     const key = nm;
     S.callsKey = key;
-    S.loadCalls(nm, (d, n) => { if (S.callsKey === key && n > 1) status.textContent = 'loading ' + d + '/' + n + ' conversations…'; })
-      .then((res) => { if (S.callsKey === key && panel.isConnected && S.panelView === 'calls') draw(res); })
-      .catch((e) => { status.textContent = 'failed: ' + e.message; });
+    let busy = false;
+    const load = (first) => {
+      if (busy) return;
+      busy = true;
+      S.loadCalls(nm, first ? (d, n) => { if (S.callsKey === key && n > 1) status.textContent = 'loading ' + d + '/' + n + ' conversations…'; } : null)
+        .then((res) => { if (S.callsKey === key && panel.isConnected && S.panelView === 'calls') draw(res); })
+        .catch((e) => { if (first) status.textContent = 'failed: ' + e.message; })
+        .then(() => { busy = false; });
+    };
+    S.callsReload = () => load(false);
+    load(true);
   };
   // Theme 页（2026-11-22 加）：上面是配色画廊，每张卡片是当前状态栏的实时副本（套上那套配色和当前外形），点一下就换；
   // 下面是外形、进度条、信息密度、图标。选了马上生效，注入程序 30 秒内存进 look.json 并推给其他窗口。
@@ -2029,7 +2052,9 @@ function agyStatusBar(CFG) {
     const p = document.querySelector(P);
     if (!p) return;
     placePanel(p);
-    try { renderPanel(p); } catch (e) { p.textContent = 'usage panel error: ' + e.message; }
+    const top = p.scrollTop;
+    try { renderPanel(p, true); } catch (e) { p.textContent = 'usage panel error: ' + e.message; }
+    if (top && S.panelView !== 'calls') p.scrollTop = top; // 定时刷新后保持原来的滚动位置
     tipAfterRender();
   };
 
@@ -2138,9 +2163,18 @@ function agyStatusBar(CFG) {
     const c = S.subSteps.get(id) || { next: -1, busy: false, at: 0, final: false };
     S.subSteps.set(id, c);
     if (c.busy) return;
+    // 跑完后的最后一次没取成：撤掉 final，让 pollSubs 1.5 秒后再取。请求失败最多算 3 次；
+    // 调用元数据还没到不算失败次数，只是等，从第一次取算起最多等 60 秒
+    const retryFinal = (failed) => {
+      c.at = Date.now();
+      if (!c.final) return;
+      c.finalSince = c.finalSince || c.at;
+      if (failed) c.fails = (c.fails || 0) + 1;
+      if ((c.fails || 0) < 3 && c.at - c.finalSince < 60000) c.final = false;
+    };
     if (c.next < 0) {
       const cl = S.costs.get(id);
-      if (!cl || !cl.at) { if (!cl) S.fetchCost(id); return; }
+      if (!cl || !cl.at) { if (!cl) S.fetchCost(id); retryFinal(false); return; }
       const lastStep = cl.list.reduce((m, x) => (x && x.step >= 0 && x.step > m ? x.step : m), 0);
       c.next = Math.max(0, lastStep - 8);
     }
@@ -2149,12 +2183,13 @@ function agyStatusBar(CFG) {
     const from = c.next;
     lsCall('GetCascadeTrajectorySteps', { cascadeId: id, stepOffset: from })
       .then((j) => {
+        if (!j) retryFinal(true);
         const steps = (j && Array.isArray(j.steps)) ? j.steps : [];
         if (steps.length) {
           takeSteps({ stepsUpdate: { steps, indices: steps.map((_, i) => from + i), totalLength: from + steps.length } }, id);
           c.next = Math.max(from, from + steps.length - 2); // 最后两步可能还在变，下次重取
+          S.render(); // 没取到新步骤就不重画
         }
-        S.render();
       })
       .then(() => { c.busy = false; }, () => { c.busy = false; });
   };
@@ -2170,8 +2205,11 @@ function agyStatusBar(CFG) {
       const root = rootOf(id);
       if (!roots.has(root)) continue;
       const c = S.subSteps.get(id);
-      if (subRunning(id, root)) { if (!c || now - c.at > 3000) S.fetchSubSteps(id); }
-      else if (c && !c.final && now - c.at > 1500) { c.final = true; S.fetchSubSteps(id); }
+      if (subRunning(id, root)) {
+        if (c && c.final) { c.final = false; c.fails = 0; c.finalSince = 0; } // 同一个子代理又开始跑了：跑完后要重新补取最后几步
+        if (!c || now - c.at > 3000) S.fetchSubSteps(id);
+      }
+      else if (c && !c.final && !c.busy && now - c.at > 1500) { c.final = true; S.fetchSubSteps(id); }
     }
   };
   // 子代理的上下文：它的状态流不在时没有 contextWindowUsage，按最近一次调用发给模型的 token 估算；
@@ -2209,7 +2247,9 @@ function agyStatusBar(CFG) {
     const cs = ctxSeg(ctx, smu, sconv.compactions);
     if (cs && ctx && ctx.est) cs.setAttribute('data-agy-tip', cs.getAttribute('data-agy-tip') + '\n\n（估算：按这个子代理最近一次调用发给模型的 token，上限取同一模型在别的对话里的上限）');
     // 花费只要这个子代理自己的；“今天花费”那一项主代理的行上已经有了（11-22 子代理行上重复出现过）
-    const row = [name, ms, cs, cacheSeg(smu), ...safeCost(smd, [id]).filter((g) => !g.classList.contains('p-open'))];
+    // 固定 6 列：名字、模型、上下文、缓存、花费、状态；没有的那列是 null，build 里换成占位，各行才能按列对齐（见 alignCols）
+    const own = safeCost(smd, [id]).filter((g) => !g.classList.contains('p-open'));
+    const row = [name, ms || null, cs || null, cacheSeg(smu) || null, own[0] || null];
     const v = actView(id);
     const meta = S.casMeta.get(id);
     const startAt = (meta && meta.created) || (v && v.firstAt) || 0;
@@ -2220,6 +2260,8 @@ function agyStatusBar(CFG) {
           '这个子代理正在：' + curText(v) + '（第 ' + (v.curK + 1) + ' 步' + (waiting ? '，在等你批准' : '') + '）' +
           (startAt ? '\n已经跑了 ' + fmtDur(Date.now() - startAt) : '') + '\n\n最近几步：\n' + timeline(v));
         g.classList.add('sst');
+        const tx = !waiting && startAt ? g.querySelector('.tx') : null;
+        if (tx) tx.dataset.agyT0 = String(startAt); // 每秒的 tickClocks 只改这一格的文字
         row.push(g);
       } else row.push(runSeg('running'));
     } else {
@@ -2229,7 +2271,7 @@ function agyStatusBar(CFG) {
       g.classList.add('sst');
       row.push(g);
     }
-    return row.filter(Boolean);
+    return row;
   };
   const quotaPieces = (key) => {
     const qs = quotaSegs(key);
@@ -2291,14 +2333,23 @@ function agyStatusBar(CFG) {
     subs.sort((a, b) => (b.running - a.running) || ((b.ag.lastAt || 0) - (a.ag.lastAt || 0)));
     const shownSubs = subs.slice(0, MAX_SUBS);
     const more = subs.length - shownSubs.length;
-    const subRows = shownSubs.map(({ id, info }, i) => subRow(id, info, root, i === shownSubs.length - 1 && !more));
+    // 各行按列对齐（11-22 用户要求）：所有行都没有的列去掉；某行缺的列放一个空的占位项（不画分隔竖线），
+    // 每项标上列号 data-col，画完后 alignCols 把同一列设成一样宽
+    const subCells = shownSubs.map(({ id, info }, i) => subRow(id, info, root, i === shownSubs.length - 1 && !more));
+    const hasCol = subCells.length ? subCells[0].map((_, c) => subCells.some((r) => r[c])) : [];
+    const subRows = subCells.map((r) => r.map((g, c) => {
+      if (!hasCol[c]) return null;
+      const x = g || el('span', 'seg ph');
+      x.dataset.col = c;
+      return x;
+    }).filter(Boolean));
     if (more > 0) {
       const m = seg('muted', '', ['+' + more + ' more subagents']);
       m.prepend(el('span', 'tree', '└'));
       subRows.push([m]);
     }
 
-    S.actShown = subRows.length > 0; // 子代理行里有在走的用时，每秒重画
+    S.actShown = subRows.length > 0; // 子代理行里有在走的用时：每秒改用时的文字，每 5 秒整条重画
     const lines = toLines([line1, line2]).concat(toLines(subRows, 'sub'));
     // fetch 包装晚到（注入器在窗口打开很久后才连上，没有自动刷新）：用量不生效，提示手动刷新
     if (S.early === false) {
@@ -2416,6 +2467,10 @@ ${B} .seg.sst{flex:1 1 0; min-width:0; max-width:max-content; overflow:hidden}
 ${B} .seg.sst > *{flex-shrink:0}
 ${B}[data-skin="plain"] .seg.sst{margin-left:.55em; padding-left:1.05em}
 ${B}[data-skin="plain"] .seg.sst::before{left:0}
+/* 子代理行按列对齐（见 alignCols）：最小宽度按边框盒算；占位项不画分隔竖线和底色 */
+${B} .ln.sub > .seg[data-col]{box-sizing:border-box}
+${B} .ln.sub > .seg.ph::before{visibility:hidden}
+${B} .ln.sub > .seg.ph{background:none; clip-path:none}
 /* 子代理行开头的树形线 ├ └ */
 ${B} .tree{color:var(--k-muted); margin-right:.4em; font-weight:400; opacity:.8}
 ${B} .gap{display:inline-block; width:.5em}
@@ -2655,10 +2710,50 @@ ${T}{position:fixed; z-index:2147483600; pointer-events:none; box-sizing:border-
     };
   };
 
+  // 子代理行按列对齐：同一列（data-col）的项取最宽那项的宽度做最小宽度。最后一列（状态）按 0 宽排、会被截短，不参与。
+  // 先全部清掉、再一起量、最后一起设，只触发一次排版。窗格隐藏时量出来是 0，等于不对齐，下次重画再对。
+  // 量宽度要等浏览器排版（实测每次约 3 毫秒，占整次重画的一半多），所以按内容缓存：
+  // 各列的文字、外观设置、缩放、字体加载状态都没变时，直接用上次量出的宽度，不再量。
+  // 缓存最多用 30 秒：图标字体晚到等签名看不出来的变化，最晚 30 秒后也会重新量。
+  const alignCols = (bar) => {
+    const lines = bar.querySelectorAll('.ln.sub');
+    if (lines.length < 2) { bar._agyAlign = null; return; }
+    const cols = new Map();
+    let sig = JSON.stringify(S.look) + '|' + devicePixelRatio + '|' + document.fonts.status + '|' + document.fonts.size;
+    for (const l of lines) {
+      for (const g of l.children) {
+        const c = g.dataset.col;
+        if (c === undefined || g.classList.contains('sst') || g.classList.contains('k-run')) continue;
+        if (!cols.has(c)) cols.set(c, []);
+        cols.get(c).push(g);
+        sig += '\n' + c + ':' + g.className + ':' + g.textContent;
+      }
+    }
+    const old = bar._agyAlign;
+    let widths = old && old.sig === sig && Date.now() - old.at < 30000 ? old.widths : null;
+    if (!widths) {
+      for (const gs of cols.values()) for (const g of gs) g.style.minWidth = '';
+      widths = [...cols.values()].map((gs) => Math.max(...gs.map((g) => g.getBoundingClientRect().width)));
+      bar._agyAlign = widths.every((w) => w > 0) ? { sig, widths, at: Date.now() } : null; // 窗格隐藏时量出来是 0，不记
+    }
+    [...cols.values()].forEach((gs, i) => { if (widths[i] > 0) gs.forEach((g) => { g.style.minWidth = widths[i] + 'px'; }); });
+  };
+  // 子代理在跑时每秒调一次：只改用时那几个字，不重画整条（整条重画每次约 6 毫秒）
+  const tickClocks = () => {
+    const now = Date.now();
+    for (const e of document.querySelectorAll(B + ' [data-agy-t0]')) {
+      const t = fmtDur(now - Number(e.dataset.agyT0));
+      if (e.textContent !== t) e.textContent = t;
+    }
+  };
+
   // 保证每个输入框上方都有状态栏；force 时重画内容
+  // S.actShown（有子代理行）按所有窗格合起来算：build 只写自己窗格的，多个窗格时不能让最后一个说了算（11-23 审查发现）
   const ensure = (force) => {
     if (!document.body) return;
     if (!style.isConnected) (document.head || document.documentElement).appendChild(style);
+    const prevAct = S.actShown;
+    let act = false;
     for (const box of document.querySelectorAll('[data-testid="agent-input-box"]')) {
       let bar = box.previousElementSibling;
       let fresh = false;
@@ -2670,8 +2765,14 @@ ${T}{position:fixed; z-index:2147483600; pointer-events:none; box-sizing:border-
         fresh = true;
       }
       lookAttrs(bar);
-      if (force || fresh) bar.replaceChildren(...build(paneConvId(box)));
+      if (force || fresh) {
+        S.actShown = false;
+        bar.replaceChildren(...build(paneConvId(box)));
+        alignCols(bar);
+        act = act || S.actShown;
+      }
     }
+    S.actShown = force ? act : prevAct || act; // 没重画的窗格沿用原来的
     tipAfterRender();
   };
   // 2026-11-20：窗口在后台（最小化或被别的窗口挡住）时不重画，记一笔，回到前台再画一次；
@@ -2745,8 +2846,9 @@ ${T}{position:fixed; z-index:2147483600; pointer-events:none; box-sizing:border-
       const nowSel = selectedLabel();
       if (location.pathname !== path) { path = location.pathname; S.navAt = Date.now(); sel = nowSel; ensure(true); }
       else if (hidden()) { if (ticks % 30 === 0) dirty = true; ensure(false); } // 后台：只保证状态栏还在，回到前台再重画
-      else if (nowSel !== sel || ticks % 30 === 0 || S.actShown) { sel = nowSel; ensure(true); } // 换了模型也重画；活动行在显示时每秒重画（用时在走）
-      else ensure(false);
+      // 换了模型、每 30 秒、子代理行在显示时每 5 秒（跑完的行到时间要收起）整条重画；其余的秒里子代理的用时只改文字
+      else if (nowSel !== sel || ticks % 30 === 0 || (S.actShown && ticks % 5 === 0)) { sel = nowSel; ensure(true); }
+      else { tickClocks(); ensure(false); } // 页面上没有在走的用时就什么都不改
       if (ticks % 30 === 0 && !hidden()) refreshPanel(); // 面板开着时每 30 秒刷新一次（注入程序也是每 30 秒推一次历史）
     }, 1000);
     render();

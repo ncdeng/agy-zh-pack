@@ -1,78 +1,68 @@
-// Antigravity 中文美化包：安装 / 卸载 / 配色开关脚本。
-// 由“一键安装.cmd / 一键卸载.cmd / 配色开关.cmd”调用：
-//   node.exe setup.mjs install
-//   node.exe setup.mjs uninstall
-//   node.exe setup.mjs theme
+// agy-zh：Antigravity 中文插件（v2.0 起是 Antigravity 插件）：安装 / 卸载 / 配色开关。
+// Windows 由“一键安装.cmd / 一键卸载.cmd / 配色开关.cmd”调用，macOS 由同名的 .command 调用；都用 Antigravity 自带的 Node 运行
+// （Antigravity.exe / Antigravity 设 ELECTRON_RUN_AS_NODE=1），不用另装 Node.js：
+//   setup.mjs install | uninstall | theme
 //
 // 安装做的事（缩放、字体、对比度一律不改；配色只在用户选择时才改）：
-//   1. 把注入器、汉化、状态栏文件复制到 %LOCALAPPDATA%\AgyZhPack\；
-//   2. 开机自启：建一个登录时触发的计划任务 AgyZhPack（当前用户、普通权限），运行安装目录里的
-//      agy-zh-pack.vbs，在后台隐藏启动注入器。不用“启动”文件夹，因为 Windows 会把那里的程序延后约 7 分钟，
-//      这段时间打开的 Antigravity 是英文的；计划任务建不了时才退回“启动”文件夹；
-//   3. 给 Antigravity 的快捷方式（开始菜单、桌面、任务栏固定）加上启动参数 --remote-debugging-port=0
-//      （debug-port.ps1）。Antigravity 2.33.0 起不带这个参数就不开调试端口，注入器连不上；
-//   4. 问用户要不要用作者的配色（默认不用）。要换颜色时才请用户关闭 Antigravity，原值记进 originals.json；
-//   5. 立即启动注入器。Antigravity 开着就提示按 Ctrl+R 刷新（开着但没带调试端口参数的，问过用户后重开一次），
-//      没开（或刚为换配色关掉）就带参数打开它。
-// 卸载时把快捷方式上的参数去掉。
-// 2026-11-09～11-20 还有“解锁 512K 上下文”（安装时问一次，存在 AgyZhPack\config.json，用“上下文开关.cmd”改）。
-// 11-20 实测官方默认已经提高（Gemini 512K、Claude Opus 5.5 840K），再解锁反而压低 Claude，所以删掉了；
-// 升级安装时删掉旧的 config.json（见 OBSOLETE）。
-// 配色开关（theme）改 Antigravity 自己的设置文件，只能在它关闭时改，所以会提示关闭、改完再打开。
+//   1. 核对安装包：按 plugin-manifest.json 校验作者签名和每个文件的 sha256。
+//   2. Antigravity 开着但这次没带调试端口参数：问过用户后先关掉，装完再带参数打开。
+//   3. 从 v1.x 迁移：停掉旧的注入程序，删掉开机自启（Windows 计划任务 AgyZhPack / “启动”文件夹，macOS LaunchAgent），
+//      把账本、用量历史、外观、额度读数、配色原值、style.css 搬到新的数据目录，删掉旧的安装目录（Windows）。
+//   4. 把插件文件复制到 ~/.gemini/config/plugins/agy-zh-pack/。Antigravity 几秒内会自动发现并启动它（不用重启）。
+//   5. Windows：给 Antigravity 的快捷方式加上 --remote-debugging-port=0（debug-port.ps1）。
+//      macOS：问要不要在 Antigravity 没带参数启动时自动重开（从程序坞打开时总是不带）。
+//   6. 问要不要用作者的配色（默认不用）。改配色时要先关 Antigravity，原值记进数据目录的 originals.json。
+// 数据目录：~/.gemini/antigravity/plugin_data/agy-zh-pack（插件更新时插件目录会被换掉，数据放在外面）。
+// 卸载：删插件目录（Antigravity 一秒内停掉插件）、去掉快捷方式参数、按需恢复配色、问要不要删数据目录。
 //
-// originals.json：换上作者配色前的原值；装过旧版（v1.0.0）的还有旧版改缩放、对比度、字体前的原值。
-// 新版安装不动旧版记的那部分；卸载时如果有这个文件，问要不要恢复。
-//
-// 测试用：设环境变量 AGY_SETUP_TEST=1，跳过所有进程操作（不关、不开 Antigravity，不启动注入器），也不建计划任务；
-// 再设 AGY_SETUP_TEST_RUNNING=1 就假装 Antigravity 正开着；
-// 再设 AGY_SETUP_TEST_TASK=1 就真的建一个名叫 AgyZhPack-test 的计划任务（卸载时删掉），用来测建任务这一步。
+// 测试用：AGY_SETUP_TEST=1 跳过所有进程操作（不关、不开 Antigravity，不停注入程序，不动计划任务和 LaunchAgent）；
+// 再设 AGY_SETUP_TEST_RUNNING=1 就假装 Antigravity 正开着。配合临时的 USERPROFILE / HOME / LOCALAPPDATA / APPDATA 在隔离目录里测。
 
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import readline from 'node:readline';
+import net from 'node:net';
 import { execFileSync, spawn } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
-const PKG = path.dirname(fileURLToPath(import.meta.url));
+// 本程序靠 ELECTRON_RUN_AS_NODE=1 以 Node 模式运行；这个变量会被子进程继承，带着它打开的 Antigravity.exe 也会变成 Node、不出窗口。
+// 启动后马上去掉（连同 NODE_OPTIONS 等），后面开的 PowerShell、Antigravity 都用干净的环境。
+for (const k of Object.keys(process.env)) if (/^(ELECTRON_RUN_AS_NODE|ELECTRON_NO_ATTACH_CONSOLE|NODE_OPTIONS|NODE_PATH)$/i.test(k)) delete process.env[k];
+
+const IS_WIN = process.platform === 'win32';
+const IS_MAC = process.platform === 'darwin';
+const PKG = path.dirname(fileURLToPath(import.meta.url)); // 安装包的 app 文件夹（插件文件和 plugin-manifest.json 在这里）
 const TEST = process.env.AGY_SETUP_TEST === '1';
-const LOCAL = process.env.LOCALAPPDATA;
-const ROAMING = process.env.APPDATA;
-const INSTALL = path.join(LOCAL, 'AgyZhPack');
-const STARTUP = path.join(ROAMING, 'Microsoft', 'Windows', 'Start Menu', 'Programs', 'Startup', 'agy-zh-pack.vbs'); // 旧版自启位置 / 计划任务建不了时的退路
-const VBS_PATH = path.join(INSTALL, 'agy-zh-pack.vbs');
-const TEST_TASK = TEST && process.env.AGY_SETUP_TEST_TASK === '1';
-const TASK = TEST_TASK ? 'AgyZhPack-test' : 'AgyZhPack';
-const AGY_EXE = path.join(LOCAL, 'Programs', 'antigravity', 'Antigravity.exe');
-const APP_STORAGE = path.join(ROAMING, 'Antigravity', 'app_storage.json');
-const CONFIG = path.join(os.homedir(), '.gemini', 'config', 'config.json');
-const ORIGINALS = path.join(INSTALL, 'originals.json'); // 只有旧版（v1.0.0）装过才有：当时改外观前的原值
-const OLD_USER_CONFIG = path.join(INSTALL, 'config.json'); // 旧版“解锁 512K 上下文”的设置，新版不再用
-const PORT_FILE = path.join(ROAMING, 'Antigravity', 'DevToolsActivePort'); // 带调试端口启动时才有（2.33.0 起不带参数启动会删掉它）
+const HOME = os.homedir();
+const GEMINI = path.join(HOME, '.gemini');
+const PLUGIN_DIR = path.join(GEMINI, 'config', 'plugins', 'agy-zh-pack');
+const DATA = path.join(GEMINI, 'antigravity', 'plugin_data', 'agy-zh-pack');
+const SIDECAR_DATA = path.join(GEMINI, 'antigravity', 'sidecar_data', 'agy-zh-pack');
+const CONFIG = path.join(GEMINI, 'config', 'config.json');
+const ORIGINALS = path.join(DATA, 'originals.json');
 const DEBUG_ARG = '--remote-debugging-port=0';
-
-const FILES = ['node.exe', 'inject.mjs', 'statusbar.js', 'debug-port.ps1', 'i18n/translator.js', 'i18n/zh-CN.json', 'i18n/zh-CN.rules.json'];
-// 旧版装过、新版不再带的文件：升级时删掉。style.css：回复字体随之恢复成 Antigravity 默认；
-// config.json：旧版“解锁 512K 上下文”的设置。
-const OBSOLETE = ['style.css', 'config.json'];
-
-const VBS = [
-  "' Antigravity Chinese pack: start the injector hidden at logon.",
-  "' Files: %LOCALAPPDATA%\\AgyZhPack. Remove with the uninstaller in the pack.",
-  'Set sh = CreateObject("WScript.Shell")',
-  'dir = sh.ExpandEnvironmentStrings("%LOCALAPPDATA%") & "\\AgyZhPack\\"',
-  'sh.Run """" & dir & "node.exe"" """ & dir & "inject.mjs""", 0, False',
-  '',
-].join('\r\n');
+const LOCAL = process.env.LOCALAPPDATA || '';
+const ROAMING = process.env.APPDATA || '';
+const AGY_EXE = IS_WIN ? path.join(LOCAL, 'Programs', 'antigravity', 'Antigravity.exe') : '';
+const AGY_APP = IS_MAC ? ['/Applications/Antigravity.app', path.join(HOME, 'Applications', 'Antigravity.app')].find((p) => fs.existsSync(p)) || '/Applications/Antigravity.app' : '';
+const PORT_FILE = IS_WIN ? path.join(ROAMING, 'Antigravity', 'DevToolsActivePort') : path.join(HOME, 'Library', 'Application Support', 'Antigravity', 'DevToolsActivePort');
+const APP_STORAGE = path.join(ROAMING, 'Antigravity', 'app_storage.json'); // 只有 Windows 上装过 v1.0.0 才用到
+// v1.x 的位置
+const LEGACY_WIN = path.join(LOCAL, 'AgyZhPack');
+const LEGACY_TASK = 'AgyZhPack';
+const LEGACY_STARTUP = path.join(ROAMING, 'Microsoft', 'Windows', 'Start Menu', 'Programs', 'Startup', 'agy-zh-pack.vbs');
+const LEGACY_PLIST = path.join(HOME, 'Library', 'LaunchAgents', 'com.ncdeng.agy-zh-pack.plist');
+const DATA_FILES = ['cost-day.json', 'usage-history.json', 'look.json', 'quota-samples.json', 'originals.json', 'style.css'];
 
 // ---------- 小工具 ----------
+const cmpVer = (a, b) => { const x = String(a).split('.').map(Number), y = String(b).split('.').map(Number); for (let i = 0; i < 3; i++) if ((x[i] || 0) !== (y[i] || 0)) return (x[i] || 0) > (y[i] || 0) ? 1 : -1; return 0; };
 const say = (s = '') => console.log(s);
 const ok = (s) => say('  [完成] ' + s);
 const warn = (s) => say('  [注意] ' + s);
-const readJson = (f) => JSON.parse(fs.readFileSync(f, 'utf8').replace(/^﻿/, ''));
-const writeJson = (f, o) => fs.writeFileSync(f, JSON.stringify(o, null, 2), 'utf8');
-// 整个过程共用一个读取器，按行排队：一次问好几个问题时，提前输入（或管道送进来）的行不会丢；
-// 输入结束（EOF）后的提问一律当作直接回车。
+const readJson = (f) => JSON.parse(fs.readFileSync(f, 'utf8').replace(/^\uFEFF/, ''));
+const writeJson = (f, o) => { fs.mkdirSync(path.dirname(f), { recursive: true }); fs.writeFileSync(f, JSON.stringify(o, null, 2), 'utf8'); };
 let rl = null;
 let inputClosed = false;
 const pendingLines = [];
@@ -87,100 +77,138 @@ const ask = (q) => new Promise((resolve) => {
   if (pendingLines.length) resolve(pendingLines.shift());
   else if (inputClosed) resolve('');
   else waiters.push(resolve);
-}).then((a) => { if (!process.stdin.isTTY) say(a); return a; }); // 管道输入时把答案打出来，方便看日志
+}).then((a) => { if (!process.stdin.isTTY) say(a); return a; });
 const closeInput = () => { if (rl) rl.close(); };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const ps = (cmd) => execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', cmd], { encoding: 'utf8', windowsHide: true }).trim();
 const psq = (s) => "'" + String(s).replace(/'/g, "''") + "'";
+const run = (cmd, args) => { try { return execFileSync(cmd, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim(); } catch { return null; } };
 
-// Antigravity 主程序是否在运行（按完整路径判断，不会误伤同名的其他程序）
+// ---------- Antigravity 进程 ----------
+const agyInstalled = () => (IS_WIN ? fs.existsSync(AGY_EXE) : IS_MAC ? fs.existsSync(AGY_APP) : false);
+// Windows 上本安装程序自己就是 Node 模式的 Antigravity.exe，插件的 sidecar 也是（命令行里带 .mjs），都不能算成 Antigravity。
+// 11-22 实测：原来按进程名 + 路径数，把安装程序自己也算进去了——Antigravity 关着也说“正开着”，
+// 要关 Antigravity 时还会连自己一起强制结束。现在只认不带 --type=、不带 .mjs、不是本进程的那个主进程。
+const WIN_AGY_QUERY = () => `@(Get-CimInstance Win32_Process -Filter "Name='Antigravity.exe'" | Where-Object { $_.ExecutablePath -eq ${psq(AGY_EXE)} -and $_.ProcessId -ne ${process.pid} -and $_.CommandLine -notmatch '\\.mjs' })`;
 const agyRunning = () => {
   if (TEST) return process.env.AGY_SETUP_TEST_RUNNING === '1';
-  try { return ps(`@(Get-Process -Name Antigravity -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq ${psq(AGY_EXE)} }).Count`) !== '0'; } catch { return false; }
+  if (IS_WIN) { try { return ps(`@(${WIN_AGY_QUERY()} | Where-Object { $_.CommandLine -notmatch '--type=' }).Count`) !== '0'; } catch { return false; } }
+  return run('pgrep', ['-f', `${AGY_APP}/Contents/MacOS/Antigravity`]) !== null;
 };
 const closeAgy = async () => {
   if (TEST) return true;
-  ps(`Get-Process -Name Antigravity -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq ${psq(AGY_EXE)} } | ForEach-Object { [void]$_.CloseMainWindow() }`);
+  if (IS_WIN) ps(`${WIN_AGY_QUERY()} | Where-Object { $_.CommandLine -notmatch '--type=' } | ForEach-Object { $p = Get-Process -Id $_.ProcessId -ErrorAction SilentlyContinue; if ($p) { [void]$p.CloseMainWindow() } }`);
+  else run('osascript', ['-e', `quit app "${AGY_APP}"`]);
   for (let i = 0; i < 16 && agyRunning(); i++) await sleep(500);
   if (agyRunning()) {
-    ps(`Get-Process -Name Antigravity -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq ${psq(AGY_EXE)} } | Stop-Process -Force`);
+    if (IS_WIN) ps(`${WIN_AGY_QUERY()} | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }`);
+    else run('pkill', ['-f', `${AGY_APP}/Contents/MacOS/Antigravity`]);
     for (let i = 0; i < 10 && agyRunning(); i++) await sleep(500);
   }
   return !agyRunning();
 };
-// 需要时请用户关闭 Antigravity；返回 true 表示原来开着、稍后要重新打开
-const ensureAgyClosed = async (what = '外观设置') => {
+const startAgy = (withDebugPort = true) => {
+  if (TEST || !agyInstalled()) return;
+  // 工作目录设成 Antigravity 自己的目录：不然它继承安装包文件夹，Antigravity 开着时这个文件夹删不掉（11-22 实测）
+  if (IS_WIN) spawn(AGY_EXE, withDebugPort ? [DEBUG_ARG] : [], { cwd: path.dirname(AGY_EXE), detached: true, stdio: 'ignore' }).unref();
+  else spawn('open', ['-a', AGY_APP, ...(withDebugPort ? ['--args', DEBUG_ARG] : [])], { detached: true, stdio: 'ignore' }).unref();
+};
+// 调试端口开着没有：只看文件不够（Antigravity 被强制结束时文件会留下来），要真的连一下
+const debugPortOpen = () => new Promise((resolve) => {
+  let port = 0;
+  try { port = Number(fs.readFileSync(PORT_FILE, 'utf8').split(/\r?\n/)[0]); } catch {}
+  if (!port) return resolve(false);
+  const sock = net.connect({ host: '127.0.0.1', port, timeout: 1500 });
+  sock.once('connect', () => { sock.destroy(); resolve(true); });
+  sock.once('timeout', () => { sock.destroy(); resolve(false); });
+  sock.once('error', () => resolve(false));
+});
+const ensureAgyClosed = async (what) => {
   if (!agyRunning()) return false;
   say('');
-  say(`  Antigravity 正在运行。要改${what}，需要先关闭它（它运行时会把设置文件写回去）。`);
+  say(`  Antigravity 正在运行。要${what}，需要先关闭它。`);
   say('  如果它正在帮你做事，请等它做完再继续。');
   await ask('  准备好了就按回车，我会自动关闭 Antigravity，改好后再帮你打开……');
   if (await closeAgy()) { ok('已关闭 Antigravity'); return true; }
-  warn('没能关闭 Antigravity，请手动关掉它（包括右下角托盘里的图标），再重新运行。');
+  warn('没能关闭 Antigravity，请手动关掉它' + (IS_WIN ? '（包括右下角托盘里的图标）' : '') + '，再重新运行。');
   process.exit(1);
 };
-const stopInjector = () => {
-  if (TEST) return;
-  try {
-    ps(`Get-CimInstance Win32_Process -Filter "Name='node.exe'" | Where-Object { $_.CommandLine -like ${psq('*' + INSTALL + '*inject.mjs*')} } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }`);
-  } catch {}
-};
-const startInjector = () => {
-  if (TEST) return;
-  const vbs = fs.existsSync(VBS_PATH) ? VBS_PATH : STARTUP;
-  spawn('wscript.exe', [vbs], { detached: true, stdio: 'ignore', windowsHide: true }).unref();
-};
-// 登录时自动运行 agy-zh-pack.vbs 的计划任务（当前用户、普通权限、不限运行时长、已在运行就不重复启动）。
-// 成功返回 true；没权限等原因失败返回 false。
-const registerTask = () => {
-  if (TEST && !TEST_TASK) return false;
-  try {
-    const r = ps([
-      '$u = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name',
-      `$a = New-ScheduledTaskAction -Execute ($env:WINDIR + '\\System32\\wscript.exe') -Argument ('"' + ${psq(VBS_PATH)} + '"')`,
-      '$t = New-ScheduledTaskTrigger -AtLogOn -User $u',
-      '$s = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew',
-      '$p = New-ScheduledTaskPrincipal -UserId $u -LogonType Interactive -RunLevel Limited',
-      `Register-ScheduledTask -TaskName ${psq(TASK)} -Description 'Antigravity Chinese pack: start the injector at logon (AgyZhPack)' -Action $a -Trigger $t -Settings $s -Principal $p -Force | Out-Null`,
-      `if (Get-ScheduledTask -TaskName ${psq(TASK)} -ErrorAction SilentlyContinue) { 'ok' }`,
-    ].join('; '));
-    return /ok/.test(r);
-  } catch { return false; }
-};
-const unregisterTask = () => {
-  if (TEST && !TEST_TASK) return false;
-  try {
-    return /removed/.test(ps(`if (Get-ScheduledTask -TaskName ${psq(TASK)} -ErrorAction SilentlyContinue) { Unregister-ScheduledTask -TaskName ${psq(TASK)} -Confirm:$false; 'removed' }`));
-  } catch { return false; }
-};
-const startAgy = (withDebugPort = true) => { // 卸载后重开时不带调试端口参数
-  if (TEST || !fs.existsSync(AGY_EXE)) return;
-  spawn(AGY_EXE, withDebugPort ? [DEBUG_ARG] : [], { detached: true, stdio: 'ignore' }).unref();
-};
 
-// ---------- 快捷方式上的调试端口参数（Antigravity 2.33.0 起需要） ----------
-// mode：add 加上 / remove 去掉。返回 { found, changed }；脚本不在或出错返回 null。
-// 测试模式下 debug-port.ps1 只看 %USERPROFILE%\Desktop，不会碰真桌面。
-const shortcuts = (mode) => {
-  const script = path.join(INSTALL, 'debug-port.ps1');
+// ---------- 安装包核对：签名 + 每个文件的 sha256 ----------
+async function checkPackage() {
+  const { verifyManifest } = await import(pathToFileURL(path.join(PKG, 'lib', 'update.mjs')).href);
+  const p = verifyManifest(fs.readFileSync(path.join(PKG, 'plugin-manifest.json'), 'utf8'));
+  for (const [rel, hash, size] of p.files) {
+    const buf = fs.readFileSync(path.join(PKG, rel));
+    if (buf.length !== size || crypto.createHash('sha256').update(buf).digest('hex') !== hash) throw Error('安装包里的文件和签名清单对不上：' + rel + '（请重新下载安装包）');
+  }
+  return p;
+}
+const installedManifest = () => { try { return JSON.parse(readJson(path.join(PLUGIN_DIR, 'plugin-manifest.json')).payload); } catch { return null; } };
+
+// ---------- 从 v1.x 迁移 ----------
+function legacyDataDir() {
+  if (IS_WIN) return fs.existsSync(path.join(LEGACY_WIN, 'inject.mjs')) || fs.existsSync(path.join(LEGACY_WIN, 'usage-history.json')) ? LEGACY_WIN : '';
+  if (IS_MAC && fs.existsSync(LEGACY_PLIST)) { // 从源码运行的：LaunchAgent 里写着 inject.mjs 的位置
+    const m = /<string>([^<]*inject\.mjs)<\/string>/.exec(fs.readFileSync(LEGACY_PLIST, 'utf8'));
+    if (m) return path.dirname(m[1].replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>'));
+  }
+  return '';
+}
+function stopLegacy() {
+  let did = false;
+  if (IS_WIN) {
+    if (!TEST) {
+      try { ps(`Get-CimInstance Win32_Process -Filter "Name='node.exe'" | Where-Object { $_.CommandLine -like ${psq('*' + LEGACY_WIN + '*inject.mjs*')} } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }`); } catch {}
+      try { if (/removed/.test(ps(`if (Get-ScheduledTask -TaskName ${psq(LEGACY_TASK)} -ErrorAction SilentlyContinue) { Unregister-ScheduledTask -TaskName ${psq(LEGACY_TASK)} -Confirm:$false; 'removed' }`))) did = true; } catch {}
+    }
+    if (fs.existsSync(LEGACY_STARTUP)) { fs.rmSync(LEGACY_STARTUP, { force: true }); did = true; }
+  } else if (IS_MAC && fs.existsSync(LEGACY_PLIST)) {
+    if (!TEST) {
+      const domain = `gui/${process.getuid()}`;
+      run('launchctl', ['bootout', domain, LEGACY_PLIST]);
+      run('launchctl', ['unload', '-w', LEGACY_PLIST]);
+    }
+    fs.rmSync(LEGACY_PLIST, { force: true });
+    did = true;
+  }
+  return did;
+}
+function migrateData(from) {
+  const moved = [];
+  fs.mkdirSync(DATA, { recursive: true });
+  for (const f of DATA_FILES) {
+    const src = path.join(from, f), dst = path.join(DATA, f);
+    if (!fs.existsSync(src)) continue;
+    // 数据目录里可能已经有同名文件（装过 v2、卸载时留了数据、又退回 v1.x 用过一阵）：用修改时间较新的那份，
+    // 较旧的那份改名留在数据目录里（例如 usage-history.v1-202611231005.json）。不能只留新的：
+    // 退回 v1.x 后重新记的用量记录虽然新，却只有最近几天，更早的天在旧的那份里。
+    if (fs.existsSync(dst)) {
+      const d = new Date(), p2 = (n) => String(n).padStart(2, '0'); // 本地时间，年月日时分
+      const stamp = '' + d.getFullYear() + p2(d.getMonth() + 1) + p2(d.getDate()) + p2(d.getHours()) + p2(d.getMinutes());
+      const keepAs = (file, tag) => { try { fs.copyFileSync(file, path.join(DATA, f.replace(/(\.\w+)?$/, `.${tag}-${stamp}$1`))); } catch {} };
+      if (fs.statSync(dst).mtimeMs > fs.statSync(src).mtimeMs) { keepAs(src, 'v1'); continue; }
+      keepAs(dst, 'v2');
+    }
+    fs.copyFileSync(src, dst);
+    moved.push(f);
+  }
+  return moved;
+}
+
+// ---------- 快捷方式参数（Windows） ----------
+const shortcuts = (mode, dir = PLUGIN_DIR) => {
+  if (!IS_WIN) return null;
+  const script = path.join(dir, 'debug-port.ps1');
   if (!fs.existsSync(script)) return null;
   try {
-    const out = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', script, '-Mode', mode],
-      { encoding: 'utf8', windowsHide: true });
+    const out = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', script, '-Mode', mode], { encoding: 'utf8', windowsHide: true });
     const m = /found=(\d+) changed=(\d+)/.exec(out);
     return m ? { found: +m[1], changed: +m[2] } : null;
   } catch { return null; }
 };
-// Antigravity 开着时，这次启动有没有带调试端口
-const debugPortOpen = () => fs.existsSync(PORT_FILE);
 
-// 旧版有没有打开过“解锁 512K 上下文”（升级时提示一句这个选项已经去掉）
-const oldCtxWasOn = () => { try { return Number(readJson(OLD_USER_CONFIG).contextLimit) > 256000; } catch { return false; } };
-
-// ---------- 作者的配色（可选，默认不用） ----------
-// 只改 ~/.gemini/config/config.json 里 userSettings 的两组主题颜色，不改缩放、字体、对比度。
-// 第一次换上时把原来的值记进 originals.json，换回或卸载时按它恢复（原来没有就删掉这个键 = Antigravity 默认颜色）。
-// 这个文件由 Antigravity 后台进程维护，运行中改会被写回，所以只在 Antigravity 关闭时改。
+// ---------- 作者的配色（可选，默认不用；和 v1.x 一样） ----------
 const AUTHOR_THEME = {
   customThemeSeedsLight: { background: '#FAF9F5', foregroundOverride: '#141413', primary: '#D97757' },
   customThemeSeedsDark: { background: '#262624', foregroundOverride: '#FAF9F5', primary: '#D97757' },
@@ -188,20 +216,9 @@ const AUTHOR_THEME = {
 const SEED_KEYS = ['background', 'foregroundOverride', 'primary'];
 const sameSeed = (a, b) => !!a && SEED_KEYS.every((k) => String(a[k] || '').toLowerCase() === b[k].toLowerCase());
 const readAgyConfig = () => { try { return readJson(CONFIG); } catch { return null; } };
-// 现在用的是不是作者的配色（按实际颜色判断，装过旧版的也能认出来）
-const themeActive = () => {
-  const u = (readAgyConfig() || {}).userSettings || {};
-  return Object.entries(AUTHOR_THEME).every(([k, v]) => sameSeed(u[k], v));
-};
-const readOriginals = () => {
-  const o = fs.existsSync(ORIGINALS) ? readJson(ORIGINALS) : {};
-  return { appStorage: o.appStorage || {}, userSettings: o.userSettings || {} };
-};
-const saveOriginals = (o) => {
-  if (!Object.keys(o.appStorage).length && !Object.keys(o.userSettings).length) fs.rmSync(ORIGINALS, { force: true });
-  else writeJson(ORIGINALS, o);
-};
-// 换上（on = true）或换回原来的颜色；调用前要确保 Antigravity 已关闭。没有设置文件时返回 false。
+const themeActive = () => { const u = (readAgyConfig() || {}).userSettings || {}; return Object.entries(AUTHOR_THEME).every(([k, v]) => sameSeed(u[k], v)); };
+const readOriginals = () => { const o = fs.existsSync(ORIGINALS) ? readJson(ORIGINALS) : {}; return { appStorage: o.appStorage || {}, userSettings: o.userSettings || {} }; };
+const saveOriginals = (o) => { if (!Object.keys(o.appStorage).length && !Object.keys(o.userSettings).length) fs.rmSync(ORIGINALS, { force: true }); else writeJson(ORIGINALS, o); };
 const applyTheme = (on) => {
   const cfg = readAgyConfig();
   if (!cfg) return false;
@@ -223,201 +240,200 @@ const applyTheme = (on) => {
 };
 const sayThemeInfo = () => {
   say('  【可选】使用作者的配色（Claude 风格的暖白配色）');
-  say('  浅色主题：背景 #FAF9F5、文字 #141413、强调色 #D97757；');
-  say('  深色主题：背景 #262624、文字 #FAF9F5、强调色 #D97757。');
-  say('  只改主题颜色，不改缩放、字体和对比度。原来的颜色会记下来，换回或卸载时恢复。');
-  say('  换颜色时需要先关闭 Antigravity，改完会自动重新打开。');
-  say('  以后想改，双击“配色开关.cmd”就行。');
+  say('  浅色主题：背景 #FAF9F5、文字 #141413、强调色 #D97757；深色主题：背景 #262624、文字 #FAF9F5、强调色 #D97757。');
+  say('  只改主题颜色，不改缩放、字体和对比度。原来的颜色会记下来，换回或卸载时恢复。换颜色时需要先关闭 Antigravity。');
 };
 const askTheme = async (current) => {
-  const a = await ask(current
-    ? '  现在用的是作者的配色。输入 n 回车=换回原来的颜色，直接回车=保持：'
-    : '  现在用的是你自己的配色（默认）。输入 y 回车=换成作者的配色，直接回车=保持：');
-  if (current) return !/^n/i.test(a);
-  return /^y/i.test(a);
+  const a = await ask(current ? '  现在用的是作者的配色。输入 n 回车=换回原来的颜色，直接回车=保持：' : '  现在用的是你自己的配色（默认）。输入 y 回车=换成作者的配色，直接回车=保持：');
+  return current ? !/^n/i.test(a) : /^y/i.test(a);
 };
-// 按需切换配色：要改才关 Antigravity。返回 { changed, reopen }
 const switchTheme = async (after) => {
-  const before = themeActive();
-  if (after === before) return { changed: false, reopen: false };
-  if (!readAgyConfig()) {
-    warn('没找到 Antigravity 的设置文件 ' + CONFIG + '，配色这次没改。');
-    warn('请先打开 Antigravity 登录一次，关掉后再双击“配色开关.cmd”。');
-    return { changed: false, reopen: false };
-  }
-  const reopen = await ensureAgyClosed('配色');
+  if (after === themeActive()) return { changed: false, reopen: false };
+  if (!readAgyConfig()) { warn('没找到 Antigravity 的设置文件 ' + CONFIG + '，配色这次没改。请先打开 Antigravity 登录一次。'); return { changed: false, reopen: false }; }
+  const reopen = await ensureAgyClosed('改配色');
   applyTheme(after);
   return { changed: true, reopen };
 };
 
+// 插件在 Antigravity 设置里被关掉了：Antigravity 关着时打开它（运行中改设置文件会被它写回）
+function pluginDisabled() { const c = readAgyConfig(); return !!(c && c.plugins && c.plugins['agy-zh-pack'] && c.plugins['agy-zh-pack'].enabled === false); }
+
 // ---------- 安装 ----------
 async function install() {
   say('');
-  say('  ===== Antigravity 中文美化包：安装 =====');
+  say('  ===== agy-zh（Antigravity 中文插件）：安装 =====');
   say('');
-  if (!fs.existsSync(AGY_EXE)) {
-    warn('没在默认位置找到 Antigravity：' + AGY_EXE);
+  if (!agyInstalled()) {
+    warn('没找到 Antigravity：' + (IS_WIN ? AGY_EXE : AGY_APP));
     warn('请先安装 Antigravity 并登录一次，再运行本安装程序。');
     process.exit(1);
   }
-  stopInjector();
+  const p = await checkPackage();
+  ok(`安装包核对通过：v${p.version}，作者签名正确，${p.files.length} 个文件完整`);
 
-  // 1. 复制文件（不改 Antigravity 的任何设置）
-  fs.mkdirSync(path.join(INSTALL, 'i18n'), { recursive: true });
-  for (const f of FILES) {
-    const dst = path.join(INSTALL, f);
-    for (let i = 0; ; i++) {
-      try { fs.copyFileSync(path.join(PKG, f), dst); break; } catch (e) {
-        if (i >= 10) throw e; // node.exe 刚被结束时可能还锁着，稍等重试
-        await sleep(500);
-      }
-    }
-  }
-  const hadCtx = oldCtxWasOn();
-  for (const f of OBSOLETE) fs.rmSync(path.join(INSTALL, f), { force: true });
-  ok('文件已复制到 ' + INSTALL);
-  if (hadCtx) ok('旧版的“解锁 512K 上下文”已经去掉：Antigravity 官方默认的上限已经提高（Gemini 约 51.2 万 token，Claude 更高），不用再解锁。');
-  if (Object.keys(readOriginals().appStorage).length) {
-    warn('旧版美化包（v1.0.0）改过 Antigravity 的缩放、对比度和字体，新版不再改这些，这次保持不动。');
-    warn('想恢复成安装旧版之前的样子：运行“一键卸载”时选择恢复，再重新安装。');
-  }
-
-  // 2. 开机自启：优先用计划任务（登录后立刻运行）；建不了才放“启动”文件夹（会延后几分钟）
-  fs.writeFileSync(VBS_PATH, VBS, 'ascii');
-  if (registerTask()) {
-    if (fs.existsSync(STARTUP)) fs.rmSync(STARTUP, { force: true }); // 旧版装在“启动”文件夹里的，删掉免得重复
-    ok('已设置开机自动启动（计划任务 ' + TASK + '，登录后立刻运行）');
-  } else {
-    fs.mkdirSync(path.dirname(STARTUP), { recursive: true });
-    fs.writeFileSync(STARTUP, VBS, 'ascii');
-    ok('已设置开机自动启动（“启动”文件夹）');
-    if (!TEST) warn('没能建计划任务，改用“启动”文件夹：开机后要等几分钟才生效，这之前打开的 Antigravity 是英文的。');
-  }
-
-  // 3. 快捷方式加调试端口参数（Antigravity 2.33.0 起不加就连不上）
-  const sc = shortcuts('add');
-  if (!sc) warn('没能给快捷方式加启动参数。请手动给 Antigravity 的快捷方式加上参数 ' + DEBUG_ARG + '，否则界面不会变成中文。');
-  else if (!sc.found) warn('没找到 Antigravity 的开始菜单或桌面快捷方式。Antigravity 要带参数 ' + DEBUG_ARG + ' 启动，界面才会变成中文。');
-  else ok(`已给 ${sc.found} 个 Antigravity 快捷方式加上启动参数 ${DEBUG_ARG}` + (sc.changed < sc.found ? `（其中 ${sc.found - sc.changed} 个原来就有）` : ''));
-
-  // 4. 配色：默认不用作者的；重装时默认保持现在的样子。要改颜色才会请用户关 Antigravity
-  say('');
-  sayThemeInfo();
-  const themeWant = await askTheme(themeActive());
-  const th = await switchTheme(themeWant);
-  if (th.changed) ok(themeWant ? '已换成作者的配色' : '已换回原来的配色');
-  else ok(themeActive() ? '配色保持不变（作者的配色）' : '配色保持不变（你自己的）');
-  say('');
-
-  // 5. 启动（换配色时关掉的 Antigravity 在这里重新打开）
-  // Antigravity 开着但这次启动没带调试端口参数：问过用户后关掉，下面带参数重新打开
-  let reopen = th.reopen;
-  if (!reopen && agyRunning() && !debugPortOpen()) {
+  // 1. Antigravity 开着但没带调试端口：先关掉，装完带参数打开
+  let reopen = false;
+  if (agyRunning() && !(await debugPortOpen())) {
+    say('');
     say('  Antigravity 正开着，但这次启动时没带调试端口参数（Antigravity 2.33.0 起需要），要重新打开一次才会变成中文。');
     say('  如果它正在帮你做事，请等它做完再继续。');
-    const a = await ask('  直接回车=我来关闭并重新打开 Antigravity，输入 n=跳过（以后自己从开始菜单或桌面图标重新打开）：');
+    const a = await ask('  直接回车=我来关闭、装完再带参数打开，输入 n=跳过（装完会弹框问你要不要重开）：');
     if (!/^n/i.test(a)) {
       if (await closeAgy()) { ok('已关闭 Antigravity'); reopen = true; }
-      else warn('没能关闭 Antigravity，请手动关掉它，再从开始菜单或桌面图标打开。');
+      else warn('没能关闭 Antigravity，装完后请手动重新打开。');
     }
+  }
+
+  // 2. 从 v1.x 迁移
+  const legacy = legacyDataDir();
+  if (stopLegacy() || legacy) ok('已停掉旧版的注入程序和开机自启');
+  if (legacy) {
+    const moved = migrateData(legacy);
+    if (moved.length) ok('旧版的数据已搬到 ' + DATA + '：' + moved.join('、'));
+    if (IS_WIN && legacy === LEGACY_WIN) {
+      for (let i = 0; fs.existsSync(LEGACY_WIN); i++) {
+        try { fs.rmSync(LEGACY_WIN, { recursive: true, force: true }); } catch { if (i >= 10) { warn('旧版的安装目录没删干净：' + LEGACY_WIN); break; } await sleep(500); }
+      }
+      if (!fs.existsSync(LEGACY_WIN)) ok('已删除旧版的安装目录 ' + LEGACY_WIN);
+    }
+    if (IS_MAC) say('  旧版的源码文件夹 ' + legacy + ' 没动，确认插件正常后可以自己删掉。');
+  }
+
+  // 3. 复制插件文件（Antigravity 几秒内会自动发现并启动它）
+  const old = installedManifest();
+  fs.mkdirSync(PLUGIN_DIR, { recursive: true });
+  for (const [rel] of p.files) {
+    const dst = path.join(PLUGIN_DIR, rel);
+    fs.mkdirSync(path.dirname(dst), { recursive: true });
+    fs.copyFileSync(path.join(PKG, rel), dst + '.agy-new');
+    fs.renameSync(dst + '.agy-new', dst);
+  }
+  if (old) { const keep = new Set(p.files.map((f) => f[0])); for (const [rel] of old.files) if (!keep.has(rel)) fs.rmSync(path.join(PLUGIN_DIR, rel), { force: true }); }
+  fs.copyFileSync(path.join(PKG, 'plugin-manifest.json'), path.join(PLUGIN_DIR, 'plugin-manifest.json'));
+  fs.mkdirSync(DATA, { recursive: true });
+  ok((!old ? '插件已安装' : old.version === p.version ? `已重新安装 v${p.version}` : cmpVer(old.version, p.version) > 0 ? `已从 v${old.version} 换回 v${p.version}` : `已从 v${old.version} 升级到 v${p.version}`) + '：' + PLUGIN_DIR);
+  if (pluginDisabled()) {
+    if (!agyRunning()) { const c = readAgyConfig(); c.plugins['agy-zh-pack'].enabled = true; writeJson(CONFIG, c); ok('插件之前在 Antigravity 里被关掉了，已重新打开'); }
+    else warn('插件之前在 Antigravity 里被关掉了：请到 Antigravity 设置的“插件”里把“agy-zh”打开。');
+  }
+
+  // 4. 调试端口参数
+  if (IS_WIN) {
+    const sc = shortcuts('add');
+    if (!sc) warn('没能给快捷方式加启动参数。请手动给 Antigravity 的快捷方式加上参数 ' + DEBUG_ARG + '。');
+    else if (!sc.found) warn('没找到 Antigravity 的开始菜单或桌面快捷方式。Antigravity 要带参数 ' + DEBUG_ARG + ' 启动，界面才会变成中文。');
+    else if (sc.changed === 0) ok(`${sc.found} 个 Antigravity 快捷方式原来就带启动参数 ${DEBUG_ARG}，没有改动`);
+    else ok(`已给 ${sc.changed} 个 Antigravity 快捷方式加上启动参数 ${DEBUG_ARG}` + (sc.changed < sc.found ? `（另外 ${sc.found - sc.changed} 个原来就有）` : ''));
+  } else if (IS_MAC) {
     say('');
+    say('  macOS 从程序坞或启动台打开 Antigravity 时不带调试端口参数，界面会是英文。插件发现后可以帮你关掉再带参数重开。');
+    const a = await ask('  直接回车=以后自动重开（推荐），输入 n=每次先问我：');
+    const file = path.join(DATA, 'settings.json');
+    const s = fs.existsSync(file) ? readJson(file) : {};
+    s.relaunch = /^n/i.test(a) ? 'ask' : 'auto';
+    writeJson(file, s);
+    ok(s.relaunch === 'auto' ? '已设为自动重开（侧边栏面板里可以改）' : '已设为每次先问（侧边栏面板里可以改）');
   }
-  startInjector();
-  ok('后台注入程序已启动');
-  const running = !reopen && agyRunning(); // 为换配色或补参数关掉的，现在重新打开
-  if (!running) {
-    startAgy();
-    ok('正在打开 Antigravity');
-  }
+
+  // 5. 配色
+  say('');
+  sayThemeInfo();
+  const th = await switchTheme(await askTheme(themeActive()));
+  ok(th.changed ? (themeActive() ? '已换成作者的配色' : '已换回原来的配色') : (themeActive() ? '配色保持不变（作者的配色）' : '配色保持不变（你自己的）'));
+  reopen = reopen || th.reopen;
+
+  // 6. 打开 Antigravity
+  const running = agyRunning();
+  if (!running) { startAgy(); ok('正在打开 Antigravity（带调试端口参数）'); }
   say('');
   say('  安装完成！');
-  if (running && debugPortOpen()) {
-    say('  Antigravity 正开着：几秒内界面会变成中文；');
-    say('  再在 Antigravity 里按一次 Ctrl+R 刷新窗口，输入框上方就会出现用量信息。');
+  if (running && (await debugPortOpen())) {
+    say('  Antigravity 正开着：几秒内插件会启动，界面变成中文；输入框上方的用量信息在刷新窗口（' + (IS_MAC ? 'Cmd' : 'Ctrl') + '+R）后出现。');
   } else if (running) {
-    say('  Antigravity 还开着、没带调试端口参数，现在还是英文。关掉它，再从开始菜单或桌面图标打开就好。');
+    say('  Antigravity 还开着、没带调试端口参数：插件启动后会弹框问你要不要重开。');
   } else {
-    say('  Antigravity 打开后几秒内会变成中文界面，并自动刷新一次，');
-    say('  然后输入框上方会出现用量信息（模型、上下文、速度、5 小时和每周额度）。');
+    say('  Antigravity 打开后几秒内会变成中文界面，输入框上方会出现用量信息。');
   }
-  say('  以后每次开机、每次从开始菜单或桌面图标打开 Antigravity，都会自动生效。');
-  say('  如果 Antigravity 自动更新后自己重新启动，界面可能暂时是英文，右下角会弹出提醒，照提醒重新打开一次即可。');
-  say('  请保留这个文件夹：以后卸载、切换配色，都要用里面的脚本。');
+  say('  插件的面板：Antigravity 右上角的“插件”菜单 → agy-zh（运行状态、在线更新、版本更新）。');
+  say('  以后有新版本，在面板里点“更新”就行（装之前校验作者签名），不用再下载安装包。');
+  say('  请保留这个文件夹：以后卸载、切换配色要用里面的脚本。');
   say('');
 }
 
 // ---------- 卸载 ----------
 async function uninstall() {
   say('');
-  say('  ===== Antigravity 中文美化包：卸载 =====');
+  say('  ===== agy-zh（Antigravity 中文插件）：卸载 =====');
   say('');
-  stopInjector();
-  ok('后台注入程序已停止');
-  const hadTask = unregisterTask();
-  const hadStartup = fs.existsSync(STARTUP);
-  if (hadStartup) fs.rmSync(STARTUP, { force: true });
-  if (hadTask || hadStartup) ok('已取消开机自动启动');
-  const sc = shortcuts('remove'); // 要在删安装目录之前做（脚本在里面）
+  // 快捷方式参数要在删插件目录之前去掉（脚本在里面；装包里也有一份）
+  const sc = shortcuts('remove', fs.existsSync(path.join(PLUGIN_DIR, 'debug-port.ps1')) ? PLUGIN_DIR : PKG);
   if (sc && sc.changed) ok(`已去掉 ${sc.changed} 个快捷方式上的启动参数 ${DEBUG_ARG}`);
+  if (fs.existsSync(PLUGIN_DIR)) {
+    for (let i = 0; fs.existsSync(PLUGIN_DIR); i++) {
+      try { fs.rmSync(PLUGIN_DIR, { recursive: true, force: true }); } catch { if (i >= 10) { warn('插件目录没删干净（有程序还占着它）：' + PLUGIN_DIR); warn('插件已经停用。请关掉 Antigravity 后手动删掉这个文件夹。'); break; } await sleep(500); }
+    }
+    if (!fs.existsSync(PLUGIN_DIR)) ok('已删除插件（Antigravity 会在一秒内停掉它）');
+  }
+  if (stopLegacy()) ok('已删掉旧版的开机自启');
+  if (fs.existsSync(path.join(LEGACY_WIN, 'inject.mjs'))) { try { fs.rmSync(LEGACY_WIN, { recursive: true, force: true }); ok('已删除旧版的安装目录'); } catch {} }
 
   let reopen = false;
   if (fs.existsSync(ORIGINALS)) {
-    // 用过作者的配色，或装过旧版（v1.0.0，旧版安装时改过缩放、对比度、字体、配色）才会有 originals.json
     const o = readOriginals();
     const what = [Object.keys(o.appStorage).length && '缩放、对比度、字体', Object.keys(o.userSettings).length && '配色'].filter(Boolean).join('和');
-    say(`  美化包改过 Antigravity 的${what}，原来的样子记下来了。`);
+    say(`  本插件改过 Antigravity 的${what}，原来的样子记下来了。`);
     const a = await ask('  要恢复成原来的样子吗？直接回车=恢复，输入 n=保留现在的样子：');
     if (!/^n/i.test(a)) {
-      reopen = await ensureAgyClosed(what);
-      const originals = readJson(ORIGINALS);
+      reopen = await ensureAgyClosed('恢复' + what);
       if (fs.existsSync(APP_STORAGE)) {
         const store = readJson(APP_STORAGE);
-        for (const [k, v] of Object.entries(originals.appStorage || {})) {
-          if (v === null) delete store[k]; else store[k] = v;
-        }
+        for (const [k, v] of Object.entries(o.appStorage)) { if (v === null) delete store[k]; else store[k] = v; }
         writeJson(APP_STORAGE, store);
       }
-      if (fs.existsSync(CONFIG)) {
-        const cfg = readJson(CONFIG);
+      const cfg = readAgyConfig();
+      if (cfg) {
         cfg.userSettings = cfg.userSettings || {};
-        for (const [k, v] of Object.entries(originals.userSettings || {})) {
-          if (v === null) delete cfg.userSettings[k]; else cfg.userSettings[k] = v;
-        }
+        for (const [k, v] of Object.entries(o.userSettings)) { if (v === null) delete cfg.userSettings[k]; else cfg.userSettings[k] = v; }
         writeJson(CONFIG, cfg);
       }
+      fs.rmSync(ORIGINALS, { force: true });
       ok(what + '已恢复');
     }
   }
-
-  for (let i = 0; fs.existsSync(INSTALL); i++) {
-    try { fs.rmSync(INSTALL, { recursive: true, force: true }); } catch (e) {
-      if (i >= 10) { warn('有文件还被占用，没删干净：' + INSTALL + '，重启电脑后可以手动删掉。'); break; }
-      await sleep(500);
+  // Antigravity 在设置文件里给插件记的条目（关着时才删，运行中改会被它写回）
+  if (!agyRunning()) {
+    const cfg = readAgyConfig();
+    if (cfg && ((cfg.sidecars && cfg.sidecars['agy-zh-pack/core']) || (cfg.plugins && cfg.plugins['agy-zh-pack']))) {
+      if (cfg.sidecars) delete cfg.sidecars['agy-zh-pack/core'];
+      if (cfg.plugins) delete cfg.plugins['agy-zh-pack'];
+      writeJson(CONFIG, cfg);
     }
   }
-  if (!fs.existsSync(INSTALL)) ok('已删除 ' + INSTALL);
+  if (fs.existsSync(DATA)) {
+    // 选了“不恢复原来的样子”时 originals.json 还在里面：删掉就找不回用户原来的配色了，单独点明
+    const a = await ask('  要连每天的用量记录和设置一起删掉吗？' +
+      (fs.existsSync(ORIGINALS) ? '里面还有记下来的 Antigravity 外观原值（配色等），删掉就找不回来了。' : '') +
+      '直接回车=删掉，输入 n=保留（以后重装还能接着用）：');
+    if (!/^n/i.test(a)) { fs.rmSync(DATA, { recursive: true, force: true }); ok('已删除数据目录 ' + DATA); }
+    else ok('数据目录保留：' + DATA);
+  }
+  fs.rmSync(SIDECAR_DATA, { recursive: true, force: true });
   if (reopen) { startAgy(false); ok('正在重新打开 Antigravity'); }
   say('');
-  say('  卸载完成。如果 Antigravity 还开着，按 Ctrl+R 刷新一下就会变回英文界面。');
+  say('  卸载完成。如果 Antigravity 还开着，刷新一下窗口（' + (IS_MAC ? 'Cmd' : 'Ctrl') + '+R）就会变回英文界面。');
   say('');
 }
 
 // ---------- 配色开关 ----------
 async function theme() {
   say('');
-  say('  ===== Antigravity 中文美化包：配色开关 =====');
+  say('  ===== agy-zh（Antigravity 中文插件）：配色开关 =====');
   say('');
-  if (!fs.existsSync(path.join(INSTALL, 'inject.mjs'))) {
-    warn('还没安装美化包，请先双击“一键安装.cmd”。');
-    process.exitCode = 1;
-    return;
-  }
   sayThemeInfo();
   say('');
   const want = await askTheme(themeActive());
   const th = await switchTheme(want);
-  if (!th.changed) ok('没有改动：' + (themeActive() ? '仍然是作者的配色' : '仍然是你自己的配色'));
-  else ok(want ? '已换成作者的配色' : '已换回原来的配色');
+  ok(th.changed ? (want ? '已换成作者的配色' : '已换回原来的配色') : '没有改动：' + (themeActive() ? '仍然是作者的配色' : '仍然是你自己的配色'));
   if (th.reopen) { startAgy(); ok('正在重新打开 Antigravity'); }
   say('');
 }
