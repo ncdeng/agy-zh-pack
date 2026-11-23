@@ -37,6 +37,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFile, spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { chooseSource } from './lib/remote-source.mjs';
 
 const IS_WIN = process.platform === 'win32';
 const IS_MAC = process.platform === 'darwin';
@@ -806,7 +807,7 @@ function pageScript() {
 // - Theme 页的 updates 选 off（look.json 的 online = 'off'）：不再联网，也不用 remote/ 里存的，只用安装包自带的。
 // - 换了版本（安装了新的安装包）以后，remote/ 里存的词典和规则先不用，等下一次取到再用（新安装包里的可能更新）。
 // - 测试：环境变量 AGY_REMOTE_BASE 换成别的地址（例如本机起的 http://127.0.0.1:端口/），只试这一个地址。
-const PACK_VERSION = '2.0.1';
+const PACK_VERSION = '2.0.2';
 const REMOTE_DIR = path.join(DATA, 'remote');
 const REMOTE_STATE = path.join(REMOTE_DIR, 'state.json');
 const REMOTE_BASES = process.env.AGY_REMOTE_BASE ? [process.env.AGY_REMOTE_BASE] : [
@@ -815,6 +816,8 @@ const REMOTE_BASES = process.env.AGY_REMOTE_BASE ? [process.env.AGY_REMOTE_BASE]
   'https://gcore.jsdelivr.net/gh/ncdeng/agy-zh-pack@main/',
   'https://raw.githubusercontent.com/ncdeng/agy-zh-pack/main/',
 ];
+// 问 main 分支最新提交的地址：按提交下载，哪个镜像给的都一样新（见 lib/remote-source.mjs）
+const REMOTE_REF_URL = 'https://api.github.com/repos/ncdeng/agy-zh-pack/git/ref/heads/main';
 const REMOTE_FILES = [['meta', 'data/meta.json'], ['prices', 'data/prices.json'], ['dict', 'i18n/zh-CN.json'], ['rules', 'i18n/zh-CN.rules.json']];
 const REMOTE_EVERY_MS = 6 * 3600e3; // 成功以后隔多久再查
 const REMOTE_RETRY_MS = 30 * 60e3; // 失败以后隔多久重试
@@ -963,19 +966,17 @@ async function checkRemote() {
   st.at = Date.now();
   const problems = [];
   try {
-    // 先取最小的 meta.json，顺便试出哪个地址能用（上次能用的排在最前）
-    const bases = [...REMOTE_BASES].sort((a, b) => (b === st.host) - (a === st.host));
-    const got = {};
-    let base = null;
-    const fails = [];
-    for (const b of bases) {
-      try { got.meta = await pageFetch(sess, b + 'data/meta.json'); base = b; break; }
-      catch (e) { fails.push(`${new URL(b).host}: ${e.message}`); }
-    }
-    if (!base) throw Error(fails.join('; '));
+    // 选镜像和版本（见 lib/remote-source.mjs）：先问 GitHub 最新提交、按提交下载；问不到就按分支下载、用 meta.json 最新的镜像。
+    // 以前“上次能用的镜像排最前”，会一直粘在缓存过时的镜像上（11-23 实测 gcore 给了好几个小时的旧词典和旧版本号）
+    const src = await chooseSource({
+      bases: REMOTE_BASES, preferred: st.host, refUrl: process.env.AGY_REMOTE_BASE ? '' : REMOTE_REF_URL,
+      fetchText: (u) => pageFetch(sess, u), checkMeta,
+    });
+    const base = src.base;
+    const got = { meta: src.metaText };
     for (const [key, rel] of REMOTE_FILES) {
       if (key === 'meta') continue;
-      try { got[key] = await pageFetch(sess, base + rel); } catch (e) { problems.push(`${key}: ${e.message}`); }
+      try { got[key] = await pageFetch(sess, src.fileBase + rel); } catch (e) { problems.push(`${key}: ${e.message}`); }
     }
     const changed = [];
     for (const [key, rel] of REMOTE_FILES) {
@@ -989,10 +990,11 @@ async function checkRemote() {
       fs.writeFileSync(remoteFile(rel), JSON.stringify(WITH_SCHEMA.has(key) ? { schema: 1, ...val } : val)); // 带上 schema，下次启动读缓存时校验得过
       changed.push(key);
     }
-    Object.assign(st, { okAt: Date.now(), host: base, err: problems.join('; ').slice(0, 300), pack: PACK_VERSION });
+    Object.assign(st, { okAt: Date.now(), host: base, ref: src.ref || '', err: problems.join('; ').slice(0, 300), pack: PACK_VERSION });
     if (changed.length) st.changedAt = Date.now();
     remoteNextAt = Date.now() + REMOTE_EVERY_MS;
-    log(`remote update via ${new URL(base).host}: ${changed.length ? 'changed ' + changed.join(', ') : 'no change'}` +
+    const how = src.ref ? ` @${src.ref.slice(0, 7)}` : ` (branch${src.notes.length ? ': ' + src.notes.join('; ').slice(0, 200) : ''})`;
+    log(`remote update via ${new URL(base).host}${how}: ${changed.length ? 'changed ' + changed.join(', ') : 'no change'}` +
       (remote.dict ? `, dict ${Object.keys(remote.dict).length}` : '') + (remote.rules ? `, rules ${remote.rules.length}` : '') +
       (remote.prices ? `, prices ${remote.prices.updated}` : '') + (remote.meta ? `, latest ${remote.meta.latest}` : '') +
       (problems.length ? `; problems: ${st.err}` : ''));
