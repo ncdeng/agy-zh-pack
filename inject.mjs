@@ -807,7 +807,7 @@ function pageScript() {
 // - Theme 页的 updates 选 off（look.json 的 online = 'off'）：不再联网，也不用 remote/ 里存的，只用安装包自带的。
 // - 换了版本（安装了新的安装包）以后，remote/ 里存的词典和规则先不用，等下一次取到再用（新安装包里的可能更新）。
 // - 测试：环境变量 AGY_REMOTE_BASE 换成别的地址（例如本机起的 http://127.0.0.1:端口/），只试这一个地址。
-const PACK_VERSION = '2.0.2';
+const PACK_VERSION = '2.0.3';
 const REMOTE_DIR = path.join(DATA, 'remote');
 const REMOTE_STATE = path.join(REMOTE_DIR, 'state.json');
 const REMOTE_BASES = process.env.AGY_REMOTE_BASE ? [process.env.AGY_REMOTE_BASE] : [
@@ -1204,6 +1204,71 @@ async function tick() {
     if (t.type !== 'page' || !t.url.startsWith(URL_PREFIX) || sessions.has(t.id)) continue;
     connect(t);
   }
+  fixStuckPanels(targets).catch((e) => log(`panel check failed: ${e.message}`));
+}
+
+// ---------- 插件面板停在 “plugin unavailable” 时重新加载（v2.0.3） ----------
+// 插件重启（版本更新、覆盖安装、被结束）后，Antigravity 会重新打开插件面板：一个 iframe，地址是 plugin://agy-zh-pack--core-<面板端口>/。
+// 打开的那一下如果没连上面板端口（插件还没开始监听，或者电脑很忙、本机连接一时变慢），Antigravity 就显示 “plugin unavailable”，
+// 之后不会自己重试，要关掉面板再打开才好（11-23 Windows 上从 v2.0.0 更新到 v2.0.1 后遇到过）。
+// 这里每次轮询时看一下我们的面板：页面里没有我们的内容就重新加载。正常的面板 30 秒看一次；
+// 重新加载以后等 10 秒再看，没好就等 20、40、80、160 秒再试，最多 6 次；连不上 iframe 时 10 秒后再看。只管连着这次面板端口的 iframe（端口对不上的是旧的，Antigravity 会换掉）。
+const PANEL_URL_RE = /^plugin:\/\/agy-zh-pack--[^/]*?-(\d+)\//;
+const PANEL_CHECK_MS = 30e3;
+const PANEL_MAX_TRIES = 6;
+const panelChecks = new Map(); // iframe 的 targetId -> { at: 上次看的时间, tries: 已经重新加载了几次 }
+let panelBusy = false;
+async function fixStuckPanels(targets) {
+  const port = globalThis.__agyZh && globalThis.__agyZh.panelPort; // 面板开始监听以后才有（lib/panel.mjs）
+  if (!port || panelBusy) return;
+  panelBusy = true;
+  try {
+    const seen = new Set();
+    for (const t of targets) {
+      const m = t.type === 'iframe' && t.webSocketDebuggerUrl ? PANEL_URL_RE.exec(String(t.url)) : null;
+      if (!m) continue;
+      seen.add(t.id);
+      if (Number(m[1]) !== port) continue;
+      const c = panelChecks.get(t.id) || { at: 0, tries: 0, failed: false };
+      panelChecks.set(t.id, c);
+      const wait = c.tries ? Math.min(10e3 * 2 ** (c.tries - 1), 160e3) : c.failed ? 10e3 : c.at ? PANEL_CHECK_MS : 0;
+      if (Date.now() - c.at < wait) continue;
+      c.at = Date.now();
+      const v = await evalOnce(t.webSocketDebuggerUrl,
+        `JSON.stringify({ ok: !!document.getElementById('s-run'), ready: document.readyState, text: (document.body ? document.body.innerText : '').trim().slice(0, 60) })`).catch(() => null);
+      let s = null;
+      try { s = typeof v === 'string' ? JSON.parse(v) : null; } catch {}
+      c.failed = !isObj(s);
+      if (c.failed) continue; // 连不上这个 iframe（本机连接一时变慢也会这样）：10 秒后再看
+      if (s.ok) { c.tries = 0; continue; }
+      if (s.ready !== 'complete') { c.failed = true; continue; } // 还在加载：10 秒后再看
+      if (c.tries >= PANEL_MAX_TRIES) continue; // 已经试够了次数，不再重新加载
+      c.tries++;
+      log(`plugin panel is not showing the panel page (${JSON.stringify(s.text)}), reloading it (try ${c.tries})`);
+      await evalOnce(t.webSocketDebuggerUrl, 'location.reload()').catch(() => {});
+    }
+    for (const id of panelChecks.keys()) if (!seen.has(id)) panelChecks.delete(id);
+  } finally {
+    panelBusy = false;
+  }
+}
+// 连上一个页面（或 iframe），求值一个表达式就断开；5 秒没结果算失败
+function evalOnce(wsUrl, expression) {
+  return new Promise((resolve, reject) => {
+    let ws;
+    const timer = setTimeout(() => { try { ws && ws.close(); } catch {} reject(Error('timeout')); }, 5000);
+    try { ws = new WebSocket(wsUrl); } catch (e) { clearTimeout(timer); reject(e); return; }
+    ws.onopen = () => ws.send(JSON.stringify({ id: 1, method: 'Runtime.evaluate', params: { expression, returnByValue: true } }));
+    ws.onmessage = (ev) => {
+      let msg;
+      try { msg = JSON.parse(ev.data); } catch { return; }
+      if (msg.id !== 1) return;
+      clearTimeout(timer);
+      try { ws.close(); } catch {}
+      resolve(msg.result && msg.result.result ? msg.result.result.value : undefined);
+    };
+    ws.onerror = () => { clearTimeout(timer); reject(Error('websocket error')); };
+  });
 }
 
 function main() {
