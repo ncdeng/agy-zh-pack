@@ -806,7 +806,7 @@ function pageScript() {
 // - Theme 页的 updates 选 off（look.json 的 online = 'off'）：不再联网，也不用 remote/ 里存的，只用安装包自带的。
 // - 换了版本（安装了新的安装包）以后，remote/ 里存的词典和规则先不用，等下一次取到再用（新安装包里的可能更新）。
 // - 测试：环境变量 AGY_REMOTE_BASE 换成别的地址（例如本机起的 http://127.0.0.1:端口/），只试这一个地址。
-const PACK_VERSION = '2.0.0';
+const PACK_VERSION = '2.0.1';
 const REMOTE_DIR = path.join(DATA, 'remote');
 const REMOTE_STATE = path.join(REMOTE_DIR, 'state.json');
 const REMOTE_BASES = process.env.AGY_REMOTE_BASE ? [process.env.AGY_REMOTE_BASE] : [
@@ -1192,7 +1192,8 @@ async function tick() {
 
   let targets;
   try {
-    const res = await fetch(`http://127.0.0.1:${port}/json/list`, { signal: AbortSignal.timeout(1500) });
+    // 4 秒：电脑很忙时本机连接偶尔要 1 秒多（11-23 实测），原来 1.5 秒会把还开着的端口误判成连不上
+    const res = await fetch(`http://127.0.0.1:${port}/json/list`, { signal: AbortSignal.timeout(4000) });
     targets = await res.json();
   } catch { portSeen(false); watchDebugPort(); return; } // 端口文件是旧的，应用已退出
   portSeen(true);
