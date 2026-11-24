@@ -65,7 +65,7 @@ function agyStatusBar(CFG) {
   S.subPhase = S.subPhase || new Map();   // 子代理 cascadeId → { running, doneAt }：本页面看到它从运行到结束的时刻（见 subVisible）
   S.execModel = S.execModel || new Map(); // executionId → 后台实际模型名（plannerConfig.modelName）
   S.execAt = S.execAt || new Map();       // executionId → 这一轮里最近见到的一次调用的时间（executionId 是一轮共用的；费用估算按它选价）
-  S.stepAt = S.stepAt || new Map();       // 对话 ID → Map(步骤序号 → 这一步开始的毫秒)：给每次调用定日子（11-25 加，见 callAt）
+  S.stepAt = S.stepAt || new Map();       // 对话 ID → Map(步骤序号 → 这一步开始的毫秒)：给每次调用定日子和选价（11-25 加，见 callTimes）
   const stepMap = (id) => { let m = S.stepAt.get(id); if (!m) { m = new Map(); S.stepAt.set(id, m); } return m; };
   // 模型编号 → 最近一次见到的实际模型名。存在本地（localStorage），子代理的流没打开时也能显示实际名。
   const ENUM_KEY = 'agy.statusbar.enumModel';
@@ -628,54 +628,85 @@ function agyStatusBar(CFG) {
   // 取到的最早那次调用还在 0 点后，就再往前对半取。调用时间是递增的：某次调用在 0 点前，它前面的都在 0 点前。
   const dayStart = () => { const d = new Date(); d.setHours(0, 0, 0, 0); return d.getTime(); };
   S.timeBusy = S.timeBusy || new Set();
-  S.timeTried = S.timeTried || new Map(); // cascadeId → 已经取过的起点（同一个起点不重复取，防止死循环）
-  // 一次调用的时间（2026-11-25 改）：先用这次调用自己那一步的开始时间（状态流、补取的步骤、调用明细取过的步骤里有）；
-  // 不知道时：今天建的对话，调用都在今天；这一轮最近见到的一步在 0 点前，整轮都在 0 点前；都不是就返回 null（还不知道）。
-  // 原来直接用 S.execAt：executionId 是一轮共用的，存的又是这一轮最新一步的时间，一轮跨过 0 点时整轮的调用都算进今天，
-  // 0 点前那部分前一天已经算过一次（实测 11-25：今天合计 $14.18，按每次调用的时间只有 $7.46）。
-  const callAt = (id, g, meta, d0) => {
-    if (g.step >= 0) {
-      const sm = S.stepAt.get(id);
-      const t = sm && sm.get(g.step);
-      if (t) return t;
-      const dc = S.detCache && S.detCache.get(id);
-      const t2 = dc && dc.times && dc.times.get(g.step);
-      if (t2) return t2;
+  // 调价时间点：这次调用匹配到的那条价目里，某一档的截止时间落在 (lo, hi] 里就返回它，没有返回 0
+  const priceCut = (names, lo, hi) => {
+    for (const r of priceRules) {
+      if (!r.re.test(names)) continue;
+      for (const x of r.t) if (Number.isFinite(x[0]) && x[0] > lo && x[0] <= hi) return x[0];
+      return 0;
     }
-    if (meta && meta.created >= d0) return meta.created;
-    const last = S.execAt.get(g.exec);
-    if (last != null && last < d0) return last;
-    return null;
+    return 0;
   };
-  // 跨 0 点的对话还有调用不知道时间：返回从第几步开始取（null = 不用取）
+  // 一个对话里每次调用的时间（2026-11-25 代码审查后改，代替 v2.0.10 的 callAt）。c.list 按调用顺序排，时间递增。
+  //   exact：这次调用自己那一步的开始时间（状态流、补取的步骤、调用明细取过的步骤里有）。
+  //   没有 exact 时用前后已知的时间夹一个范围：lo = 前面最近一次已知的时间（没有就是对话创建时间），hi = 后面最近一次已知的时间（没有就是现在）。
+  //   day：整个范围在 0 点前是 'before'，在 0 点以后是 'today'，跨 0 点是 null（还不知道，要补取）。
+  //   priceAt：选价用的时间。范围里没有调价时间点就用 lo（整个范围同一档价）；有就是 null（要补取，先按 lo 算）。
+  // v2.0.10 的 callAt 在今天建的对话没有每步时间时按创建时间选价，对话累计按这一轮最新一步的时间选价，跨调价时间点会算错
+  // （审查 A2，例如 12-01 08:00 UTC Carbon / Argon 涨价）；0 点前、又不知道时间的旧调用一直算“正在查时间”（审查 A8）。
+  // 再早（v2.0.9 以前）直接用 S.execAt（一轮共用、存最新一步的时间），跨 0 点的一轮整轮算进今天。
+  const callTimes = (id, list, meta, d0) => {
+    const n = list.length;
+    const sm = S.stepAt.get(id), dc = S.detCache && S.detCache.get(id);
+    const exact = new Array(n).fill(0);
+    for (let i = 0; i < n; i++) {
+      const g = list[i];
+      if (g && g.step >= 0) exact[i] = (sm && sm.get(g.step)) || (dc && dc.times && dc.times.get(g.step)) || 0;
+    }
+    const his = new Array(n);
+    let next = Date.now();
+    for (let i = n - 1; i >= 0; i--) { if (exact[i]) next = exact[i]; his[i] = exact[i] || next; }
+    const out = new Array(n);
+    let prev = (meta && meta.created) || 0;
+    for (let i = 0; i < n; i++) {
+      const g = list[i];
+      if (exact[i]) prev = exact[i];
+      const lo = exact[i] || prev, hi = his[i];
+      const day = hi < d0 ? 'before' : lo >= d0 ? 'today' : null;
+      const priceAt = exact[i] || (g && !priceCut(callNames(g.resp, g.key, g.exec), lo, hi) ? lo : null);
+      out[i] = { at: lo, hi, day, priceAt };
+    }
+    return out;
+  };
+  // 补取过的起点：对话 → Map(起点步骤 → { ok, at })。取到了（要的那一步有了时间）就不再从这里取，防止死循环；
+  // 没取到（请求失败、后台忙）60 秒后可以再试。原来发请求之前就记成“取过”，失败一次这个起点就再也不取（审查 A3）。
+  S.timeFetched = S.timeFetched || new Map();
+  const canFetch = (id, from) => { const e = (S.timeFetched.get(id) || new Map()).get(from); return !e || (!e.ok && Date.now() - e.at > 60000); };
+  // 今天动过的对话里还有调用不知道是不是今天的、或者今天的调用跨了调价时间点：返回从第几步开始取（null = 不用取）
   const timeFetchFrom = (id) => {
     const c = S.costs.get(id);
     const meta = convMeta(id);
     const d0 = dayStart();
-    if (!c || !c.list.length || !meta || !(meta.created < d0) || !(meta.modified >= d0)) return null;
+    if (!c || !c.list.length || !meta || !(meta.modified >= d0)) return null;
     const list = c.list;
-    const known = (g) => !g || callAt(id, g, meta, d0) != null;
-    const tried = S.timeTried.get(id) || new Set();
-    const pick = (from) => (tried.has(from) ? null : from);
-    // 末尾一段不知道时间（取过以后又有了新的调用）：从这一段第一次调用的那一步取到最后
-    let t = list.length;
-    while (t > 0 && !known(list[t - 1])) t--;
-    if (t > 0 && t < list.length && list[t].step >= 0) return pick(list[t].step);
-    let u = list.length; // 从 u 往后的调用都知道时间
-    while (u > 0 && known(list[u - 1])) u--;
-    if (u === 0) return null;
-    if (u < list.length && callAt(id, list[u], meta, d0) < d0) return null; // 已知最早的那次已经在 0 点前
-    const frac = Math.max(0, Math.min(1, (d0 - meta.created) / Math.max(1, meta.modified - meta.created)));
-    const est = Math.floor(frac * list.length - list.length * 0.1); // 估计 0 点在第几次调用，再往前留 10%
-    const k = est < u - 1 ? Math.max(0, est) : Math.floor((u - 1) / 2);
-    return pick(list[k] && list[k].step >= 0 ? list[k].step : 0);
+    const ts = callTimes(id, list, meta, d0);
+    const need = (i) => !!list[i] && (ts[i].day == null || (ts[i].day === 'today' && ts[i].priceAt == null));
+    let b = list.length - 1;
+    while (b >= 0 && !need(b)) b--;
+    if (b < 0) return null; // 都知道了
+    let a = 0;
+    while (!need(a)) a++;
+    const ok = (k) => (list[k] && list[k].step >= 0 && canFetch(id, list[k].step) ? list[k].step : null);
+    // 末尾一段（取过以后新来的调用）：从这一段第一次调用的那一步取到最后
+    if (b === list.length - 1 && a > 0) { let s = b; while (s > a && need(s - 1)) s--; if (s > 0 && !need(s - 1)) { const f = ok(s); if (f != null) return f; } }
+    // 要找的时间点（0 点，或调价时间点）在 [a, b] 这段的时间范围里大概在第几次调用：按比例估，再往前留 10%
+    const cutAt = ts.slice(a, b + 1).some((x) => x.day == null) ? d0
+      : priceCut(callNames(list[a].resp, list[a].key, list[a].exec), ts[a].at, ts[a].hi) || d0; // 这时 [a, b] 里要补的都是跨调价时间点的今天的调用
+    const lo = ts[a].at, hi = ts[b].hi, len = b - a + 1;
+    const frac = Math.max(0, Math.min(1, (cutAt - lo) / Math.max(1, hi - lo)));
+    const k = Math.min(b, Math.max(a, a + Math.floor(frac * len - len * 0.1)));
+    // 这个起点取过了：往前对半找，最后从这段的开头取
+    for (const x of [k, a + Math.floor((k - a) / 2), a]) { const f = ok(x); if (f != null) return f; }
+    return null;
   };
   S.fetchTimes = (id, from) => {
     if (S.timeBusy.has(id)) return;
     S.timeBusy.add(id);
-    const tried = S.timeTried.get(id) || new Set();
-    tried.add(from);
-    S.timeTried.set(id, tried);
+    const note = (ok) => {
+      const m = S.timeFetched.get(id) || new Map();
+      m.set(from, { ok, at: Date.now() });
+      S.timeFetched.set(id, m);
+    };
     lsCall('GetCascadeTrajectorySteps', { cascadeId: id, stepOffset: from })
       .then((j) => {
         const sm = stepMap(id);
@@ -685,9 +716,10 @@ function agyStatusBar(CFG) {
           sm.set(from + i, tms(md.createdAt));
           if (md.executionId) S.execAt.set(md.executionId, tms(md.createdAt));
         });
+        note(sm.has(from)); // 要的那一步有了时间才算取到（请求失败时 j 是 null）
         S.render();
       })
-      .then(() => { S.timeBusy.delete(id); }, () => { S.timeBusy.delete(id); });
+      .then(() => { S.timeBusy.delete(id); }, () => { note(false); S.timeBusy.delete(id); });
   };
 
   // 定时器每秒调一次：正在显示的对话树 + 今天动过的对话里，有调用在我们上次查之后结束、对话又被改过、
@@ -1266,10 +1298,13 @@ function agyStatusBar(CFG) {
       const c = S.costs.get(id);
       if (!c || !c.list.length) continue;
       t.cascades++;
-      for (const g of c.list) {
+      const ts = callTimes(id, c.list, convMeta(id), dayStart()); // 选价按每次调用自己的时间（见 callTimes，审查 A2）
+      for (let i = 0; i < c.list.length; i++) {
+        const g = c.list[i];
         if (!g) continue;
         t.calls++;
-        const cc = callCost(g.usage, callNames(g.resp, g.key, g.exec), S.execAt.get(g.exec));
+        const x = ts[i];
+        const cc = callCost(g.usage, callNames(g.resp, g.key, g.exec), x.priceAt != null ? x.priceAt : (S.execAt.get(g.exec) || x.at));
         if (!cc || cc.usd == null) { t.unpriced++; continue; }
         t.usd += cc.usd;
         const b = t.by.get(cc.pr.name) || { usd: 0, n: 0 };
@@ -1336,12 +1371,14 @@ function agyStatusBar(CFG) {
       if (!c || !c.list.length) { loading++; continue; }
       let usd = 0;
       const det = {};
-      for (const g of c.list) {
+      const ts = callTimes(id, c.list, meta, d0); // 每次调用的时间（见 callTimes）
+      for (let i = 0; i < c.list.length; i++) {
+        const g = c.list[i];
         if (!g) continue;
-        const at = callAt(id, g, meta, d0); // 每次调用自己的时间（见 callAt）
-        if (at == null) { undated++; continue; }
-        if (at < d0) continue;
-        const cc = callCost(g.usage, callNames(g.resp, g.key, g.exec), at);
+        const x = ts[i];
+        if (x.day == null) { undated++; continue; } // 还不知道是不是今天的（跨 0 点、在补取时间）
+        if (x.day === 'before') continue;
+        const cc = callCost(g.usage, callNames(g.resp, g.key, g.exec), x.priceAt != null ? x.priceAt : x.at);
         if (!cc) continue;
         const r = det[cc.pr ? cc.pr.name : 'Other'] || (det[cc.pr ? cc.pr.name : 'Other'] = [0, 0, 0, 0, 0, 0]);
         r[1]++; r[2] += cc.inp; r[3] += cc.cr; r[4] += cc.cw; r[5] += cc.out;
@@ -2179,7 +2216,7 @@ function agyStatusBar(CFG) {
     const meta = S.casMeta.get(id) || fileMeta(id) || {};
     let c = S.detCache.get(id);
     if (c && c.v !== 2) c = null;
-    if (c && c.done && c.modified === meta.modified) return c;
+    if (c && c.done && meta.modified > 0 && c.modified === meta.modified) return c; // 不知道最后修改时间的对话每次都补取（只补新增的）
     if (!c) { c = { v: 2, gens: [], times: new Map(), user: new Set(), ckpt: new Set(), stepNext: 0 }; S.detCache.set(id, c); }
     const off = Math.max(0, c.gens.length - 1); // 最后一条可能是当时还没结束的调用，重取覆盖
     const g = await lsCall('GetCascadeTrajectoryGeneratorMetadata', { cascadeId: id, generatorMetadataOffset: off });
@@ -2191,7 +2228,8 @@ function agyStatusBar(CFG) {
     if (need.length) {
       const from = Math.max(0, Math.min(...need, c.stepNext));
       const r = await lsCall('GetCascadeTrajectorySteps', { cascadeId: id, stepOffset: from });
-      const st = (r && Array.isArray(r.steps)) ? r.steps : [];
+      if (!r || !Array.isArray(r.steps)) throw Error('no trajectory steps'); // 取失败：不记成“取完了”，算进“没取到”，下次再取（审查 A4）
+      const st = r.steps;
       st.forEach((x, i) => {
         const md = (x && x.metadata) || {};
         if (md.createdAt) c.times.set(from + i, tms(md.createdAt));

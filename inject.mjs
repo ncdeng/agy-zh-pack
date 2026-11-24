@@ -75,6 +75,10 @@ function log(msg) {
 // 读：文件存在但不是合法的 JSON 时，先改名留底（<名字>.bad-年月日时分.json）再当没有文件处理，
 //   免得下一次保存把它覆盖掉、连查原因的线索都没了。11-24 发现 Windows 的 quota-samples.json 丢了
 //   11-22 23:00～11-24 00:12 的记录，当时直接覆盖写、读不出来就从空开始，原因没查清。
+//   2026-11-25（代码审查 A1）：只有“文件不存在”才返回 null。别的读错误（Windows 上文件被杀毒软件、另一个注入程序短暂占着，
+//   EBUSY / EPERM / EACCES）原来也返回 null，调用方当成第一次运行、用空数据初始化，下一次保存就把原文件盖掉了——
+//   上面那次丢数据可能就是这样。现在先重试 4 次（每次隔 150 毫秒），还不行就抛错；调用方这次用临时的空数据（带 UNREAD 标记），
+//   不缓存、不保存，下次再读。
 function writeFileSafe(file, text) {
   const tmp = `${file}.tmp-${process.pid}`;
   try {
@@ -85,9 +89,20 @@ function writeFileSafe(file, text) {
   try { fs.rmSync(tmp, { force: true }); } catch {}
   fs.writeFileSync(file, text);
 }
+const sleepSync = (ms) => { try { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); } catch {} };
+const UNREAD = Symbol('unread'); // 读不出来时调用方返回的临时对象带这个标记：不缓存、不保存
 function readJsonKeep(file) {
   let text;
-  try { text = fs.readFileSync(file, 'utf8'); } catch { return null; }
+  for (let i = 0; ; i++) {
+    try { text = fs.readFileSync(file, 'utf8'); break; } catch (e) {
+      if (e && e.code === 'ENOENT') return null;
+      if (i >= 4) {
+        log(`${path.basename(file)} could not be read (${(e && e.code) || e.message}), using empty data this time without saving`);
+        throw Object.assign(Error('read failed: ' + path.basename(file)), { code: 'AGY_READ_FAILED' });
+      }
+      sleepSync(150);
+    }
+  }
   try { return JSON.parse(text.replace(/^\uFEFF/, '')); } catch (e) { // 去掉 UTF-8 BOM
     const d = new Date();
     const p2 = (x) => String(x).padStart(2, '0');
@@ -192,7 +207,7 @@ const LOOK_FILE = path.join(DATA, 'look.json');
 let lookCache;
 function readLook() {
   if (lookCache === undefined) {
-    lookCache = readJsonKeep(LOOK_FILE);
+    try { lookCache = readJsonKeep(LOOK_FILE); } catch { return null; } // 读不出来：这次按默认外观，下次再读
   }
   return lookCache;
 }
@@ -228,7 +243,7 @@ let costBook = null;
 const COST_BOOK_V = 2;
 function readCostBook() {
   if (!costBook) {
-    costBook = readJsonKeep(COST_FILE);
+    try { costBook = readJsonKeep(COST_FILE); } catch { return { day: dayName(), v: COST_BOOK_V, by: {}, det: {}, [UNREAD]: true }; }
   }
   if (!costBook || costBook.day !== dayName() || costBook.v !== COST_BOOK_V || !costBook.by || typeof costBook.by !== 'object') costBook = { day: dayName(), v: COST_BOOK_V, by: {}, det: {} };
   if (!costBook.det || typeof costBook.det !== 'object') costBook.det = {};
@@ -240,6 +255,7 @@ const validDet = (d) => !!d && typeof d === 'object' && !Array.isArray(d) && Obj
   k.length <= 40 && Array.isArray(r) && r.length === 6 && r.every((x) => Number.isFinite(+x) && +x >= 0));
 function mergeCostBook(b) {
   const book = readCostBook();
+  if (book[UNREAD]) return; // cost-day.json 这次读不出来：不合并，免得盖掉文件里今天别的对话
   if (!b || b.day !== book.day || b.v !== COST_BOOK_V || !b.by || typeof b.by !== 'object') return;
   let changed = false;
   for (const [id, v] of Object.entries(b.by)) {
@@ -372,16 +388,18 @@ let missing = null;
 let missingPruned = null; // 上次按哪一份词典（i18nData() 的结果）去掉过已有译文的条目
 function readMissing() {
   if (!missing) {
-    missing = readJsonKeep(MISSING_FILE);
+    try { missing = readJsonKeep(MISSING_FILE); } catch { return { v: 1, items: {}, [UNREAD]: true }; }
     if (!missing || !missing.items || typeof missing.items !== 'object' || Array.isArray(missing.items)) missing = { v: 1, items: {} };
   }
   return missing;
 }
 function saveMissing() {
+  if (!missing) return; // 还没读出来过（读不出来时不缓存），不写
   try { writeFileSafe(MISSING_FILE, JSON.stringify(missing)); } catch (e) { log(`write ${path.basename(MISSING_FILE)} failed: ${e.message}`); }
 }
 function noteMissing(list) {
   const m = readMissing();
+  if (m[UNREAD]) return;
   const dict = i18nData().dict || {};
   const now = Date.now();
   let added = 0;
@@ -443,7 +461,7 @@ let history = null;
 let historyJson = '';
 function readHistory() {
   if (!history) {
-    history = readJsonKeep(HISTORY_FILE);
+    try { history = readJsonKeep(HISTORY_FILE); } catch { return { v: 2, days: {}, [UNREAD]: true }; } // 改了也不会保存（saveHistory 只写 history）
     if (!history || !history.days || typeof history.days !== 'object') history = { v: 2, days: {} };
     historyJson = JSON.stringify(history);
     // liveFrom：从哪一天起是注入程序实时记的；更早的天数只能补算（见下面“补算以前的用量”）
@@ -511,6 +529,7 @@ function migrateHistory(h) {
   log('usage history: quota records migrated to v2 (net change per period)');
 }
 function saveHistory() {
+  if (!history) return; // 还没读出来过（读不出来时不缓存），不写
   const json = JSON.stringify(history);
   if (json === historyJson) return;
   historyJson = json;
@@ -600,7 +619,7 @@ function updateHistory(book, buckets, acct, quotaAt) {
   const s = summarizeBook(book);
   // 文件里今天的数更大（账本被重置过）就保留文件里的。例外：今天的记录还是 v1 账本记的（bv 不是 2）时换一次，
   // v1 把跨 0 点的一轮整轮算进了今天（见 readCostBook）。以前的日子不改：分不清是多算了还是对话被删了
-  if (day.bv !== COST_BOOK_V || !(day.usd > s.usd)) { Object.assign(day, s); day.bv = COST_BOOK_V; }
+  if (!book[UNREAD] && (day.bv !== COST_BOOK_V || !(day.usd > s.usd))) { Object.assign(day, s); day.bv = COST_BOOK_V; } // 账本这次读不出来（UNREAD）就不动今天的数
   // 额度只在知道是哪个账号时才记（页面一般几秒内就拿到账号；拿到之前查到的额度跳过，下一次再记）
   if (buckets && buckets.length && acct) {
     const accts = h.accts || (h.accts = {});
@@ -651,7 +670,7 @@ let samples = null;
 let samplesAt = {};
 function readSamples() {
   if (!samples) {
-    samples = readJsonKeep(SAMPLES_FILE);
+    try { samples = readJsonKeep(SAMPLES_FILE); } catch { return { v: 1, a: {}, [UNREAD]: true }; }
     if (!samples || typeof samples.a !== 'object') samples = { v: 1, a: {} };
   }
   return samples;
@@ -660,6 +679,7 @@ function noteSamples(key, buckets, at) {
   if (!(at > 0) || samplesAt[key] === at) return;
   samplesAt[key] = at;
   const sm = readSamples();
+  if (sm[UNREAD]) { samplesAt[key] = 0; return; } // 这次读不出来：不写，下次再记
   const list = sm.a[key] || (sm.a[key] = []);
   for (const b of buckets) if (b.w === 'weekly') list.push([at, b.id, r4(b.used), b.reset]);
   const cut = Date.now() - SAMPLES_KEEP_MS;
@@ -883,7 +903,11 @@ const CLI_BF_V = 3; // v2（11-24）：历史改成留 400 天，重新读一次
 // cli-index.json（2026-11-24 加）：{ v: 1, files: { 文件名: { m 修改时间, d: [有调用的日子] } } }。每次读库时更新，
 // 调用明细要 32 天以前的日子时按它找库（见 cliCallsFor）。只存文件名、时间和日期。
 const CLI_INDEX_FILE = path.join(DATA, 'cli-index.json');
-const cliIndex = (() => { const j = readJsonKeep(CLI_INDEX_FILE); return j && j.files && typeof j.files === 'object' ? j : { v: 1, files: {} }; })();
+const cliIndex = (() => {
+  let j;
+  try { j = readJsonKeep(CLI_INDEX_FILE); } catch { return { v: 1, files: {}, [UNREAD]: true }; } // 读不出来：这次进程里不保存它
+  return j && j.files && typeof j.files === 'object' ? j : { v: 1, files: {} };
+})();
 let cliIndexDirty = false;
 const CLI_SCAN_MS = 30000;
 const CLI_CALLS_KEEP_MS = 32 * 86400e3;
@@ -1020,7 +1044,7 @@ async function scanCli() {
     } else if (missing) log(`cli usage: ${missing} cli conversation dbs busy, will retry`);
     if (cliIndexDirty) {
       cliIndexDirty = false;
-      try { writeFileSafe(CLI_INDEX_FILE, JSON.stringify(cliIndex)); } catch (e) { log(`write cli-index.json failed: ${e.message}`); }
+      if (!cliIndex[UNREAD]) try { writeFileSafe(CLI_INDEX_FILE, JSON.stringify(cliIndex)); } catch (e) { log(`write cli-index.json failed: ${e.message}`); }
     }
     if (changed || full) {
       const keys = Object.keys(h.days).sort();
@@ -1224,7 +1248,7 @@ function pageScript() {
 // - Theme 页的 updates 选 off（look.json 的 online = 'off'）：不再联网，也不用 remote/ 里存的，只用安装包自带的。
 // - 换了版本（安装了新的安装包）以后，remote/ 里存的词典和规则先不用，等下一次取到再用（新安装包里的可能更新）。
 // - 测试：环境变量 AGY_REMOTE_BASE 换成别的地址（例如本机起的 http://127.0.0.1:端口/），只试这一个地址。
-const PACK_VERSION = '2.0.10';
+const PACK_VERSION = '2.0.11';
 const REMOTE_DIR = path.join(DATA, 'remote');
 const REMOTE_STATE = path.join(REMOTE_DIR, 'state.json');
 const REMOTE_BASES = process.env.AGY_REMOTE_BASE ? [process.env.AGY_REMOTE_BASE] : [
