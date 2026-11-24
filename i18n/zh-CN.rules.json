@@ -302,5 +302,57 @@
   [
     "^(\\d+) hours?$",
     "$1 小时"
+  ],
+  [
+    "^Leaving on (?:Jan|January) (\\d{1,2})$",
+    "1 月 $1 日下线"
+  ],
+  [
+    "^Leaving on (?:Feb|February) (\\d{1,2})$",
+    "2 月 $1 日下线"
+  ],
+  [
+    "^Leaving on (?:Mar|March) (\\d{1,2})$",
+    "3 月 $1 日下线"
+  ],
+  [
+    "^Leaving on (?:Apr|April) (\\d{1,2})$",
+    "4 月 $1 日下线"
+  ],
+  [
+    "^Leaving on May (\\d{1,2})$",
+    "5 月 $1 日下线"
+  ],
+  [
+    "^Leaving on (?:Jun|June) (\\d{1,2})$",
+    "6 月 $1 日下线"
+  ],
+  [
+    "^Leaving on (?:Jul|July) (\\d{1,2})$",
+    "7 月 $1 日下线"
+  ],
+  [
+    "^Leaving on (?:Aug|August) (\\d{1,2})$",
+    "8 月 $1 日下线"
+  ],
+  [
+    "^Leaving on (?:Sep|September) (\\d{1,2})$",
+    "9 月 $1 日下线"
+  ],
+  [
+    "^Leaving on (?:Oct|October) (\\d{1,2})$",
+    "10 月 $1 日下线"
+  ],
+  [
+    "^Leaving on (?:Nov|November) (\\d{1,2})$",
+    "11 月 $1 日下线"
+  ],
+  [
+    "^Leaving on (?:Dec|December) (\\d{1,2})$",
+    "12 月 $1 日下线"
+  ],
+  [
+    "^(\\d+) Comments?$",
+    "$1 条评论"
   ]
 ]

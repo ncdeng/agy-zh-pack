@@ -16,6 +16,11 @@
 //   - 性能（v6 起；v7 改了排除缓存）：回复流式输出时文字变化很密，大多在排除区域里。所以先判断排除再翻译，
 //     文字节点所在元素“在排除区域里”的结果记 10 秒（WeakMap）；新加进来的元素（包括被挪动的）一律现查。
 //     200 字以内文字的翻译结果也记下（最多 5000 条，换词典时清空）。
+//   - 几句话拼成的说明（v11）：整段查不到时按句号拆开逐句翻，全部翻得出来才用。每句先查原文，再查去掉句号的原文、补上中文句号。
+//     模型菜单的 “The original Gemini 4 model for advanced workflows. Leaving on Nov 30.” 就是这样拼的，后一句的日期用规则翻。
+//   - 记下查不到译文的界面文字（v11）：只记像界面文字的（过滤路径、网址、邮箱、文件名、模型名、单个代号），数字换成 # 去重，
+//     注入程序每 30 秒用 takeMissing() 取走，存进数据目录的 i18n-missing.json（只在本机），方便补词典。
+//     不用翻的名字（Antigravity、Swarm 这类）在词典里写成原文和译文相同，就不会再被记下。
 //
 // 被注入时以 (本函数)(词典, 规则) 的形式调用；再次调用只更新词典和规则并重新翻一遍。
 function agyI18n(DICT, RULES) {
@@ -83,7 +88,7 @@ function agyI18n(DICT, RULES) {
 
   // 改了本文件的逻辑就把版本号加 1：已打开的窗口会停掉旧翻译器、换成新的，不用刷新。
   // 版本号相同时只更新词典和规则。
-  const VERSION = 10;
+  const VERSION = 11;
   const existing = window.__agyI18n;
   if (existing && existing.version === VERSION) {
     existing.update(DICT, RULES);
@@ -117,6 +122,17 @@ function agyI18n(DICT, RULES) {
     }
     return v;
   };
+  // 一句话：先查原文；以句号、问号、叹号结尾的，再查去掉标点的原文，补上中文标点
+  const END_ZH = { '.': '。', '?': '？', '!': '！' };
+  const sentence = (p) => {
+    let v = lookup(p);
+    if (v !== undefined) return v;
+    const e = END_ZH[p[p.length - 1]];
+    if (!e || p.endsWith('..')) return undefined; // “Loading...” 这类省略号不拆
+    v = lookup(p.slice(0, -1));
+    if (v === undefined) return undefined;
+    return /[。？！.?!…]$/.test(v) ? v : v + e;
+  };
   // 返回译文（保留原来的首尾空白）；不需要翻译时返回 null
   const translate = (s) => {
     if (!s || s.length > 1000 || !HAS_LATIN.test(s)) return null; // 内置技能说明有 400~600 字
@@ -137,10 +153,38 @@ function agyI18n(DICT, RULES) {
       const parts = t.split(', ').map((p, i) => lookup(i === 0 ? p : p[0].toUpperCase() + p.slice(1)));
       if (parts.every((p) => p !== undefined)) v = parts.join('，');
     }
+    // 几句话拼成的说明：按句号拆开逐句翻，全部翻得出来才用（v11）。只有一句时，也试试去掉句号后能不能查到
+    if (v === undefined && t.length <= 400 && /[.?!]$|[.?!]\s+[A-Z0-9]/.test(t)) {
+      const parts = t.split(/(?<=[.?!])\s+(?=[A-Z0-9])/).map(sentence);
+      if (parts.every((p) => p !== undefined)) v = parts.join('');
+    }
     if (v === undefined || v === t) return null;
     const lead = s.slice(0, s.length - s.trimStart().length);
     const trail = s.slice(s.trimEnd().length);
     return lead + v + trail;
+  };
+
+  // 查不到译文的界面文字（v11）。同一个模式（数字换成 #）换词典前只交一次；交过的记在 missSeen，最多 5000 个
+  const missSeen = new Set();
+  let missNew = []; // [模式, 例子]，等注入程序取走
+  const MISS_MODEL = /^(Gemini|Claude|GPT|Gemma|Grok|Llama|DeepSeek|Qwen|Kimi|Mistral|o\d)\b/i;
+  const looksUi = (t) => {
+    if (t.length < 2 || t.length > 300) return false;
+    if (!/[A-Za-z]{2}/.test(t) || /[\u3000-\u9fff\uac00-\ud7af]/.test(t)) return false; // 没有英文单词，或者已经有中日韩文字
+    if (/https?:|www\.|\S@\S|[A-Za-z]:\\|\\|(^|\s)[~.]?\/\S|\S\/\S*\//.test(t)) return false; // 网址、邮箱、路径
+    if (/\.(js|mjs|cjs|ts|tsx|jsx|py|md|json|ya?ml|toml|txt|html?|css|go|rs|java|kt|swift|c|cc|cpp|h|hpp|sh|ps1|bat|exe|dll|log|png|jpe?g|gif|svg|pdf|zip|lock)\b/i.test(t)) return false; // 文件名
+    if (!/\s/.test(t) && !/^[A-Z][a-z]+([A-Z][a-z]+)?[.:!?…]*$/.test(t)) return false; // 单个代号（只留 “Settings” 这样的单词）
+    if (MISS_MODEL.test(t) && t.split(/\s+/).length <= 6 && !/[.!?]$/.test(t)) return false; // 模型名
+    return true;
+  };
+  const noteMissing = (s) => {
+    const t = s.trim();
+    if (missSeen.size >= 5000 || dict.has(t) || !looksUi(t)) return; // 词典里有的（包括原文和译文相同、故意不翻的名字）不记
+    const k = t.replace(/\d+/g, '#');
+    if (missSeen.has(k)) return;
+    missSeen.add(k);
+    missNew.push([k, t]);
+    if (missNew.length > 500) missNew.shift();
   };
 
   const isExcluded = (el) => !el || (el.closest(EXCLUDE) !== null && el.closest(ALLOW) === null);
@@ -191,6 +235,7 @@ function agyI18n(DICT, RULES) {
     if (r === null) {
       if (o && src === o[0] && v !== src) node.nodeValue = src; // 新词典里没有了：恢复原文
       if (o) { origText.delete(node); markOrig(node.parentElement, null, node); }
+      else noteMissing(src); // 没翻过的已经确认不在排除区域里（翻过的这次先不记，免得记下被挪进排除区域的文字）
       return;
     }
     if (!checked && isExcluded(node.parentElement)) return;
@@ -208,7 +253,7 @@ function agyI18n(DICT, RULES) {
     const r = translate(src);
     if (r === null) {
       if (o && src === o[0] && v !== src) el.setAttribute(a, src);
-      if (o) delete m[a];
+      if (o) delete m[a]; else noteMissing(src);
       return;
     }
     if (!m) origAttr.set(el, (m = {}));
@@ -284,7 +329,8 @@ function agyI18n(DICT, RULES) {
 
   window.__agyI18n = {
     version: VERSION,
-    update(d, r) { load(d, r); if (document.body) walk(document.body); },
+    update(d, r) { load(d, r); missSeen.clear(); missNew = []; if (document.body) walk(document.body); },
+    takeMissing() { const a = missNew; missNew = []; return a; }, // 注入程序每 30 秒取一次（v11）
     disable() { observer.disconnect(); started = false; delete window.__agyI18n; },
     state: { origText, origAttr, origOwner }, // 给下一个版本接手
     get size() { return dict.size; },

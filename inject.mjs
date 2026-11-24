@@ -318,7 +318,8 @@ async function syncCost() {
         expression: `(() => { const S = window.__agyStats; if (!S) return null; S.todayIds = ${ids}; S.history = ${hist}; S.convFiles = ${files};
           if (S.setLook && ${lookJs}) S.setLook(${lookJs}, true);
           const want = S.panelView === 'calls' && document.querySelector('.agy-usage-panel') ? S.cliWant || null : null;
-          return JSON.stringify({ book: S.costBook || null, quota: ${QUOTA_EXPR}, pick: S.lookPick || null, want }); })()`,
+          const I = window.__agyI18n; const miss = I && I.takeMissing ? I.takeMissing() : null;
+          return JSON.stringify({ book: S.costBook || null, quota: ${QUOTA_EXPR}, pick: S.lookPick || null, want, miss }); })()`,
         returnByValue: true,
       });
       const v = r && r.result && r.result.value;
@@ -328,6 +329,7 @@ async function syncCost() {
       // 开着调用明细页：顺带把那天 CLI 的调用再交一次（__agyZhAsk 加不上时靠这个；今天的明细也借此每 30 秒更新）
       if (o.want) onPageAsk(s, JSON.stringify({ t: 'cli-calls', day: o.want })).catch(() => {});
       if (o.book) mergeCostBook(o.book);
+      if (Array.isArray(o.miss) && o.miss.length) noteMissing(o.miss);
       if (o.quota && (!quota || o.quota.at > quota.at)) quota = o.quota;
       if (o.pick && o.pick.at > 0 && (!pick || o.pick.at > pick.at)) pick = o.pick;
     } catch { /* 窗口刚关或还没注入：下次再读 */ }
@@ -353,6 +355,70 @@ async function syncCost() {
       } catch {}
     }
   }
+}
+
+// ---------- 没翻译的界面文字（v2.0.7 加） ----------
+// 翻译器（i18n/translator.js v11 起）查不到译文时，记下像界面文字的原文；syncCost 每 30 秒用 takeMissing() 取回，存在这里，方便补词典。
+// i18n-missing.json：{ v: 1, items: { 模式: { t 例子, n 交过几次, first, last } } }；模式 = 原文里的数字换成 #。
+// 只在本机，不上传。可能有界面上显示的项目名、对话标题这类名字（翻译器只过滤得掉路径、网址、邮箱、文件名、模型名和单个代号）。
+// 最多存 MISSING_MAX 条，太多时删最久没见到的。词典或规则后来有了译文的，交给面板时去掉（只查整段，不按逗号、句号拆）。
+const MISSING_FILE = path.join(DATA, 'i18n-missing.json');
+const MISSING_MAX = 1000;
+let missing = null;
+let missingPruned = null; // 上次按哪一份词典（i18nData() 的结果）去掉过已有译文的条目
+function readMissing() {
+  if (!missing) {
+    missing = readJsonKeep(MISSING_FILE);
+    if (!missing || !missing.items || typeof missing.items !== 'object' || Array.isArray(missing.items)) missing = { v: 1, items: {} };
+  }
+  return missing;
+}
+function saveMissing() {
+  try { writeFileSafe(MISSING_FILE, JSON.stringify(missing)); } catch (e) { log(`write ${path.basename(MISSING_FILE)} failed: ${e.message}`); }
+}
+function noteMissing(list) {
+  const m = readMissing();
+  const dict = i18nData().dict || {};
+  const now = Date.now();
+  let added = 0;
+  for (const x of list.slice(0, 500)) {
+    if (!Array.isArray(x) || typeof x[0] !== 'string' || typeof x[1] !== 'string' || !x[1] || x[0].length > 300 || x[1].length > 300) continue;
+    if (dict[x[1]] !== undefined) continue; // 词典里已经有了（别的窗口还在跑旧版翻译器、或者词典刚更新）
+    const e = m.items[x[0]];
+    if (e) { e.n = (e.n || 1) + 1; e.last = now; e.t = x[1]; }
+    else { m.items[x[0]] = { t: x[1], n: 1, first: now, last: now }; added++; }
+  }
+  const keys = Object.keys(m.items);
+  if (keys.length > MISSING_MAX) {
+    keys.sort((a, b) => m.items[a].last - m.items[b].last).slice(0, keys.length - MISSING_MAX).forEach((k) => { delete m.items[k]; });
+  }
+  saveMissing();
+  if (added) log(`i18n: ${added} new untranslated text(s), ${Object.keys(m.items).length} in total`);
+}
+// 交给插件面板：条数、文件位置、最近见到的 limit 条
+function missingInfo(limit = 30) {
+  const m = readMissing();
+  const d = i18nData();
+  if (missingPruned !== d) {
+    missingPruned = d;
+    const dict = d.dict || {};
+    const rules = [];
+    for (const r of d.rules || []) { try { rules.push(new RegExp(r[0])); } catch {} }
+    let del = 0;
+    for (const [k, e] of Object.entries(m.items)) {
+      const s = String((e && e.t) || '');
+      if (!s || dict[s] !== undefined || (s.length <= 120 && rules.some((re) => re.test(s)))) { delete m.items[k]; del++; }
+    }
+    if (del) { saveMissing(); log(`i18n: ${del} untranslated text(s) now have translations, removed`); }
+  }
+  const items = Object.values(m.items).sort((a, b) => (b.last || 0) - (a.last || 0));
+  return { count: items.length, file: MISSING_FILE, items: items.slice(0, limit).map((e) => ({ t: e.t, n: e.n || 1, last: e.last || 0 })) };
+}
+function clearMissing() {
+  missing = { v: 1, items: {} };
+  missingPruned = null;
+  saveMissing();
+  log('i18n: untranslated texts cleared');
 }
 
 // ---------- 每天用量历史（2026-11-20 加） ----------
@@ -1120,7 +1186,7 @@ function pageScript() {
 // - Theme 页的 updates 选 off（look.json 的 online = 'off'）：不再联网，也不用 remote/ 里存的，只用安装包自带的。
 // - 换了版本（安装了新的安装包）以后，remote/ 里存的词典和规则先不用，等下一次取到再用（新安装包里的可能更新）。
 // - 测试：环境变量 AGY_REMOTE_BASE 换成别的地址（例如本机起的 http://127.0.0.1:端口/），只试这一个地址。
-const PACK_VERSION = '2.0.6';
+const PACK_VERSION = '2.0.7';
 const REMOTE_DIR = path.join(DATA, 'remote');
 const REMOTE_STATE = path.join(REMOTE_DIR, 'state.json');
 const REMOTE_BASES = process.env.AGY_REMOTE_BASE ? [process.env.AGY_REMOTE_BASE] : [
@@ -1634,5 +1700,8 @@ globalThis.__agyZh = {
     return pageFetch(sess, url);
   },
   remoteBases: () => REMOTE_BASES.slice(),
+  // 没翻译的界面文字（v2.0.7）：插件面板显示条数和最近的几条，可以清空
+  missing: (limit) => missingInfo(limit),
+  clearMissing,
   lastGoodBase: () => (remote.state && remote.state.host) || '',
 };

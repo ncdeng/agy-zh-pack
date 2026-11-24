@@ -64,7 +64,7 @@ Zoom, font and contrast are never changed.
 
 ### Chinese UI translation
 
-Menus, settings, buttons and hints are shown in Chinese (a dictionary of 3273 entries and 76 regex rules). Conversation content, code and file names are not translated.
+Menus, settings, buttons and hints are shown in Chinese (a dictionary of 3281 entries and 89 regex rules). Conversation content, code and file names are not translated. From v2.0.7, when a text made of several sentences (for example a description and a retirement date in the model menu) is not in the dictionary, it is split at the periods and translated sentence by sentence. It is shown in Chinese only if each sentence has a translation.
 
 Some things are not translated on purpose:
 
@@ -72,6 +72,15 @@ Some things are not translated on purpose:
 - **Names that you or third parties give**: conversation titles, project names, files and paths, automation names, Coordinator names, branch / repository / worktree names, SSH hosts, plugin titles and MCP server names are not translated, even when they are the same as a dictionary word.
 - **Single words that change meaning without context**: for example Plan (it can mean a subscription plan or a work plan), Type and Space stay in English when they stand alone.
 - **Error messages** are translated, and the original English text shows when you hold the mouse over them, so you can search for it or report it.
+
+#### Untranslated UI text
+
+From v2.0.7, UI text that has no translation is recorded in `i18n-missing.json` in the data folder. The "没翻译的界面文字" (untranslated UI text) section of the plugin panel shows the count. You can expand it to see the latest 30 items, or clear the list.
+
+- The file stays on your computer. It is not uploaded.
+- The plugin does not record paths, URLs, email addresses, file names, model names and single code-like words. Texts that are different only in their numbers are recorded as one item (for example "Retry in 5 seconds" and "Retry in 12 seconds"). But names shown in the UI, such as project names and conversation titles, can be recorded.
+- To help with the dictionary, you can paste the UI text from the file into a GitHub issue of this project (remove names that you do not want to make public first).
+- A name that must stay in English is written in the dictionary with the same text as the translation (for example `"Swarm": "Swarm"`). Then it is not recorded again.
 
 #### Status bar only (no translation)
 
@@ -178,8 +187,9 @@ Cost = tokens × the public API list price from Google / Anthropic, in US dollar
 - **在线更新 (online updates)**: the switch for online updates of the dictionary and prices, the time and address of the last check, the number of online dictionary entries, the date of the price table, and "立即检查" (check now).
 - **版本 (version)**: the current version and whether a new version is out. When one is out, an "更新" (update) button shows; see [Version updates](#version-updates).
 - **没带调试端口启动时 (start without the debugging port)**: ask / auto reopen / do nothing; see [Without the debugging port flag](#without-the-debugging-port-flag).
+- **没翻译的界面文字 (untranslated UI text)** (from v2.0.7): how many items are recorded and in which file; you can expand the latest 30 items or clear the list. See [Untranslated UI text](#untranslated-ui-text).
 
-The panel shows only status and these switches, no email or other personal data. Its API listens only on `127.0.0.1` and needs the token that Antigravity gives to the panel.
+The panel shows only status, these switches and the untranslated UI text, no email or other personal data (the untranslated UI text can include names such as project names and conversation titles). Its API listens only on `127.0.0.1` and needs the token that Antigravity gives to the panel.
 
 After the plugin restarts (after a version update or a reinstall), Antigravity opens the panel again. If the plugin cannot be reached at that moment, the panel stays on the Antigravity page "plugin unavailable", and Antigravity does not try again. From v2.0.3, when the plugin finds that the panel does not show its page, it reloads the panel (up to 6 times). If this does not help, close the panel and open it again.
 
@@ -271,7 +281,7 @@ The installer runs on the Node that comes with Antigravity (`Antigravity.exe` on
 5. Windows: it adds the start flag to the Antigravity shortcuts. macOS: it asks whether to reopen Antigravity automatically when it starts without the flag.
 6. It asks whether to use the author's color theme (default: no).
 
-The **data folder** is `~/.gemini/antigravity/plugin_data/agy-zh-pack` (`%USERPROFILE%\.gemini\antigravity\plugin_data\agy-zh-pack` on Windows). A version update replaces the whole plugin folder, so the data is kept outside it. It holds: `cost-day.json` (today's cost), `usage-history.json` (daily usage), `quota-samples.json` (limit readings), `cli-index.json` (the days on which each agy CLI database has calls), `look.json` (status bar look and the online update switch), `settings.json` (what to do on a start without the flag), `originals.json` (saved colors), `remote/` (files from online updates), `inject.log` (log) and `relaunch.log` (restart records). If a data file cannot be read (for example, it is damaged), it is renamed to `<name>.bad-<date and time>.json` and kept, so new data does not overwrite it.
+The **data folder** is `~/.gemini/antigravity/plugin_data/agy-zh-pack` (`%USERPROFILE%\.gemini\antigravity\plugin_data\agy-zh-pack` on Windows). A version update replaces the whole plugin folder, so the data is kept outside it. It holds: `cost-day.json` (today's cost), `usage-history.json` (daily usage), `quota-samples.json` (limit readings), `cli-index.json` (the days on which each agy CLI database has calls), `i18n-missing.json` (untranslated UI text), `look.json` (status bar look and the online update switch), `settings.json` (what to do on a start without the flag), `originals.json` (saved colors), `remote/` (files from online updates), `inject.log` (log) and `relaunch.log` (restart records). If a data file cannot be read (for example, it is damaged), it is renamed to `<name>.bad-<date and time>.json` and kept, so new data does not overwrite it.
 
 It does not change zoom, font or contrast. It changes colors only if you choose the author's color theme.
 
@@ -301,6 +311,7 @@ v1.0.0 changed the look directly at install time (131% zoom, strong contrast, sy
 
 | Antigravity version | What was tested | Date |
 |---|---|---|
+| 2.34.0 | v2.0.7 (real Windows 11 and macOS 15.7.9 computers): sentence-by-sentence translation: test text on the page, "Use Hydrogen for better quality with lower quota usage. Leaving on Dec 15.", became "建议改用 Hydrogen：质量更好，用的额度更少。12 月 15 日下线。", and "1 Comment" / "3 Comments" became "1 条评论" / "3 条评论" (on both computers); in the offline tests, text with one sentence that has no translation stays in English. Untranslated UI text: the test text was in `i18n-missing.json` within 30 seconds, a path and an email address added at the same time were not recorded, the panel API returned the count, the file location and the latest items, and after "清空" (clear) the file was empty (on both computers); the first collection on Windows recorded Antigravity, Orchestrator, Turbo, Swarm, "1 Comment" and "2 Comments": the first 4 are now marked as not translated in the dictionary, and a rule was added for the last two; 18 more offline tests for the filters. **Not tested**: how the expanded list looks in the panel (the panel was not shown in the window during the test, so only its text was read) | 2026-11-24 |
 | 2.34.0 | v2.0.6 (real Windows 11 and macOS 15.7.9 computers): the model filter in the call details (Windows, 11-24, Carbon: 217 calls, $36.69); the per-conversation view (28 conversations, the most expensive one $42.34, 43%), and clicking a row to see only that conversation (420 calls); days older than 32 days: on Windows, 167 CLI databases were read to build the index, and 10-20 showed 2028 calls, $126, in about 5 seconds; limit period records: 1 period was made from an earlier early reset, and the hover text showed "11-22 09:41 – 11-24 04:08, 8.5% used, $152, cap ≈ $1,789"; 4 unit tests for the period records (one record when the readings go back and forth, a normal reset, no record for unused periods and 5-hour limits). macOS: 309 calls on 11-22, CLI conversation titles, 1 period made. **Not tested**: a real normal reset (the first one will be the Claude group on 11-29) | 2026-11-24 |
 | 2.34.0 | v2.0.5 (real Windows 11 and macOS 15.7.9 computers): `cap ≈` from the start time of the period (on Windows, the Gemini period started at 09:31 on 11-24; the cost of this period changed from the whole-day $92.05 to $77.12, and cap from $1,340 to $1,123); the `all | desktop | CLI` filter in the call details (CLI: 56 calls, $20.37) and `show 187 more` (all 787 calls shown); CLI conversations show a title or the start of the first message; the `all` view: after the new fill-in, Windows shows 94 days from 08-23 to 11-24 (the desktop databases go back only to 11-02; the earlier days come from the CLI), drawn as 15 weekly bars; macOS has only 3 days of data, so `all` shows 7 daily bars. **Not tested**: how fast today's cost in the status bar changes while the CLI is running (only checked that the check in the page runs) | 2026-11-24 |
 | 2.34.0 | v2.0.4 (real Windows 11 and macOS 15.7.9 computers): 21 unit tests for the weekly limit parts and the early reset records, including a replay of the real 11-24 readings from both computers (on Windows, that day's Gemini weekly usage changed from 14.84% to the correct 7.06%, and each computer got 1 early reset record); 8 tests for the safe data file reads and writes; the `↺` marks and hover text checked on both computers. agy CLI usage: on Windows, 157 CLI databases with 13,116 calls were read, and that day's call and token counts matched a separate counting script; today's cost in the status bar, the panel and the call details include the CLI ($88.59 that day = desktop $68.22 + CLI $20.37); on macOS, 7 databases with 309 calls were read. **Not tested**: the retry when a CLI database cannot be read for a moment because the CLI is writing it (the code is there, but it did not happen in the tests) | 2026-11-24 |
@@ -380,7 +391,7 @@ The private key is kept on the author's computer, encrypted with Windows DPAPI (
 | `statusbar.js` | Usage status bar and cost estimate (runs in the page) |
 | `i18n/translator.js` | Translator (runs in the page) |
 | `i18n/zh-CN.json` | Dictionary: English UI text → Chinese |
-| `i18n/zh-CN.rules.json` | Regex rules: relative times, thinking time and other text with numbers |
+| `i18n/zh-CN.rules.json` | Regex rules: relative times, thinking time, retirement dates and other text with numbers |
 | `data/prices.json` | The online price table (GitHub Actions updates it daily from the official pricing pages) |
 | `data/meta.json` | The latest version number (changed at each release) |
 | `tools/plugin-files.mjs` | Which files belong to the plugin (used for signing, building and installing) |

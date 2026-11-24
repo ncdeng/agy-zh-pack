@@ -3275,5 +3275,9 @@
   "Leaving Soon": "即将下线",
   "The original Gemini 4 model for advanced workflows. Leaving on Nov 30.": "最初的 Gemini 4 模型，适合高级工作流。11 月 30 日下线。",
   "Use Hydrogen for better quality with lower quota usage. Leaving on Nov 30.": "建议改用 Hydrogen：质量更好，用的额度更少。11 月 30 日下线。",
-  "Use Hydrogen for better quality with lower quota usage": "建议改用 Hydrogen：质量更好，用的额度更少"
+  "Use Hydrogen for better quality with lower quota usage": "建议改用 Hydrogen：质量更好，用的额度更少",
+  "Antigravity": "Antigravity",
+  "Orchestrator": "Orchestrator",
+  "Turbo": "Turbo",
+  "Swarm": "Swarm"
 }
