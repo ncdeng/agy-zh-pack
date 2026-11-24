@@ -10,7 +10,7 @@
 //     状态栏给以前的天数算钱时还要用。
 //   - 有变化才写文件。GITHUB_OUTPUT 里写 changed=true/false 和 problems=问题说明（工作流据此提交或开 issue）。
 // 安全检查（任何一条不过，这个模型保留原来的价，记进 problems）：
-//   - 必需的 7 个模型（REQUIRED）都要解析出来；
+//   - 必需的模型（REQUIRED，还在卖的那几个）都要解析出来；
 //   - 和原来的价比，每个数只能在 0.2～5 倍之间（防止页面改版后把别的数字当成单价）；
 //   - 按提示长度分档（prompts <= 200k）或写法看不懂的模型直接跳过，不猜。
 // 只用 Node.js 自带的模块（需要 22 或更高版本，用到内置 fetch）。
@@ -24,8 +24,11 @@ const SOURCES = {
   gemini: 'https://aistudio.google.com/docs/pricing',
   claude: 'https://cloud.google.com/model-garden/partner-models/pricing',
 };
-// 状态栏单价表（statusbar.js 的 PRICES）用到的模型。少了任何一个都算出问题。
-const REQUIRED = ['gemini-4-carbon', 'gemini-4-argon', 'gemini-4-neon', 'gemini-4-hydrogen', 'gemini-3.8-flash', 'claude-opus-5-5', 'claude-sonnet-5-5'];
+// 状态栏单价表（statusbar.js 的 PRICES）用到的、还在卖的模型。页面上少了任何一个都算出问题（可能是页面改版了）。
+// 已经宣布下线的模型不放进来：Google 会从价格页删掉它们，删掉以后 data/prices.json 照样留着原来的价（下线以前的调用还要算钱），
+// 不算出问题。要是放着，删掉那天会开一个 issue；同标题的 issue 开着时工作流不再开新的，以后页面真改版了就看不出来。
+// 2026-11-24 去掉 gemini-4-argon、gemini-3.8-flash：Antigravity 模型菜单写着 11-30 下线（Leaving on Nov 30）。
+const REQUIRED = ['gemini-4-carbon', 'gemini-4-neon', 'gemini-4-hydrogen', 'claude-opus-5-5', 'claude-sonnet-5-5'];
 const MONTHS = { january: 1, february: 2, march: 3, april: 4, may: 5, june: 6, july: 7, august: 8, september: 9, october: 10, november: 11, december: 12 };
 
 const args = process.argv.slice(2);

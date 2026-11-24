@@ -359,14 +359,26 @@ node inject.mjs
 - If you change the logic in `i18n/translator.js`, add 1 to its `VERSION`. Open windows then switch to the new translator.
 - If the injector starts long after Antigravity opened, the status bar shows `Press Ctrl+R to reload this window`. Press Ctrl+R once to reload the window.
 
-**Release** (needs the author's signing key):
+**Tests**: `node --test "tests/*.test.mjs"` (needs Node.js 22.13 or later; the CLI database test uses `node:sqlite`). The test data is written in the tests. The tests do not read the usage records or conversation databases on your computer. GitHub Actions also runs the tests at each push (`.github/workflows/test.yml`). `inject.mjs` is not a module, so the tests cut its functions out by markers. If you change the code near these functions, a test tells you to update it.
 
-1. Change `version` in `plugin.json` and `PACK_VERSION` in `inject.mjs` to the new version (the two must match).
-2. `node tools/release.mjs sign`: creates and signs `plugin-manifest.json` from the file list in `tools/plugin-files.mjs`.
-3. `node package/build.mjs`: checks the signed manifest and creates `dist/agy-zh/` and a zip with the same name.
-4. Commit (including `plugin-manifest.json`), tag `v<version>` and push. One-click updates get the files from `@v<version>` on jsDelivr, so the tag must contain the signed manifest.
-5. Publish on GitHub Releases, with the zip renamed to `agy-zh-pack-v<version>.zip` (GitHub removes Chinese characters from file names).
-6. Change `latest` and `date` in `data/meta.json` to the new version and push to main. Only then do users of older versions see the new-version notice.
+**Release** (needs the author's signing key): first finish the code and both READMEs, `git add` new files, and write the commit message and the release notes. Then run
+
+```
+node tools/publish.mjs <version> --title "<release title>" --notes <release-notes.md> --message <commit-message.txt>
+```
+
+The script does the steps below in order. If a step fails, the script stops and tells you which step it stopped at. After you find the cause, add `--from <step>` to continue. Before a release, you can add `--check` to only check the conditions and run the tests, without changing files.
+
+1. `test`: runs the tests.
+2. `bump`: changes `version` in `plugin.json` and `PACK_VERSION` in `inject.mjs` to the new version.
+3. `sign`: `node tools/release.mjs sign` creates and signs `plugin-manifest.json` from the file list in `tools/plugin-files.mjs`.
+4. `build`: `node package/build.mjs` checks the signed manifest and creates `dist/agy-zh/` and a zip with the same name; the zip is then copied to the English name `agy-zh-pack-v<version>.zip` (GitHub removes Chinese characters from file names).
+5. `commit`: commits (including `plugin-manifest.json`), tags `v<version>`, and checks the signed manifest against the files in the tag. One-click updates get the files from `@v<version>` on jsDelivr, so the tag must contain the signed manifest.
+6. `push`: pushes main and the tag.
+7. `release`: publishes on GitHub Releases, uploads the zip, and downloads it again to check the sha256.
+8. `meta`: changes `latest` and `date` in `data/meta.json` to the new version and pushes to main. Only then do users of older versions see the new-version notice, so this step is the last one.
+
+Before it starts, the script also checks that you are on main, that the local main is not behind GitHub (the price workflow can push to main every day; if it is behind, run `git pull --rebase` first), that there are no untracked new files, and that the tag does not exist yet.
 
 The private key is kept on the author's computer, encrypted with Windows DPAPI (created by `tools/release.mjs keygen`). `node tools/release.mjs export <file>` backs it up to a file that only the current account can read; `node tools/release.mjs import <file>` restores it after a system reinstall or on a new computer. Without the private key, no new version can be signed, and installed plugins get no more updates.
 
@@ -396,9 +408,12 @@ The private key is kept on the author's computer, encrypted with Windows DPAPI (
 | `data/meta.json` | The latest version number (changed at each release) |
 | `tools/plugin-files.mjs` | Which files belong to the plugin (used for signing, building and installing) |
 | `tools/release.mjs` | Release signing: key creation, signing, checking, key backup and restore |
+| `tools/publish.mjs` | Release with one command: tests, version number, signing, build, commit and tag, push, GitHub release, `data/meta.json` |
 | `tools/update-prices.mjs` | Updates `data/prices.json` from the official pricing pages |
 | `.github/workflows/update-prices.yml` | Runs that script every day; commits when a price changes and opens an issue when there is a problem |
 | `.github/workflows/purge-cdn.yml` | Clears the jsDelivr cache after the dictionary or `data/` is pushed |
+| `.github/workflows/test.yml` | Runs the tests in `tests/` at each push |
+| `tests/` | Tests: limit calculation, data file reading and writing, CLI databases, translator, data files, syntax and version numbers |
 | `package/app/setup.mjs` | Install, uninstall, color toggle |
 | `package/build.mjs` | Builds the package |
 | `macos/` | macOS scripts for running from source (the v1.x way); to install the plugin, use the package |

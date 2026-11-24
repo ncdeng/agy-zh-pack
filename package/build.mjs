@@ -20,7 +20,8 @@ const PACK_VERSION = (/const PACK_VERSION = '([\d.]+)'/.exec(fs.readFileSync(pat
 const plugin = JSON.parse(fs.readFileSync(path.join(SRC, 'plugin.json'), 'utf8'));
 if (!PACK_VERSION || plugin.version !== PACK_VERSION) { console.error(`版本号对不上：inject.mjs ${PACK_VERSION}，plugin.json ${plugin.version}`); process.exit(1); }
 const META = JSON.parse(fs.readFileSync(path.join(SRC, 'data', 'meta.json'), 'utf8'));
-if (META.latest !== PACK_VERSION) console.warn(`提醒：data/meta.json 的 latest 是 ${META.latest}，要发 ${PACK_VERSION} 的话记得改（推到 main 后旧版本的用户才会看到新版本提示）。`);
+// 由 tools/publish.mjs 运行时不提醒：它最后一步自己改 meta.json
+if (META.latest !== PACK_VERSION && !process.env.AGY_ZH_PUBLISH) console.warn(`提醒：data/meta.json 的 latest 是 ${META.latest}，要发 ${PACK_VERSION} 的话记得改（推到 main 后旧版本的用户才会看到新版本提示）。`);
 const { verifyManifest } = await import(pathToFileURL(path.join(SRC, 'lib', 'update.mjs')).href);
 const manifestText = fs.readFileSync(path.join(SRC, 'plugin-manifest.json'), 'utf8');
 const manifest = verifyManifest(manifestText);

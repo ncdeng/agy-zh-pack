@@ -356,14 +356,26 @@ node inject.mjs
 - 改了 `i18n/translator.js` 的逻辑，要把里面的 `VERSION` 加 1，已打开的窗口才会换用新翻译器。
 - 如果注入程序在 Antigravity 打开很久以后才启动，状态栏会提示 `Press Ctrl+R to reload this window`，按一次 Ctrl+R 刷新窗口就好。
 
-**发版**（需要作者的签名私钥）：
+**测试**：`node --test "tests/*.test.mjs"`（需要 Node.js 22.13 以上，读 CLI 库的测试用到 `node:sqlite`）。测试数据都是写在测试里的合成数据，不读本机的用量记录和对话库。每次推送，GitHub Actions 也会跑一遍（`.github/workflows/test.yml`）。`inject.mjs` 不是模块，测试按标记截出其中的函数；改了这些函数附近的代码，测试会提示要跟着改。
 
-1. 把 `plugin.json` 的 `version` 和 `inject.mjs` 的 `PACK_VERSION` 改成新版本（两处要一致）。
-2. `node tools/release.mjs sign`：按 `tools/plugin-files.mjs` 的清单生成并签名 `plugin-manifest.json`。
-3. `node package/build.mjs`：核对签名清单，生成 `dist/agy-zh/` 和同名 zip。
-4. 提交（包括 `plugin-manifest.json`），打标签 `v<版本>` 并推上去。一键更新从 jsDelivr 的 `@v<版本>` 取文件，所以标签里必须有签好名的清单。
-5. 在 GitHub Releases 发布，zip 改成英文名 `agy-zh-pack-v<版本>.zip`（GitHub 会去掉文件名里的中文）。
-6. 把 `data/meta.json` 的 `latest`、`date` 改成新版本，推到 main。装着旧版本的用户这时才会看到新版本提示。
+**发版**（需要作者的签名私钥）：先改好代码和 README（中英文），新文件先 `git add`，写好提交说明和发布说明，再运行
+
+```
+node tools/publish.mjs <版本> --title "<Release 标题>" --notes <发布说明.md> --message <提交说明.txt>
+```
+
+脚本按顺序做下面几步，任何一步失败就停下，说明停在哪一步；查明原因后加 `--from <步骤>` 接着做。发版前可以先加 `--check`，只检查条件、跑测试，不改文件。
+
+1. `test`：跑测试。
+2. `bump`：把 `plugin.json` 的 `version` 和 `inject.mjs` 的 `PACK_VERSION` 改成新版本。
+3. `sign`：`node tools/release.mjs sign`，按 `tools/plugin-files.mjs` 的清单生成并签名 `plugin-manifest.json`。
+4. `build`：`node package/build.mjs`，核对签名清单，生成 `dist/agy-zh/` 和同名 zip，再复制成英文名 `agy-zh-pack-v<版本>.zip`（GitHub 会去掉文件名里的中文）。
+5. `commit`：提交（包括 `plugin-manifest.json`），打标签 `v<版本>`，按标签里的文件核对签名清单。一键更新从 jsDelivr 的 `@v<版本>` 取文件，所以标签里必须有签好名的清单。
+6. `push`：推送 main 和标签。
+7. `release`：在 GitHub Releases 发布，上传 zip，下载回来核对 sha256。
+8. `meta`：把 `data/meta.json` 的 `latest`、`date` 改成新版本，推到 main。装着旧版本的用户这时才会看到新版本提示，所以这一步放在最后。
+
+开始前脚本还会检查：在 main 分支上；本地 main 不落后于 GitHub（价格表工作流每天可能往 main 推提交，落后时先 `git pull --rebase`）；没有未跟踪的新文件；标签还不存在。
 
 私钥用 Windows DPAPI 加密存在作者电脑上（`tools/release.mjs keygen` 生成）。`node tools/release.mjs export <文件>` 备份成只有当前账号能读的文件，`node tools/release.mjs import <文件>` 在重装系统或换电脑后恢复。私钥丢了就签不了新版本，已安装的插件也收不到更新。
 
@@ -393,9 +405,12 @@ node inject.mjs
 | `data/meta.json` | 最新版本号（发版时改） |
 | `tools/plugin-files.mjs` | 插件包含哪些文件（签名、打包、安装都按它） |
 | `tools/release.mjs` | 发版签名：生成钥匙、签名、校验、备份和恢复私钥 |
+| `tools/publish.mjs` | 一条命令发版：测试、改版本号、签名、打包、提交打标签、推送、建 Release、改 `data/meta.json` |
 | `tools/update-prices.mjs` | 按官方价格页更新 `data/prices.json` |
 | `.github/workflows/update-prices.yml` | 每天跑一次上面的脚本：价格变了就提交，出了问题就开 issue |
 | `.github/workflows/purge-cdn.yml` | 推送了词典或 `data/` 以后，清掉 jsDelivr 上的缓存 |
+| `.github/workflows/test.yml` | 每次推送都跑一遍 `tests/` 里的测试 |
+| `tests/` | 测试：额度算法、读写数据文件、读 CLI 库、翻译器、数据文件、语法和版本号 |
 | `package/app/setup.mjs` | 一键安装、卸载、配色开关 |
 | `package/build.mjs` | 生成安装包 |
 | `macos/` | 从源码运行时的 macOS 脚本（v1.x 的方式）；装插件请用安装包 |

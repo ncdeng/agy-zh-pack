@@ -1,0 +1,26 @@
+# 每次推送和拉取请求都跑一遍 tests/ 里的测试（node --test，只用 Node.js 自带的模块，不用装依赖）。
+# 测试数据都是写在测试里的合成数据，不需要本机的用量记录和对话库。说明见 tests/_helpers.mjs。
+# 用 Node 24：和 Antigravity 自带的 Node 一样（插件就是在它上面跑的）；读 CLI 库的测试要 node:sqlite。
+# 注意：update-prices 工作流用 GITHUB_TOKEN 推送的提交不会触发这里。
+name: test
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - run: node --test "tests/*.test.mjs"
