@@ -64,7 +64,9 @@ function agyStatusBar(CFG) {
   S.casMeta = S.casMeta || new Map();     // cascadeId → { created, modified }：后台对话摘要里的创建 / 最后修改时间（算“今天”用）
   S.subPhase = S.subPhase || new Map();   // 子代理 cascadeId → { running, doneAt }：本页面看到它从运行到结束的时刻（见 subVisible）
   S.execModel = S.execModel || new Map(); // executionId → 后台实际模型名（plannerConfig.modelName）
-  S.execAt = S.execAt || new Map();       // executionId → 这次调用开始的时间（费用估算按它选价）
+  S.execAt = S.execAt || new Map();       // executionId → 这一轮里最近见到的一次调用的时间（executionId 是一轮共用的；费用估算按它选价）
+  S.stepAt = S.stepAt || new Map();       // 对话 ID → Map(步骤序号 → 这一步开始的毫秒)：给每次调用定日子（11-25 加，见 callAt）
+  const stepMap = (id) => { let m = S.stepAt.get(id); if (!m) { m = new Map(); S.stepAt.set(id, m); } return m; };
   // 模型编号 → 最近一次见到的实际模型名。存在本地（localStorage），子代理的流没打开时也能显示实际名。
   const ENUM_KEY = 'agy.statusbar.enumModel';
   if (!S.enumModel) {
@@ -209,6 +211,7 @@ function agyStatusBar(CFG) {
       }
       if (!md.modelUsage || !md.createdAt) continue;
       if (md.executionId) S.execAt.set(md.executionId, tms(md.createdAt));
+      if (Number.isInteger(indices[i]) && indices[i] >= 0 && (!src || !src.cascadeId || src.cascadeId === convId)) stepMap(convId).set(indices[i], tms(md.createdAt));
       // 思考时长（界面上的 “Thought for 4s”）在规划回复步骤里，算 tok/s 要用，挂到元数据上
       if (st.plannerResponse && st.plannerResponse.thinkingDuration) md._thinkDur = st.plannerResponse.thinkingDuration;
       const id = (src && src.cascadeId) || convId;
@@ -626,23 +629,46 @@ function agyStatusBar(CFG) {
   const dayStart = () => { const d = new Date(); d.setHours(0, 0, 0, 0); return d.getTime(); };
   S.timeBusy = S.timeBusy || new Set();
   S.timeTried = S.timeTried || new Map(); // cascadeId → 已经取过的起点（同一个起点不重复取，防止死循环）
+  // 一次调用的时间（2026-11-25 改）：先用这次调用自己那一步的开始时间（状态流、补取的步骤、调用明细取过的步骤里有）；
+  // 不知道时：今天建的对话，调用都在今天；这一轮最近见到的一步在 0 点前，整轮都在 0 点前；都不是就返回 null（还不知道）。
+  // 原来直接用 S.execAt：executionId 是一轮共用的，存的又是这一轮最新一步的时间，一轮跨过 0 点时整轮的调用都算进今天，
+  // 0 点前那部分前一天已经算过一次（实测 11-25：今天合计 $14.18，按每次调用的时间只有 $7.46）。
+  const callAt = (id, g, meta, d0) => {
+    if (g.step >= 0) {
+      const sm = S.stepAt.get(id);
+      const t = sm && sm.get(g.step);
+      if (t) return t;
+      const dc = S.detCache && S.detCache.get(id);
+      const t2 = dc && dc.times && dc.times.get(g.step);
+      if (t2) return t2;
+    }
+    if (meta && meta.created >= d0) return meta.created;
+    const last = S.execAt.get(g.exec);
+    if (last != null && last < d0) return last;
+    return null;
+  };
+  // 跨 0 点的对话还有调用不知道时间：返回从第几步开始取（null = 不用取）
   const timeFetchFrom = (id) => {
     const c = S.costs.get(id);
     const meta = convMeta(id);
     const d0 = dayStart();
     if (!c || !c.list.length || !meta || !(meta.created < d0) || !(meta.modified >= d0)) return null;
     const list = c.list;
+    const known = (g) => !g || callAt(id, g, meta, d0) != null;
+    const tried = S.timeTried.get(id) || new Set();
+    const pick = (from) => (tried.has(from) ? null : from);
+    // 末尾一段不知道时间（取过以后又有了新的调用）：从这一段第一次调用的那一步取到最后
+    let t = list.length;
+    while (t > 0 && !known(list[t - 1])) t--;
+    if (t > 0 && t < list.length && list[t].step >= 0) return pick(list[t].step);
     let u = list.length; // 从 u 往后的调用都知道时间
-    while (u > 0 && list[u - 1] && S.execAt.has(list[u - 1].exec)) u--;
+    while (u > 0 && known(list[u - 1])) u--;
     if (u === 0) return null;
-    if (u < list.length && S.execAt.get(list[u].exec) < d0) return null; // 已知最早的那次已经在 0 点前
+    if (u < list.length && callAt(id, list[u], meta, d0) < d0) return null; // 已知最早的那次已经在 0 点前
     const frac = Math.max(0, Math.min(1, (d0 - meta.created) / Math.max(1, meta.modified - meta.created)));
     const est = Math.floor(frac * list.length - list.length * 0.1); // 估计 0 点在第几次调用，再往前留 10%
     const k = est < u - 1 ? Math.max(0, est) : Math.floor((u - 1) / 2);
-    const from = list[k] && list[k].step >= 0 ? list[k].step : 0;
-    const tried = S.timeTried.get(id) || new Set();
-    if (tried.has(from)) return null;
-    return from;
+    return pick(list[k] && list[k].step >= 0 ? list[k].step : 0);
   };
   S.fetchTimes = (id, from) => {
     if (S.timeBusy.has(id)) return;
@@ -652,10 +678,13 @@ function agyStatusBar(CFG) {
     S.timeTried.set(id, tried);
     lsCall('GetCascadeTrajectorySteps', { cascadeId: id, stepOffset: from })
       .then((j) => {
-        for (const st of (j && j.steps) || []) {
+        const sm = stepMap(id);
+        ((j && j.steps) || []).forEach((st, i) => {
           const md = st && st.metadata;
-          if (md && md.executionId && md.createdAt) S.execAt.set(md.executionId, tms(md.createdAt));
-        }
+          if (!md || !md.createdAt) return;
+          sm.set(from + i, tms(md.createdAt));
+          if (md.executionId) S.execAt.set(md.executionId, tms(md.createdAt));
+        });
         S.render();
       })
       .then(() => { S.timeBusy.delete(id); }, () => { S.timeBusy.delete(id); });
@@ -1260,8 +1289,11 @@ function agyStatusBar(CFG) {
   const DAY_KEY = 'agy.statusbar.costDay';
   const dayName = () => { const d = new Date(); return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()); };
   const detCalls = (d) => { let n = 0; if (d && typeof d === 'object') for (const k in d) n += +(d[k] && d[k][1]) || 0; return n; };
+  // 账本版本：v2（2026-11-25）起每次调用按自己的时间定日子。v1 的账本里跨 0 点的一轮整轮算进了今天，而且合并时取较大的数，
+  // 改正以后也盖不掉，所以 v1 的账本不再合并（今天的数从头重算一次；注入程序那边同样丢掉 v1 的 cost-day.json）
+  const BOOK_V = 2;
   const mergeBook = (into, b) => {
-    if (!b || b.day !== into.day || !b.by || typeof b.by !== 'object') return;
+    if (!b || b.day !== into.day || (b.v || 1) !== into.v || !b.by || typeof b.by !== 'object') return;
     if (!into.det || typeof into.det !== 'object') into.det = {};
     for (const [id, v] of Object.entries(b.by)) {
       const n = Number(v);
@@ -1275,8 +1307,8 @@ function agyStatusBar(CFG) {
   };
   const loadBook = () => {
     const day = dayName();
-    if (!S.costBook || S.costBook.day !== day) {
-      const book = { day, by: {}, det: {} };
+    if (!S.costBook || S.costBook.day !== day || S.costBook.v !== BOOK_V) {
+      const book = { day, v: BOOK_V, by: {}, det: {} };
       try { mergeBook(book, JSON.parse(localStorage.getItem(DAY_KEY) || 'null')); } catch (e) {}
       S.costBook = book;
     }
@@ -1306,8 +1338,7 @@ function agyStatusBar(CFG) {
       const det = {};
       for (const g of c.list) {
         if (!g) continue;
-        let at = S.execAt.get(g.exec);
-        if (at == null && meta.created >= d0) at = meta.created; // 今天创建的对话：调用都在今天
+        const at = callAt(id, g, meta, d0); // 每次调用自己的时间（见 callAt）
         if (at == null) { undated++; continue; }
         if (at < d0) continue;
         const cc = callCost(g.usage, callNames(g.resp, g.key, g.exec), at);
@@ -1325,7 +1356,7 @@ function agyStatusBar(CFG) {
     }
     const book = loadBook();
     const before = JSON.stringify([book.by, book.det]);
-    mergeBook(book, { day: book.day, by, det: detBy });
+    mergeBook(book, { day: book.day, v: BOOK_V, by, det: detBy });
     const after = JSON.stringify([book.by, book.det]);
     if (after !== before) { try { localStorage.setItem(DAY_KEY, JSON.stringify(book)); } catch (e) {} }
     const vals = Object.values(book.by);

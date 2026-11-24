@@ -223,11 +223,14 @@ const dayName = () => {
   return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
 };
 let costBook = null;
+// 账本版本 v2（2026-11-25）：状态栏起每次调用按自己的时间定日子。v1 的账本里跨 0 点的一轮整轮算进了今天，
+// 合并又取较大的数，改正以后盖不掉，所以 v1 的账本丢掉、v1 页面交来的账本也不收（今天的数由状态栏从头重算）
+const COST_BOOK_V = 2;
 function readCostBook() {
   if (!costBook) {
     costBook = readJsonKeep(COST_FILE);
   }
-  if (!costBook || costBook.day !== dayName() || !costBook.by || typeof costBook.by !== 'object') costBook = { day: dayName(), by: {}, det: {} };
+  if (!costBook || costBook.day !== dayName() || costBook.v !== COST_BOOK_V || !costBook.by || typeof costBook.by !== 'object') costBook = { day: dayName(), v: COST_BOOK_V, by: {}, det: {} };
   if (!costBook.det || typeof costBook.det !== 'object') costBook.det = {};
   return costBook;
 }
@@ -237,7 +240,7 @@ const validDet = (d) => !!d && typeof d === 'object' && !Array.isArray(d) && Obj
   k.length <= 40 && Array.isArray(r) && r.length === 6 && r.every((x) => Number.isFinite(+x) && +x >= 0));
 function mergeCostBook(b) {
   const book = readCostBook();
-  if (!b || b.day !== book.day || !b.by || typeof b.by !== 'object') return;
+  if (!b || b.day !== book.day || b.v !== COST_BOOK_V || !b.by || typeof b.by !== 'object') return;
   let changed = false;
   for (const [id, v] of Object.entries(b.by)) {
     const n = Number(v);
@@ -595,7 +598,9 @@ function updateHistory(book, buckets, acct, quotaAt) {
   const today = book.day;
   const day = h.days[today] || (h.days[today] = {});
   const s = summarizeBook(book);
-  if (!(day.usd > s.usd)) Object.assign(day, s); // 文件里今天的数更大（账本被重置过）就保留文件里的
+  // 文件里今天的数更大（账本被重置过）就保留文件里的。例外：今天的记录还是 v1 账本记的（bv 不是 2）时换一次，
+  // v1 把跨 0 点的一轮整轮算进了今天（见 readCostBook）。以前的日子不改：分不清是多算了还是对话被删了
+  if (day.bv !== COST_BOOK_V || !(day.usd > s.usd)) { Object.assign(day, s); day.bv = COST_BOOK_V; }
   // 额度只在知道是哪个账号时才记（页面一般几秒内就拿到账号；拿到之前查到的额度跳过，下一次再记）
   if (buckets && buckets.length && acct) {
     const accts = h.accts || (h.accts = {});
@@ -1219,7 +1224,7 @@ function pageScript() {
 // - Theme 页的 updates 选 off（look.json 的 online = 'off'）：不再联网，也不用 remote/ 里存的，只用安装包自带的。
 // - 换了版本（安装了新的安装包）以后，remote/ 里存的词典和规则先不用，等下一次取到再用（新安装包里的可能更新）。
 // - 测试：环境变量 AGY_REMOTE_BASE 换成别的地址（例如本机起的 http://127.0.0.1:端口/），只试这一个地址。
-const PACK_VERSION = '2.0.9';
+const PACK_VERSION = '2.0.10';
 const REMOTE_DIR = path.join(DATA, 'remote');
 const REMOTE_STATE = path.join(REMOTE_DIR, 'state.json');
 const REMOTE_BASES = process.env.AGY_REMOTE_BASE ? [process.env.AGY_REMOTE_BASE] : [

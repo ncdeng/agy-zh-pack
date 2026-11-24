@@ -16,6 +16,7 @@ test('插件文件清单里的文件都在，都是没有 BOM 的 UTF-8 文本',
 test('JS 文件都能通过 node --check', () => {
   const files = [...PLUGIN_FILES.filter((f) => /\.(m?js)$/.test(f)),
     ...fs.readdirSync(path.join(ROOT, 'tools')).filter((f) => f.endsWith('.mjs')).map((f) => 'tools/' + f),
+    ...fs.readdirSync(path.join(ROOT, 'tools', 'dev')).filter((f) => f.endsWith('.mjs')).map((f) => 'tools/dev/' + f),
     'package/build.mjs'];
   for (const f of files) {
     try { execFileSync(process.execPath, ['--check', path.join(ROOT, f)], { stdio: 'pipe' }); }
