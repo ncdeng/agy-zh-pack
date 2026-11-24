@@ -1102,7 +1102,7 @@ function agyStatusBar(CFG) {
   // 缓存过期的说法来自 11-22 的实测（Gemini 3～15 分钟约一半命中、15 分钟以后基本不命中；同一轮里的没命中是压缩造成的）。
   const COSTLY_USD = 0.5;
   // cc：callCost 的结果。不贵（或没有单价）返回 null，贵就返回说明文字
-  const costlyNote = (cc) => {
+  const costlyNote = (cc, miss) => {
     if (!cc || cc.usd == null || cc.usd < COSTLY_USD) return null;
     const p = cc.pr.p;
     const hit = cc.cr + cc.inp > 0 ? cc.cr / (cc.cr + cc.inp) : 0;
@@ -1110,10 +1110,114 @@ function agyStatusBar(CFG) {
     let s = '这次调用花了 ' + fmtUsdFine(cc.usd) + '（单次 ≥ $' + COSTLY_USD.toFixed(2) + ' 算很贵）' +
       '\n缓存命中 ' + Math.round(hit * 100) + '%：' + cc.inp.toLocaleString() + ' token 按全价输入' +
       (save >= 0.05 ? '，要是都走缓存能省约 ' + fmtUsd(save) : '');
-    s += hit < 0.5
-      ? '\n\n缓存没命中的常见原因：隔了一段时间才发下一条消息（实测 15 分钟以后基本不命中）、上下文刚被压缩、换了模型。'
-      : '\n\n缓存是命中的，贵在上下文很长或者输出很多。';
+    s += miss ? '\n\n' + missNote(miss)
+      : hit < 0.5
+        ? '\n\n缓存没命中的常见原因：隔了 1 分钟以上才发下一次请求（实测 Gemini 隔 2～5 分钟就常常不命中，Claude 约 5 分钟后失效）、上下文刚被压缩、换了模型。间隔很短也可能没命中（服务端的缓存没接上）。'
+        : '\n\n缓存是命中的，贵在上下文很长或者输出很多。';
     return s;
+  };
+  // ---------- 缓存没命中多花的钱（2026-11-24 加） ----------
+  // 同一个对话里，一次调用和这个模型上一次的大调用（输入 ≥ 2 万 token）比：前面那段上下文本来可以走缓存，这次却按全价算了，
+  // 就算没命中。漏掉的 token = min(上一次的输入, 这次的输入) − 这次的缓存读，不到 2 万不算（输入 = 新增输入 + 缓存读 + 缓存写）。
+  // 多花的钱 = 漏掉的 token ×（这次全价输入的平均单价 − 缓存读单价）；Claude 没命中时内容写进缓存，按缓存写的单价算。
+  // 原因按顺序判断：
+  //   model   这个模型在对话里第一次出现，上一次大调用是别的模型（新模型的缓存是空的）
+  //   compact 中间有压缩那一步，或者输入比上一次少了 40% 以上（上下文被压缩或截短，前缀变了）
+  //   user    上一次调用结束后隔了 1 分钟以上，中间有你发的消息
+  //   turn    隔了 1 分钟以上，中间没有你的消息（长命令、等你批准、等子代理）
+  //   wait    隔了 1 分钟以上，不知道中间有没有你的消息（agy CLI 的调用没有步骤信息）
+  //   other   离上一次调用结束不到 1 分钟也没命中。缓存读是 0 的（连系统提示词都没命中）多半是服务端的缓存没接上；
+  //           读到一小部分（例如只有系统提示词那 1.8 万）的，可能是前面的内容变了
+  // 门槛按作者电脑 11-17～11-24 的 4143 次调用定：同一对话两次调用隔 < 30 秒时 Gemini 命中 90%～95%，隔 1～2 分钟开始掉，
+  // 隔 2～5 分钟 Hydrogen 有 59%、Carbon 有 41% 的调用完全没命中；Claude 约 5 分钟后失效。这 7 天没命中多花约 $161（占 39%），
+  // 其中隔了 1 分钟以上的约 $91，不到 1 分钟的约 $61，压缩和换模型合计不到 $9。
+  // list：一个对话按时间排好的调用 [{ at 开始毫秒, ttft 秒, stream 秒, step 步骤序号, cc（callCost 的结果）}]；
+  // steps：{ user, ckpt }（你发消息、压缩那一步的步骤序号，Set 或数组），没有步骤信息传 null。
+  // 返回和 list 一一对应的数组：没命中的是 { tok 漏掉的 token, usd 多花的钱, cause 原因, idle 隔了多少毫秒, from 上一次的价目名 }，其余是 null。
+  const MISS_MIN_TOK = 20000;
+  const MISS_IDLE_MS = 60000;
+  const missScan = (list, steps) => {
+    const out = list.map(() => null);
+    const has = (s, a, b) => { if (s) for (const k of s) if (k > a && k <= b) return true; return false; };
+    const last = new Map(); // 价目名 → 这个模型上一次大调用的下标
+    let big = -1; // 上一次大调用（任何模型）的下标
+    list.forEach((c, i) => {
+      const cc = c.cc;
+      if (!cc || !cc.pr) return;
+      const name = cc.pr.name;
+      const P = cc.inp + cc.cr + cc.cw;
+      let bi = last.has(name) ? last.get(name) : -1;
+      let cause = '';
+      if (bi < 0 && big >= 0) { bi = big; cause = 'model'; }
+      if (bi >= 0) {
+        const b = list[bi], bc = b.cc;
+        const PB = bc.inp + bc.cr + bc.cw;
+        const tok = Math.max(0, Math.min(PB, P) - cc.cr);
+        if (tok >= MISS_MIN_TOK) {
+          const idle = Math.max(0, c.at - b.at - ((+b.ttft || 0) + (+b.stream || 0)) * 1000);
+          if (!cause) {
+            if ((steps && has(steps.ckpt, b.step, c.step)) || P < 0.6 * PB) cause = 'compact';
+            else if (idle >= MISS_IDLE_MS) cause = !steps ? 'wait' : has(steps.user, b.step, c.step) ? 'user' : 'turn';
+            else cause = 'other';
+          }
+          const p = cc.pr.p;
+          const full = cc.inp + cc.cw > 0 ? (cc.inp * p.in + cc.cw * (p.cw != null ? p.cw : p.in)) / (cc.inp + cc.cw) : p.in;
+          out[i] = { tok, usd: tok * Math.max(0, full - p.cache) / 1e6, cause, idle, from: bc.pr.name };
+        }
+      }
+      if (P >= MISS_MIN_TOK) { last.set(name, i); big = i; }
+    });
+    return out;
+  };
+  // 原因：面板上的短名（英文，和状态栏一致）+ 悬停说明里的中文
+  const MISS_CAUSE = {
+    user: ['your pause', '你隔了 1 分钟以上才发下一条消息'],
+    turn: ['agent pause', '一轮中间停了 1 分钟以上（长命令、等你批准、等子代理）'],
+    wait: ['pause', '隔了 1 分钟以上才发下一次请求（agy CLI）'],
+    compact: ['compaction', '上下文刚被压缩或截短'],
+    model: ['model switch', '换了模型（新模型的缓存是空的）'],
+    other: ['other', '间隔不到 1 分钟也没命中（服务端的缓存没接上，或者前面的内容变了；你控制不了）'],
+  };
+  const MISS_ORDER = ['user', 'turn', 'wait', 'compact', 'model', 'other'];
+  const MISS_FACT = '实测（作者电脑 7 天）：同一对话两次调用隔不到 30 秒时，Gemini 的缓存命中 90%～95%；隔 2～5 分钟，Hydrogen 有 59%、Carbon 有 41% 的调用完全没命中；' +
+    'Claude 约 5 分钟后失效。上下文越长，没命中越贵：40 多万 token 的 Carbon 对话没命中一次多花约 $1.6。';
+  const fmtIdle = (ms) => (ms < 60e3 ? Math.round(ms / 1000) + ' 秒' : ms < 3600e3 ? Math.round(ms / 60e3) + ' 分钟' : (ms / 3600e3).toFixed(1) + ' 小时');
+  // 一次调用没命中的说明（明细里花费、命中率两格的悬停）
+  const missNote = (m) => {
+    if (!m) return '';
+    const why = m.cause === 'user' ? '你隔了 ' + fmtIdle(m.idle) + '才发下一条消息'
+      : m.cause === 'turn' ? '一轮中间停了 ' + fmtIdle(m.idle) + '（长命令、等你批准、等子代理）'
+        : m.cause === 'wait' ? '隔了 ' + fmtIdle(m.idle) + '才发下一次请求'
+          : m.cause === 'model' ? '换了模型：上一次大调用是 ' + m.from + '，新模型的缓存是空的'
+            : m.cause === 'other' ? '离上一次调用结束只隔了 ' + fmtIdle(m.idle) + '也没命中（服务端的缓存没接上，或者前面的内容变了；你控制不了）'
+              : MISS_CAUSE[m.cause] ? MISS_CAUSE[m.cause][1] : m.cause;
+    return '缓存没命中：约 ' + m.tok.toLocaleString() + ' token 本来可以走缓存，多花约 ' + fmtUsdFine(m.usd) + '\n原因：' + why;
+  };
+  // 一组调用的没命中合计：{ usd, n, by: { 原因: [次数, 美元] } }
+  const missSum = (rows) => {
+    const s = { usd: 0, n: 0, by: {} };
+    for (const r of rows) {
+      const m = r.miss;
+      if (!m) continue;
+      s.usd += m.usd;
+      s.n++;
+      const b = s.by[m.cause] || (s.by[m.cause] = [0, 0]);
+      b[0]++;
+      b[1] += m.usd;
+    }
+    return s;
+  };
+  const missTip = (s) => MISS_ORDER.filter((k) => s.by[k]).map((k) => '\n  ' + MISS_CAUSE[k][1] + '：' + s.by[k][0] + ' 次，' + fmtUsd(s.by[k][1])).join('');
+  // agy CLI 的调用：按对话分组、按时间排好再找（只有当天的调用，也没有步骤信息）。给每行加上 miss，返回原数组
+  const cliMiss = (rows) => {
+    const by = new Map();
+    for (const r of rows) { if (!by.has(r.conv)) by.set(r.conv, []); by.get(r.conv).push(r); }
+    for (const list of by.values()) {
+      list.sort((a, b) => a.at - b.at);
+      const ms = missScan(list.map((r) => ({ at: r.at, ttft: r.ttft, stream: r.stream, step: -1, cc: callCost(r.usage, r.resp, r.at) })), null);
+      list.forEach((r, i) => { r.miss = ms[i]; });
+    }
+    return rows;
   };
   S.costlySeen = S.costlySeen || new Map(); // 贵的调用 → 第一次显示的时间（刚出现的 6 秒内徽章闪烁）
   const costlyBadge = (cc, key) => {
@@ -1522,6 +1626,28 @@ function agyStatusBar(CFG) {
   // 每次调用的时间来自调用明细同一套数据：桌面版用 S.loadCalls（向本机后台取，按对话缓存，只补取改过的对话），
   // CLI 用 S.cliCalls（注入程序给，见 S.cliAsk）。桌面版的结果按“组|日子|起|止”缓存：日子是今天时 2 分钟内不重取，
   // 以前的天 1 小时内不重取；CLI 的部分每次现算（明细可能比桌面版的晚到）。还没取到时返回 null，调用方先按整天算。
+  // 今天缓存没命中的合计（每日面板底部一行）：和调用明细、cap 同一套数据（S.loadCalls，按对话缓存，只补取改过的对话），
+  // 2 分钟内不重取；agy CLI 的部分每次现算。还没取到时返回 null（先不显示这一行）。total = 今天每次调用的合计（算比例用）
+  S.missDay = S.missDay || { day: '', at: 0, busy: false, rows: null };
+  const missToday = () => {
+    const c = S.missDay, nm = dayName();
+    if (c.day !== nm) { c.day = nm; c.at = 0; c.rows = null; }
+    if (!c.busy && Date.now() - c.at >= 120000 && S.lsHeaders && S.loadCalls) {
+      c.busy = true;
+      S.cliAsk(nm);
+      S.loadCalls(nm).then((res) => { if (c.day === nm) c.rows = res.rows; }).catch(() => {}).then(() => {
+        c.at = Date.now();
+        c.busy = false;
+        if (S.panelView === 'usage' && document.querySelector(P)) refreshPanel();
+      });
+    }
+    if (!c.rows) return null;
+    const rows = c.rows.concat(cliMiss(cliRows(nm)));
+    const s = missSum(rows);
+    s.total = 0;
+    for (const r of rows) { const cc = callCost(r.usage, r.cli ? r.resp : callNames(r.resp, r.key, r.exec), r.at); s.total += (cc && cc.usd) || 0; }
+    return s;
+  };
   S.capPart = S.capPart || {};
   const inRange = (at, from, to) => at >= from && at < to;
   const callsPart = (grp, nm, from, to) => {
@@ -1920,6 +2046,17 @@ function agyStatusBar(CFG) {
       (usedDays.length ? ' · avg ' + fmtUsd(total / usedDays.length) + '/day · ' + usedDays.length + ' days' : ''));
     setTip(l1, (isAll ? '从最早有记录的 ' + dayLabel(recs[recs.length - 1].nm).md + ' 起 ' : '最近 ') + n + ' 天合计（按 API 标准价折算）；平均值只算有用量的天' + (tokSum(tN) ? '\n' + tokTip(tN) + '，' + tN[0].toLocaleString() + ' 次调用' : ''));
     foot.append(l1);
+    // 今天缓存没命中多花的钱（2026-11-24 加），按原因分开；点一下打开今天的明细、只看没命中的
+    const mt = missToday();
+    if (mt && mt.n) {
+      const parts = ['cache miss today +' + fmtUsd(mt.usd) + (mt.total > 0 ? ' (' + Math.round(mt.usd / mt.total * 100) + '%)' : '')];
+      for (const k of MISS_ORDER) if (mt.by[k] && mt.by[k][1] >= 0.05) parts.push(MISS_CAUSE[k][0] + ' ' + fmtUsd(mt.by[k][1])); // 不到 5 美分的原因只写在悬停说明里
+      const l2 = el('div', 'k-cost k-miss clk', parts.join(' · ')); // 颜色和上面花费那一行一样
+      setTip(l2, '今天缓存没命中 ' + mt.n + ' 次，多花约 ' + fmtUsd(mt.usd) + '（按 API 标准价；今天每次调用的合计是 ' + fmtUsd(mt.total) + '）：' + missTip(mt) +
+        '\n\n' + MISS_FACT + '\n\n点一下打开今天的明细，只看没命中的调用。');
+      l2.addEventListener('click', () => { S.panelView = 'calls'; S.callsDay = dayName(); S.callsMiss = true; renderPanel(panel); });
+      foot.append(l2);
+    }
     // 每组每周额度一行（11-22 改：按重置周期算）。周期 = 重置时间往前推 7 天 → 重置时间，例如 11-22 09:41 → 11-29 09:41。
     // 原来写的是“最近 n 个自然日里用掉多少”和按这些天算的“每 1% 折合多少钱”，和额度的周期对不上（用户指出）。
     //   已用：状态栏查到的这个周期的已用比例；没用过的桶（已用 0）重置时间跟着现在走，周期还没开始，只写 0% used。
@@ -1995,7 +2132,7 @@ function agyStatusBar(CFG) {
   //     要按 stepIndices[0] 去 GetCascadeTrajectorySteps 里找那一步的 createdAt，所以每个对话还要取一次步骤（只留每步的开始时间）。
   // 结果按对话缓存在 S.detCache；对话又被改过（最后修改时间变了）就只补取新增的调用和步骤。
   // 已经删掉的对话没有了，所以以前某天的明细合计可能比当天合计少。
-  S.detCache = S.detCache || new Map(); // 对话 ID → { modified, gens: [调用], times: Map(步骤序号 → 毫秒), stepNext, busy }
+  S.detCache = S.detCache || new Map(); // 对话 ID → { v, modified, gens: [调用], times: Map(步骤序号 → 毫秒), user, ckpt（步骤序号的 Set）, stepNext, p }
   const durS = (d) => parseFloat(d) || 0; // "22.72s" → 22.72
   const slimCall = (m) => {
     const cm = (m && m.chatModel) || {}, u = cm.usage || {};
@@ -2006,11 +2143,13 @@ function agyStatusBar(CFG) {
       retries: Array.isArray(cm.retryInfos) ? cm.retryInfos.length : 0, cid: (cm.customMetadata && cm.customMetadata.cascade_id) || '' };
   };
   // 取（或补取）一个对话的调用和每步开始时间
-  const loadConv = async (id) => {
+  // v2（11-24）：多记你发消息（USER_INPUT）、压缩（CHECKPOINT）那一步的步骤序号，缓存没命中的原因要用；旧版本的缓存重取一次
+  const loadConv0 = async (id) => {
     const meta = S.casMeta.get(id) || fileMeta(id) || {};
     let c = S.detCache.get(id);
+    if (c && c.v !== 2) c = null;
     if (c && c.done && c.modified === meta.modified) return c;
-    if (!c) { c = { gens: [], times: new Map(), stepNext: 0 }; S.detCache.set(id, c); }
+    if (!c) { c = { v: 2, gens: [], times: new Map(), user: new Set(), ckpt: new Set(), stepNext: 0 }; S.detCache.set(id, c); }
     const off = Math.max(0, c.gens.length - 1); // 最后一条可能是当时还没结束的调用，重取覆盖
     const g = await lsCall('GetCascadeTrajectoryGeneratorMetadata', { cascadeId: id, generatorMetadataOffset: off });
     const list = (g && Array.isArray(g.generatorMetadata)) ? g.generatorMetadata : null;
@@ -2022,12 +2161,27 @@ function agyStatusBar(CFG) {
       const from = Math.max(0, Math.min(...need, c.stepNext));
       const r = await lsCall('GetCascadeTrajectorySteps', { cascadeId: id, stepOffset: from });
       const st = (r && Array.isArray(r.steps)) ? r.steps : [];
-      st.forEach((x, i) => { const md = (x && x.metadata) || {}; if (md.createdAt) c.times.set(from + i, tms(md.createdAt)); });
+      st.forEach((x, i) => {
+        const md = (x && x.metadata) || {};
+        if (md.createdAt) c.times.set(from + i, tms(md.createdAt));
+        const ty = String((x && x.type) || '');
+        if (ty.endsWith('_USER_INPUT')) c.user.add(from + i);
+        else if (ty.endsWith('_CHECKPOINT')) c.ckpt.add(from + i);
+      });
       c.stepNext = Math.max(from, from + st.length - 2);
     }
     c.modified = meta.modified;
     c.done = true;
     return c;
+  };
+  // 同一个对话正在取时（明细、cap、没命中统计可能同时要），等同一次，不重复向后台取（一个大对话的步骤有几十 MB）
+  const loadConv = (id) => {
+    const c0 = S.detCache.get(id);
+    if (c0 && c0.p) return c0.p;
+    const p = loadConv0(id); // 同步部分已经把缓存项放进 S.detCache
+    const c = S.detCache.get(id);
+    if (c) { c.p = p; p.then(() => { c.p = null; }, () => { c.p = null; }); }
+    return p;
   };
   // 一天的明细：找对话 → 逐个取（一次一个，不同时压后台），边取边画进度
   const dayBounds = (nm) => { const a = new Date(nm + 'T00:00:00').getTime(); return [a, a + 86400e3]; };
@@ -2040,11 +2194,16 @@ function agyStatusBar(CFG) {
     for (const id of ids) {
       try {
         const c = await loadConv(id);
+        // 缓存没命中按整个对话找（当天第一次调用要和前一天最后那次比），再挑出这一天的
+        const list = [];
         for (const x of c.gens) {
           if (!x) continue;
           const at = c.times.get(x.step) || 0;
-          if (at >= d0 && at < d1) rows.push({ ...x, at, conv: id });
+          if (at > 0) list.push({ x, at, ttft: x.ttft, stream: x.stream, step: x.step, cc: callCost(x.usage, callNames(x.resp, x.key, x.exec), at) });
         }
+        list.sort((a, b) => a.at - b.at || a.step - b.step);
+        const miss = missScan(list, { user: c.user, ckpt: c.ckpt });
+        list.forEach((e, i) => { if (e.at >= d0 && e.at < d1) rows.push({ ...e.x, at: e.at, conv: id, miss: miss[i] }); });
       } catch (e) { failed++; }
       done++;
       if (onProgress) onProgress(done, ids.length);
@@ -2105,6 +2264,8 @@ function agyStatusBar(CFG) {
     //   src：all / desk（桌面版）/ cli（agy CLI），那天有 CLI 的调用才显示；mdl：按价目名（Carbon、Neon…），那天有两种以上才显示；
     //   conv：只看某个对话（从按对话汇总里点进来），旁边有 × 取消。
     let view = 'calls', src = 'all', mdl = 'all', conv = null;
+    let onlyMiss = !!S.callsMiss; // 从每日面板的 “cache miss today” 一行点进来时只看缓存没命中的调用
+    S.callsMiss = false;
     let show = 600; // 明细表画多少行；“再显示”一次加 600
     const tools = el('div', 'p-tools');
     const segOf = (items, cur, onPick) => {
@@ -2133,7 +2294,7 @@ function agyStatusBar(CFG) {
     const labelOf = (r) => (r.cli ? 'CLI · ' + (r.title || r.conv.slice(0, 8)) : convLabel(r.conv));
     const draw = (res) => {
       lastRes = res;
-      const all = res.rows.concat(cliRows(nm)).sort((a, b) => b.at - a.at); // 桌面版的 + agy CLI 的，最新的在上面
+      const all = res.rows.concat(cliMiss(cliRows(nm))).sort((a, b) => b.at - a.at); // 桌面版的 + agy CLI 的，最新的在上面
       const hasCli = all.some((r) => r.cli);
       if (!hasCli) src = 'all';
       // 每次调用的花费和价目名（模型筛选按价目名分：Carbon、Neon、Opus 5.5…，和每日面板的颜色一致）
@@ -2149,11 +2310,14 @@ function agyStatusBar(CFG) {
       if (mdl !== 'all' && !models.has(mdl)) mdl = 'all';
       const byModel = mdl === 'all' ? bySrc : bySrc.filter((r) => pname(r) === mdl);
       if (conv && !byModel.some((r) => r.conv === conv)) conv = null;
-      const rows = conv ? byModel.filter((r) => r.conv === conv) : byModel;
+      const rows0 = conv ? byModel.filter((r) => r.conv === conv) : byModel;
+      const missAll = missSum(rows0);
+      if (onlyMiss && !missAll.n) onlyMiss = false;
+      const rows = onlyMiss ? rows0.filter((r) => r.miss) : rows0;
       // 指纹：视图、筛选、行数上限、CLI 标题、调用数、每次调用的时间和 token、耗时；没变化就不动表格
       // （CLI 对话的标题可能比调用晚到，标题变了也要重画）
       const cliTitlesSig = JSON.stringify((S.cliCalls[nm] && S.cliCalls[nm].convs) || {});
-      const nsig = [view, src, mdl, conv, show, cliTitlesSig, rows.length, res.failed].join('|') + '|' +
+      const nsig = [view, src, mdl, conv, onlyMiss, show, cliTitlesSig, rows.length, res.failed].join('|') + '|' +
         rows.slice(0, show).map((r) => r.at + ':' + (+r.usage.outputTokens || 0) + ':' + (+r.usage.inputTokens || 0) + ':' + r.stream).join(',');
       if (nsig === sig) return;
       sig = nsig;
@@ -2167,6 +2331,10 @@ function agyStatusBar(CFG) {
         for (const [k, m] of [...models].sort((a, b) => b[1][1] - a[1][1])) items.push([k, k, k + '：' + m[0] + ' 次调用，' + fmtUsd(m[1]), 'k-' + (MODEL_COLOR[k] || 'muted')]);
         tools.append(segOf(items, mdl, (k) => { mdl = k; show = 600; redraw(); }));
       }
+      if (missAll.n || onlyMiss) {
+        tools.append(segOf([['all', 'all calls', '全部调用'], ['miss', 'cache misses', '只看缓存没命中的调用：' + missAll.n + ' 次，多花约 ' + fmtUsd(missAll.usd), 'k-miss']], onlyMiss ? 'miss' : 'all',
+          (k) => { onlyMiss = k === 'miss'; show = 600; redraw(); }));
+      }
       if (conv) {
         const r0 = byModel.find((r) => r.conv === conv);
         const chip = setTip(el('button', 'p-btn on p-chip', '× ' + clip(r0 ? labelOf(r0) : conv.slice(0, 8), 32)), '只看这个对话的调用，点一下取消');
@@ -2176,7 +2344,11 @@ function agyStatusBar(CFG) {
       tools.hidden = !tools.children.length;
       let total = 0, priced = 0;
       for (const r of rows) { const u = costs.get(r).usd; if (u != null) { total += u; priced++; } }
-      const filtered = src !== 'all' || mdl !== 'all' || conv;
+      const filtered = src !== 'all' || mdl !== 'all' || conv || onlyMiss;
+      const ms = missSum(rows);
+      let total0 = 0; // 比例的分母：没按“只看没命中”筛选时的合计
+      for (const r of rows0) total0 += costs.get(r).usd || 0;
+      const missLine = ms.n ? '缓存没命中 ' + ms.n + ' 次，多花约 ' + fmtUsd(ms.usd) + (total0 > 0 ? '（占这些调用花费的 ' + Math.round(ms.usd / total0 * 100) + '%）' : '') + '：' + missTip(ms) + '\n\n' + MISS_FACT : '';
       const old = wrap.querySelector('table');
       const keep = old && view === 'calls' && wrap.dataset.view === 'calls' ? { top: wrap.scrollTop, h: wrap.scrollHeight } : null;
       const table = el('table');
@@ -2189,14 +2361,16 @@ function agyStatusBar(CFG) {
         // 按对话汇总：对话、来源、调用数、花费、占比、输入、输出、缓存、命中、时间段、用到的模型
         const agg = new Map();
         for (const r of rows) {
-          const a = agg.get(r.conv) || { r0: r, n: 0, usd: 0, inp: 0, out: 0, cr: 0, first: r.at, last: r.at, models: new Map() };
+          const a = agg.get(r.conv) || { r0: r, n: 0, usd: 0, miss: 0, nMiss: 0, inp: 0, out: 0, cr: 0, first: r.at, last: r.at, models: new Map() };
           const cc = costs.get(r);
+          if (r.miss) { a.miss += r.miss.usd; a.nMiss++; }
           a.n++; a.usd += cc.usd || 0; a.inp += cc.inp || 0; a.out += cc.out || 0; a.cr += cc.cr || 0;
           a.first = Math.min(a.first, r.at); a.last = Math.max(a.last, r.at);
           a.models.set(pname(r), (a.models.get(pname(r)) || 0) + (cc.usd || 0));
           agg.set(r.conv, a);
         }
-        const heads = [['Conversation', '对话（↳ 是子代理，CLI · 开头的是 agy CLI 的对话）'], ['Calls', '这一天在这个对话里的调用次数'], ['Cost', '按 API 标准价折算（不是实际扣费）'], ['Share', '占这一天（当前筛选下）合计的比例'],
+        const heads = [['Conversation', '对话（↳ 是子代理，CLI · 开头的是 agy CLI 的对话）'], ['Calls', '这一天在这个对话里的调用次数'], ['Cost', '按 API 标准价折算（不是实际扣费）'],
+          ['Miss', '缓存没命中多花的钱（算在 Cost 里）'], ['Share', '占这一天（当前筛选下）合计的比例'],
           ['In', '新增输入（不含缓存）'], ['Out', '输出（含思考）'], ['Cache', '缓存读取'], ['Hit', '命中率 = 缓存读 ÷（缓存读 + 输入）'], ['Time', '这一天里第一次和最后一次调用的时间'], ['Models', '用到的模型，按花费从高到低']];
         for (const [h, t] of heads) { const th = el('th', '', h); setTip(th, t); hr.append(th); }
         const hm = (ms) => { const d = new Date(ms); return pad(d.getHours()) + ':' + pad(d.getMinutes()); };
@@ -2206,13 +2380,16 @@ function agyStatusBar(CFG) {
           const tdConv = el('td', 'cv', clip(label, 48));
           setTip(tdConv, label + '\n' + (a.r0.cli ? 'agy CLI 的对话 ' : '对话 ') + id.slice(0, 8) + '\n点一下看这个对话的每次调用');
           const ms = [...a.models].sort((p, q) => q[1] - p[1]).map(([k]) => k).join(', ');
-          tr.append(tdConv, el('td', '', String(a.n)), el('td', 'c', fmtUsdFine(a.usd)), el('td', '', total > 0 ? (a.usd / total < 0.005 ? '<1%' : Math.round(a.usd / total * 100) + '%') : '—'),
+          const tdMiss = el('td', a.nMiss ? 'h miss' : '', a.nMiss ? fmtUsdFine(a.miss) : '—');
+          if (a.nMiss) setTip(tdMiss, '缓存没命中 ' + a.nMiss + ' 次，多花约 ' + fmtUsd(a.miss) + '（点这一行看每次调用，命中率标黄的是没命中的）');
+          tr.append(tdConv, el('td', '', String(a.n)), el('td', 'c', fmtUsdFine(a.usd)), tdMiss, el('td', '', total > 0 ? (a.usd / total < 0.005 ? '<1%' : Math.round(a.usd / total * 100) + '%') : '—'),
             el('td', '', fmtK(a.inp)), el('td', '', fmtK(a.out)), el('td', '', fmtK(a.cr)), el('td', 'h', a.cr + a.inp > 0 ? Math.round(a.cr / (a.cr + a.inp) * 100) + '%' : '—'),
             el('td', '', hm(a.first) + (a.last - a.first > 60000 ? '–' + hm(a.last) : '')), el('td', 'md', clip(ms, 28)));
           tr.addEventListener('click', () => { conv = id; view = 'calls'; show = 600; redraw(); });
           tbody.append(tr);
         }
-        sum.textContent = agg.size + ' conversations · ' + rows.length + ' calls · ' + fmtUsd(total) + (filtered ? ' (filtered)' : '');
+        sum.textContent = agg.size + ' conversations · ' + rows.length + ' calls · ' + fmtUsd(total) + (filtered ? ' (filtered)' : '') + (ms.usd >= 0.01 ? ' · miss +' + fmtUsd(ms.usd) : '');
+        setTip(sum, missLine);
       } else {
         const heads = [['Time', '调用开始的时间'], ['Conversation', '哪个对话（↳ 是子代理，CLI · 开头的是 agy CLI 的对话）'], ['Model', '模型（界面名；悬停看接口名和配置名）'], ['Cost', '按 API 标准价折算（不是实际扣费）'],
           ['In', '新增输入（不含缓存）'], ['Out', '输出（含思考）'], ['Cache', '缓存读取'], ['Write', '缓存写入（只有 Claude 有）'], ['Hit', '命中率 = 缓存读 ÷（缓存读 + 输入）'],
@@ -2236,20 +2413,23 @@ function agyStatusBar(CFG) {
             : '界面名：' + (r.disp || '?') + '\n接口返回的模型：' + (r.resp || '?') + '\n配置名：' + ((r.key && S.enumModel.get(r.key)) || '?') + '\n编号：' + (r.key || '?') +
             price + (r.retries ? '\n重试过 ' + r.retries + ' 次' : ''));
           const tdCost = el('td', 'c', cc.usd != null ? fmtUsdFine(cc.usd) : '—');
-          const costly = costlyNote(cc);
-          if (costly) { tdCost.classList.add('costly'); setTip(tdCost, costly); }
+          const costly = costlyNote(cc, r.miss);
+          if (costly) { tdCost.classList.add('costly'); setTip(tdCost, costly); } else if (r.miss) setTip(tdCost, missNote(r.miss));
           const hit = cr + inp > 0 ? Math.round(cr / (cr + inp) * 100) + '%' : '—';
+          const tdHit = el('td', r.miss ? 'h miss' : 'h', hit); // 缓存没命中的调用：命中率标黄，悬停看原因
+          if (r.miss) setTip(tdHit, missNote(r.miss));
           const totalS = r.ttft + r.stream;
           const tps = totalS > 0.05 && out > 0 ? String(Math.round(out / totalS)) : '—'; // 单位 tok/s 写在表头
           tr.append(el('td', '', pad(t.getHours()) + ':' + pad(t.getMinutes()) + ':' + pad(t.getSeconds())), tdConv, tdModel, tdCost,
-            el('td', '', inp.toLocaleString()), el('td', '', out.toLocaleString()), el('td', '', fmtK(cr)), el('td', '', cw ? fmtK(cw) : '—'), el('td', 'h', hit),
+            el('td', '', inp.toLocaleString()), el('td', '', out.toLocaleString()), el('td', '', fmtK(cr)), el('td', '', cw ? fmtK(cw) : '—'), tdHit,
             el('td', '', tps), el('td', '', r.ttft ? r.ttft.toFixed(1) + 's' : '—'), el('td', '', r.ttft || r.stream ? (r.ttft + r.stream).toFixed(1) + 's' : '—'));
           tbody.append(tr);
         }
         const nCostly = rows.filter((r) => costlyNote(costs.get(r))).length;
         sum.textContent = rows.length + ' calls · ' + fmtUsd(total) + (filtered ? ' (of ' + all.length + ')' : '') +
-          (nCostly ? ' · ' + nCostly + ' ≥ $' + COSTLY_USD.toFixed(2) : '');
-        setTip(sum, nCostly ? nCostly + ' 次调用单次 ≥ $' + COSTLY_USD.toFixed(2) + '（花费标红，悬停看原因）' : '');
+          (nCostly ? ' · ' + nCostly + ' ≥ $' + COSTLY_USD.toFixed(2) : '') + (ms.usd >= 0.01 ? ' · miss +' + fmtUsd(ms.usd) : '');
+        setTip(sum, (nCostly ? nCostly + ' 次调用单次 ≥ $' + COSTLY_USD.toFixed(2) + '（花费标红，悬停看原因）' : '') +
+          (missLine ? (nCostly ? '\n\n' : '') + missLine + '\n命中率一格标黄的是没命中的调用，悬停看原因；“cache misses” 只看这些。' : ''));
         more.hidden = rows.length <= MAX;
         if (rows.length > MAX) {
           const left = rows.length - MAX;
@@ -3068,6 +3248,8 @@ ${P} td.c{color:var(--k-cost)} ${P} td.c.costly{color:var(--k-crit); font-weight
 ${P} tbody tr:hover td{background:color-mix(in srgb, var(--sep) 22%, transparent)}
 ${P} tr.today td{font-weight:600}
 ${P} tr.clk{cursor:pointer}
+${P} td.h.miss{color:var(--k-warn); font-weight:600}
+${P} .p-tools .k-miss{--kc:var(--k-warn)} ${P} .p-foot .k-miss.clk{cursor:pointer} ${P} .p-foot .k-miss.clk:hover{text-decoration:underline}
 /* 调用明细页：表格更高；对话、模型两列左对齐 */
 ${P} .p-table.calls{max-height:max(14em, calc(var(--p-avail, 40em) - 6.5rem))} /* 撑满面板能用的高度（标题行和底部说明留 6.5rem） */
 ${P} .p-table.calls th, ${P} .p-table.calls td{padding:.05rem .32rem; font-size:11px}
