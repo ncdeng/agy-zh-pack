@@ -11,7 +11,7 @@ function run(texts) {
   const el = { nodeType: 1, closest: () => null, matches: () => false, hasAttribute: () => false, getAttribute: () => null,
     setAttribute() {}, removeAttribute() {}, querySelectorAll: () => [] };
   const nodes = texts.map((s) => ({ nodeType: 3, nodeValue: s, parentElement: el }));
-  globalThis.window = {};
+  globalThis.window = { addEventListener() {}, removeEventListener() {} };
   globalThis.NodeFilter = { SHOW_ELEMENT: 1, SHOW_TEXT: 4, FILTER_ACCEPT: 1, FILTER_REJECT: 2 };
   globalThis.MutationObserver = class { observe() {} disconnect() {} };
   globalThis.document = {
@@ -21,8 +21,21 @@ function run(texts) {
   const agyI18n = new Function(read('i18n/translator.js') + '\nreturn agyI18n;')();
   agyI18n(DICT, RULES);
   const api = globalThis.window.__agyI18n;
-  return { out: nodes.map((n, i) => (n.nodeValue === texts[i] ? null : n.nodeValue)), missing: api.takeMissing(), api };
+  return { out: nodes.map((n, i) => (n.nodeValue === texts[i] ? null : n.nodeValue)), missing: api.takeMissing(), api, nodes };
 }
+
+test('临时切回英文：换回原文、暂停翻译和记录；切回中文时重新翻译', () => {
+  const { api, nodes } = run(['Leaving Soon', 'Brand new button']);
+  assert.equal(nodes[0].nodeValue, '即将下线');
+  assert.equal(api.setPaused(true, true), true);
+  assert.equal(api.paused, true);
+  assert.equal(nodes[0].nodeValue, 'Leaving Soon', '译文换回原文');
+  api.update(DICT, RULES); // 暂停时换词典：不翻译、不记录
+  assert.equal(nodes[0].nodeValue, 'Leaving Soon');
+  assert.deepEqual(api.takeMissing(), []);
+  assert.equal(api.setPaused(false, true), false);
+  assert.equal(nodes[0].nodeValue, '即将下线', '切回中文');
+});
 
 test('词典和规则：整段、日期规则、评论条数', () => {
   const { out } = run(['Leaving Soon', 'Leaving on Nov 30', 'Leaving on December 1', '1 Comment', '12 Comments', 'Comments']);
@@ -61,5 +74,5 @@ test('记下没翻译的界面文字：过滤路径、网址、邮箱、文件�
     ['Reviewer', 'Reviewer'],
   ]);
   assert.deepEqual(api.takeMissing(), [], '取走以后清空');
-  assert.equal(api.version, 11);
+  assert.equal(api.version, 12);
 });

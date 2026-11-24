@@ -345,6 +345,7 @@ async function syncCost() {
       mergedCache = null;
       if (nowOn) remoteNextAt = Date.now() + 3000;
       for (const s of sessions.values()) apply(s).catch(() => {});
+      applyFrames();
       return;
     }
     const js = JSON.stringify(readLook());
@@ -1115,8 +1116,40 @@ async function onPageAsk(sess, payload) {
     expr = `window.__agyStats && window.__agyStats.setCliCalls && window.__agyStats.setCliCalls(${JSON.stringify(await cliCallsFor(q.day))})`;
   } else if (q && q.t === 'history-all') {
     expr = `window.__agyStats && window.__agyStats.setHistoryAll && window.__agyStats.setHistoryAll(${JSON.stringify(recentHistory(HISTORY_KEEP_DAYS))})`;
+  } else if (q && q.t === 'checkpoint' && /^[0-9a-f-]{36}$/.test(String(q.conv))) {
+    expr = `window.__agyStats && window.__agyStats.setCheckpoint && window.__agyStats.setCheckpoint(${JSON.stringify(readCheckpoint(q.conv))})`;
+  } else if (q && q.t === 'english') {
+    // 某个窗口或插件框架里按了 Ctrl+Alt+E（v2.0.8）：别的窗口和框架跟着切，不再弹提示
+    await setEnglishAll(!!q.on, sess, true);
+    return;
   } else return;
   try { await sess.send('Runtime.evaluate', { expression: expr }); } catch {}
+}
+// 压缩查看器（v2.0.8）：读对话日志里最近一次压缩的接续消息（Resuming from a compaction），只读。
+// 日志在 brain/<对话>/.system_generated/logs/：transcript_full.jsonl 是完整的，transcript.jsonl 会截断长字段（摘要可能被截掉）。
+// 接续消息的结构（Antigravity 2.34.0）：被截掉部分里用户的请求（编号列表）→ <summary>检查点摘要</summary> → [ARTIFACT: …] 清单 → 日志位置。
+// BRAIN_DIR 在前面“补算以前的用量”那里定义过。
+function readCheckpoint(conv) {
+  const dir = path.join(BRAIN_DIR, conv, '.system_generated', 'logs');
+  let text = '', file = '';
+  for (const n of ['transcript_full.jsonl', 'transcript.jsonl']) {
+    try { text = fs.readFileSync(path.join(dir, n), 'utf8'); file = n; break; } catch {}
+  }
+  if (!text) return { conv, err: '这个对话没有日志文件（' + dir + '）' };
+  const lines = text.split('\n').filter((l) => l.includes('"type":"CHECKPOINT"'));
+  if (!lines.length) return { conv, err: '这个对话的日志里还没有压缩记录（压缩刚发生时，日志可能晚几秒才写进去）' };
+  let o;
+  try { o = JSON.parse(lines[lines.length - 1]); } catch { return { conv, err: '日志里的压缩记录读不出来' }; }
+  const c = String(o.content || '');
+  const a = c.indexOf('<summary>'), b = c.indexOf('</summary>');
+  const before = a >= 0 ? c.slice(0, a) : c;
+  return {
+    conv, n: lines.length, step: o.step_index, at: Date.parse(o.created_at) || 0,
+    requests: (before.match(/^\d+\. /gm) || []).length,
+    artifacts: (c.match(/\[ARTIFACT: /g) || []).length,
+    summary: (a >= 0 ? c.slice(a + 9, b > a ? b : undefined) : '').trim().slice(0, 80000),
+    log: path.join(dir, file),
+  };
 }
 const mtimes = {};
 function loadAssets() {
@@ -1186,7 +1219,7 @@ function pageScript() {
 // - Theme 页的 updates 选 off（look.json 的 online = 'off'）：不再联网，也不用 remote/ 里存的，只用安装包自带的。
 // - 换了版本（安装了新的安装包）以后，remote/ 里存的词典和规则先不用，等下一次取到再用（新安装包里的可能更新）。
 // - 测试：环境变量 AGY_REMOTE_BASE 换成别的地址（例如本机起的 http://127.0.0.1:端口/），只试这一个地址。
-const PACK_VERSION = '2.0.7';
+const PACK_VERSION = '2.0.8';
 const REMOTE_DIR = path.join(DATA, 'remote');
 const REMOTE_STATE = path.join(REMOTE_DIR, 'state.json');
 const REMOTE_BASES = process.env.AGY_REMOTE_BASE ? [process.env.AGY_REMOTE_BASE] : [
@@ -1394,6 +1427,7 @@ async function checkRemote() {
 async function pushRemote(i18nChanged) {
   mergedCache = null;
   const js = JSON.stringify(remoteForPage());
+  if (i18nChanged) applyFrames();
   for (const s of sessions.values()) {
     try {
       if (i18nChanged) { await apply(s); continue; }
@@ -1485,6 +1519,93 @@ async function reRegister(sess) {
   sess.scriptId = r.identifier;
 }
 
+// ---------- 插件框架里的汉化（v2.0.8 加）：Antigravity 自带的 Swarm 面板 ----------
+// Swarm 面板是单独的插件框架（iframe，地址 plugin://swarm--swarm_board-<端口>/），主窗口的翻译器管不到。这里连到框架上，
+// 注入同一个翻译器，带上框架专用的选项（见 i18n/translator.js 开头）：智能体写的内容（消息正文、任务标题、工作线说明、成员名）排除掉；
+// “From xxx / To xxx” 这类规则放进通用规则会误翻主窗口，只在框架里用；不记录没翻译的文字。
+// 界面文字的译文在词典里（2026-11-24 从 Swarm 的 app.js / hive.js / index.html 提取）。只读页面，不改 Swarm 插件的文件。
+// 框架关掉后连接自动断开；框架刷新后由 addScriptToEvaluateOnNewDocument 提前注入。连不上的框架 1 分钟内不再试。
+const FRAME_I18N = [{
+  name: 'swarm',
+  re: /^plugin:\/\/swarm--/,
+  opts: {
+    noMissing: true,
+    exclude: ['[data-testid="swarm-message"]', '[data-testid="swarm-running-activity"]', '[data-testid="swarm-member-chip"]',
+      '.o2-runt', '.o2-thg', '.o2-thn', '.msg-body', '#swarm-title', '#raw'],
+    // 放行：消息里的 “Show more”、工作线里的 “Now” 标签（在排除的 .o2-thn 里）、筛选下拉框的选项（翻译器默认跳过 select）
+    allow: ['[data-testid="swarm-message-more"]', '.o2-thn > span', '[data-testid="swarm-filters"] option', '[data-testid="swarm-channel-filter"] option'],
+    rules: [['^From (\\S+)$', '来自 $1'], ['^To (@?\\S+)$', '发给 $1']],
+  },
+}];
+const frames = new Map(); // targetId -> { ws, send, scriptId, cfg }
+const frameFailAt = new Map(); // targetId -> 上次连接失败的时间
+function frameScript(cfg) {
+  const i18 = i18nData();
+  if (!i18.dict || !assets.translator) return 'window.__agyI18n && window.__agyI18n.disable();';
+  return `try { (${assets.translator})(${JSON.stringify(i18.dict)}, ${JSON.stringify(i18.rules || [])}, ${JSON.stringify(cfg.opts)}); } catch (e) { console.warn('agy i18n', e); }`;
+}
+async function applyFrame(fr) {
+  const source = frameScript(fr.cfg);
+  try {
+    const r = await fr.send('Page.addScriptToEvaluateOnNewDocument', { source });
+    if (fr.scriptId) await fr.send('Page.removeScriptToEvaluateOnNewDocument', { identifier: fr.scriptId }).catch(() => {});
+    fr.scriptId = r.identifier;
+  } catch {} // 不支持 Page 域时只注入当前页面（框架刷新后要等下一次换词典才再注入）
+  await fr.send('Runtime.evaluate', { expression: source });
+}
+const applyFrames = () => { for (const fr of frames.values()) applyFrame(fr).catch(() => {}); };
+function connectFrame(target, cfg) {
+  const ws = new WebSocket(target.webSocketDebuggerUrl);
+  let seq = 0;
+  const pending = new Map();
+  const send = (method, params = {}) => new Promise((resolve, reject) => {
+    const id = ++seq;
+    pending.set(id, { resolve, reject });
+    ws.send(JSON.stringify({ id, method, params }));
+  });
+  const fr = { ws, send, scriptId: null, cfg };
+  frames.set(target.id, fr);
+  ws.onmessage = (ev) => {
+    let m;
+    try { m = JSON.parse(ev.data); } catch { return; }
+    if (m.method === 'Runtime.bindingCalled' && m.params && m.params.name === ASK_BINDING) { onPageAsk(fr, m.params.payload).catch(() => {}); return; }
+    const p = m.id && pending.get(m.id);
+    if (!p) return;
+    pending.delete(m.id);
+    m.error ? p.reject(new Error(m.error.message)) : p.resolve(m.result);
+  };
+  ws.onopen = async () => {
+    try {
+      try { await send('Page.enable'); } catch {}
+      try { await send('Runtime.addBinding', { name: ASK_BINDING }); } catch {} // 框架里按 Ctrl+Alt+E 时通知这里
+      await applyFrame(fr);
+      log(`i18n injected into ${cfg.name} frame ${target.id.slice(0, 8)}`);
+    } catch (e) {
+      frameFailAt.set(target.id, Date.now());
+      log(`frame inject failed (${cfg.name}): ${e.message}`);
+      ws.close();
+    }
+  };
+  ws.onclose = () => {
+    frames.delete(target.id);
+    for (const p of pending.values()) p.reject(new Error('closed'));
+  };
+  ws.onerror = () => { frameFailAt.set(target.id, Date.now()); };
+}
+// 临时切回英文 / 切回中文（v2.0.8）：所有窗口和插件框架切成一样。except：发起切换的那个（它自己已经切了）；
+// quiet：别的窗口不弹提示（按快捷键时只在按的那个窗口提示）。框架一律不弹
+async function setEnglishAll(on, except, quiet) {
+  const js = (q) => `window.__agyI18n && window.__agyI18n.setPaused && window.__agyI18n.setPaused(${!!on}, ${q})`;
+  for (const s of sessions.values()) {
+    if (s === except || !s.ws || s.ws.readyState !== 1) continue;
+    try { await s.send('Runtime.evaluate', { expression: js(!!quiet) }); } catch {}
+  }
+  for (const fr of frames.values()) {
+    if (fr === except || !fr.ws || fr.ws.readyState !== 1) continue;
+    try { await fr.send('Runtime.evaluate', { expression: js(true) }); } catch {}
+  }
+}
+
 // ---------- 调试端口参数（2026-11-19 加，Antigravity 2.33.0 起需要） ----------
 // 2.33.0 起不带 --remote-debugging-port 启动就没有调试端口，本脚本连不上，汉化和状态栏都不出现。
 // 安装时已给快捷方式加了参数（debug-port.ps1 add）。Antigravity 自动更新可能重写快捷方式，
@@ -1563,6 +1684,7 @@ async function tick() {
   if (changed && sessions.size) {
     log('style/i18n/statusbar files changed, updating open windows');
     for (const s of sessions.values()) apply(s).catch((e) => log(`update failed: ${e.message}`));
+    applyFrames();
   }
   if (sessions.size && Date.now() - costSyncAt >= COST_SYNC_MS) {
     costSyncAt = Date.now();
@@ -1591,6 +1713,15 @@ async function tick() {
   for (const t of targets) {
     if (t.type !== 'page' || !t.url.startsWith(URL_PREFIX) || sessions.has(t.id)) continue;
     connect(t);
+  }
+  // 插件框架（Swarm 面板）：有主窗口连着时才连（v2.0.8）
+  if (sessions.size) {
+    for (const t of targets) {
+      if (t.type !== 'iframe' || !t.webSocketDebuggerUrl || frames.has(t.id)) continue;
+      const cfg = FRAME_I18N.find((c) => c.re.test(String(t.url)));
+      if (!cfg || Date.now() - (frameFailAt.get(t.id) || 0) < 60e3) continue;
+      connectFrame(t, cfg);
+    }
   }
   fixStuckPanels(targets).catch((e) => log(`panel check failed: ${e.message}`));
 }
@@ -1680,7 +1811,7 @@ globalThis.__agyZh = {
     version: PACK_VERSION, plugin: PLUGIN, lockHeld, pid: process.pid,
     windows: sessions.size, port: { ...portState, file: PORT_FILE },
     online: onlineOn(), remote: remoteForPage(),
-    i18n: !!assets.dict, statusbar: !!assets.statusbar, style: !!assets.css,
+    i18n: !!assets.dict, statusbar: !!assets.statusbar, style: !!assets.css, frames: frames.size,
   }),
   // 在线更新：马上查一次
   checkRemoteNow: () => { remoteNextAt = 0; },
@@ -1692,6 +1823,16 @@ globalThis.__agyZh = {
     mergedCache = null;
     if (on) remoteNextAt = Date.now() + 1000;
     for (const s of sessions.values()) apply(s).catch(() => {});
+    applyFrames();
+  },
+  // 插件面板的“切换中英文”按钮（v2.0.8）：按第一个窗口现在的状态反过来，所有窗口和插件框架一起切；返回切换后是不是英文
+  toggleEnglish: async () => {
+    const s0 = [...sessions.values()].find((x) => x.ws && x.ws.readyState === 1);
+    if (!s0) throw Error('no Antigravity window connected');
+    const r = await s0.send('Runtime.evaluate', { expression: '!!(window.__agyI18n && window.__agyI18n.paused)', returnByValue: true });
+    const on = !(r && r.result && r.result.value);
+    await setEnglishAll(on, null, false);
+    return on;
   },
   // 从 Antigravity 页面里取一个文件（走 Antigravity 的网络和代理）；没有连上的窗口时抛错
   fetchText: async (url) => {
