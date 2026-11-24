@@ -356,7 +356,7 @@ async function syncCost() {
 }
 
 // ---------- 每天用量历史（2026-11-20 加） ----------
-// usage-history.json：{ v: 3, days: { 'YYYY-MM-DD': { usd, convs, models, quota, qa } }, accts, cur }，保留 90 天，只存数字，不存对话内容。
+// usage-history.json：{ v: 3, days: { 'YYYY-MM-DD': { usd, convs, models, quota, qa } }, accts, cur }，保留 HISTORY_KEEP_DAYS 天（11-24 起 400 天，以前 90 天），只存数字，不存对话内容。
 //   v3（2026-11-22，v1.6）：额度按账号分开记在 qa：{ 账号键: { 桶 ID: 额度记录 } }；账号键是邮箱的哈希（不存邮箱原文），
 //   accts：{ 账号键: { m 打码的邮箱, t 套餐名, first / last 第一次 / 最近一次见到的日子 } }，cur：最近一次见到的账号。
 //   quota 留着 v3 以前的记录（不知道是哪个账号的）；第一次见到某个账号时，重置时间对得上的旧记录归给它（见 adoptLegacy）。
@@ -367,7 +367,7 @@ async function syncCost() {
 //   qr（2026-11-24 加）：1 = 已经用细粒度采样把额度记录按分段算法回放过一次。
 // 状态栏的每日用量面板显示 u。（v1.4.0 的格式是 f 起点 / a 已累计，u = a + l − f；见 migrateQuota。）
 const HISTORY_FILE = path.join(DATA, 'usage-history.json');
-const HISTORY_KEEP_DAYS = 90;
+const HISTORY_KEEP_DAYS = 400; // 2026-11-24：90 → 400 天（面板加了 all；每天只有几个数字，400 天约几百 KB）
 const HISTORY_PUSH_DAYS = 31;
 let history = null;
 let historyJson = '';
@@ -538,7 +538,8 @@ function updateHistory(book, buckets, acct, quotaAt) {
 }
 // 推给页面的历史：每天的 quota 换成当前账号的那一份（不知道当前账号时用旧记录），带上账号、每周额度预估和当前账号的提前重置事件
 // 每天的额度记录只推页面用得到的字段（分段明细 p 不推）
-function recentHistory() {
+// n：推最近几天（默认 31 天，每 30 秒推一次）；面板选 all 时经 __agyZhAsk 要一次全部（见 onPageAsk）
+function recentHistory(n = HISTORY_PUSH_DAYS) {
   const h = readHistory();
   const days = {};
   const slimQ = (qs) => {
@@ -546,7 +547,7 @@ function recentHistory() {
     for (const [id, q] of Object.entries(qs || {})) { if (q && typeof q === 'object') { const { p, c0, ...rest } = q; out[id] = rest; } }
     return out;
   };
-  const keys = Object.keys(h.days).sort().slice(-HISTORY_PUSH_DAYS);
+  const keys = Object.keys(h.days).sort().slice(-n);
   for (const k of keys) {
     const d = h.days[k];
     const { qa, quota, ...rest } = d;
@@ -728,7 +729,7 @@ function readConvDb(DatabaseSync, file, before, seen, acc) {
 // 这一天有没有桌面版的用量记录（实时的 models / usd，或补算的 raw）。只有 CLI 用量（cli）或只有额度记录的天不算，
 // 补算时照样补（2026-11-24：CLI 的用量可能先于补算写进某一天，原来按“有记录就是实时记的”判断会跳过那天）
 const deskRec = (rec) => !!rec && (rec.models != null || rec.usd != null || rec.raw != null);
-const BACKFILL_V = 2;
+const BACKFILL_V = 3; // v3（11-24）：历史改成留 400 天，重新补一次 90 天以前的日子（以前补完会被删掉）
 // 读全部对话库，算到昨天为止每一天的调用：
 // - liveFrom 之前（没有实时记录的日子）：补算出来的（bf）和没有记录的，换成新算的；有实时记录的不动。
 //   新算时找不到的日子不删（对话被删掉了，库就没了；留着原来补算的数）。
@@ -788,15 +789,15 @@ async function backfillHistory() {
 // （Duration：1 秒、2 纳秒；11-24 对着桌面后台接口的 timeToFirstToken / streamingDuration 逐条核对过）、21 = 界面上的模型名。
 // - 按天汇总存进 usage-history.json 每天的 cli = { raw: { 模型名: [调用数, 输入, 缓存读, 缓存写, 输出] }, convs, calls }，
 //   钱由状态栏按价目表算（和补算的天一样）。
-// - 第一次（history.cliBf 没有或版本不对）读 90 天内改过的全部库（11-24 Windows 实测 167 个、1.7 GB、约 7 秒），
-//   以后每分钟只重读改过的库，只重算“上次扫描那天和昨天里较早的那天”到今天。
+// - 第一次（history.cliBf 没有或版本不对）读 HISTORY_KEEP_DAYS（400）天内改过的全部库（11-24 Windows 实测 167 个、1.7 GB、约 7 秒），
+//   以后每 30 秒只重读改过的库，只重算“上次扫描那天和昨天里较早的那天”到今天；今天的汇总变了就马上推一次历史给页面。
 // - 每次调用的明细（调用明细页用）留在内存里，只留最近 32 天改过的库；页面打开某一天的明细时经 __agyZhAsk 来要（见 onPageAsk）。
 // - 只读打开，不写 CLI 的文件；库正被 CLI 写着读不了时（BUSY），留着上次读到的，这次不改那几天的汇总。
 const CLI_ROOT = path.join(os.homedir(), '.gemini', 'antigravity-cli');
 const CLI_CONV_DIR = path.join(CLI_ROOT, 'conversations');
 const CLI_TITLE_FILE = path.join(CLI_ROOT, 'cache', 'conversation_metadata.json');
-const CLI_BF_V = 1;
-const CLI_SCAN_MS = 60000;
+const CLI_BF_V = 2; // v2（11-24）：历史改成留 400 天，重新读一次全部 CLI 对话库
+const CLI_SCAN_MS = 30000;
 const CLI_CALLS_KEEP_MS = 32 * 86400e3;
 const cliCache = new Map(); // 文件名 → { mtime, calls: [[时间, 模型名, 输入, 缓存读, 缓存写, 输出, 首字秒, 生成秒, 界面名, 请求 ID]] }
 let cliBusy = false;
@@ -852,6 +853,7 @@ async function scanCli() {
     try { names = fs.readdirSync(CLI_CONV_DIR).filter((n) => /^[0-9a-f-]{36}\.db$/.test(n)); } catch { return; } // 没装 CLI
     let DatabaseSync;
     try { ({ DatabaseSync } = await import('node:sqlite')); } catch { return; }
+    SqliteDb = DatabaseSync;
     const h = readHistory();
     const full = !(h.cliBf && h.cliBf.v === CLI_BF_V);
     const now = Date.now();
@@ -910,6 +912,7 @@ async function scanCli() {
         if (next) (h.days[d] || (h.days[d] = {})).cli = next;
         else if (rec) { delete rec.cli; if (!Object.keys(rec).length) delete h.days[d]; }
         changed++;
+        if (d === today) costSyncAt = 0; // 今天的 CLI 用量变了：下一次轮询（3 秒内）就把历史推给页面
       }
       if (full || changed || now - (+h.cliBf.at || 0) > 600000) {
         h.cliBf = { v: CLI_BF_V, at: now, ...(full ? { first: dayOf(now), dbs: names.length } : { first: h.cliBf.first, dbs: h.cliBf.dbs }) };
@@ -931,21 +934,37 @@ async function scanCli() {
     cliBusy = false;
   }
 }
-// CLI 对话的标题：CLI 自己的 cache/conversation_metadata.json（conversations[ID].summary.Title），文件改了才重读
-let cliTitleCache = { mtime: -1, map: {} };
+// CLI 对话的标题（2026-11-24 改）：先查 CLI 自己的对话摘要库 conversation_summaries.db（title；没有就用 preview =
+// 第一条消息的开头，去掉开头的 /plan 这类命令，留 60 字），再查 cache/conversation_metadata.json（summary.Title）。
+// 原来只查那个 JSON，它不是每次都更新（11-24 实测最后更新在 11-23 00:26，之后的对话都没有标题）；
+// 别的工具调起来的 CLI 对话一般没有 title，只有 preview。文件改了才重读；只读打开。
+const CLI_SUMMARY_DB = path.join(CLI_ROOT, 'conversation_summaries.db');
+let SqliteDb = null; // node:sqlite 的 DatabaseSync，scanCli 第一次加载后记在这里
+let cliTitleCache = { key: '', map: {} };
+const mtimeOf = (f) => { try { return fs.statSync(f).mtimeMs; } catch { return 0; } };
+const cleanPreview = (s) => String(s || '').replace(/\s+/g, ' ').trim().replace(/^\/[\w-]+\s+/, '').slice(0, 60);
 function cliTitles() {
-  let mt = 0;
-  try { mt = fs.statSync(CLI_TITLE_FILE).mtimeMs; } catch { return {}; }
-  if (mt !== cliTitleCache.mtime) {
-    const map = {};
-    const j = readJsonKeepless(CLI_TITLE_FILE);
-    for (const [id, c] of Object.entries((j && j.conversations) || {})) {
-      const t = c && c.summary && c.summary.Title;
-      if (UUID_RE.test(id) && typeof t === 'string' && t) map[id] = t.slice(0, 80);
-    }
-    cliTitleCache = { mtime: mt, map };
+  const key = [mtimeOf(CLI_TITLE_FILE), mtimeOf(CLI_SUMMARY_DB), mtimeOf(CLI_SUMMARY_DB + '-wal')].join('|');
+  if (key === cliTitleCache.key) return cliTitleCache.map;
+  const map = {};
+  const j = readJsonKeepless(CLI_TITLE_FILE);
+  for (const [id, c] of Object.entries((j && j.conversations) || {})) {
+    const t = c && c.summary && c.summary.Title;
+    if (UUID_RE.test(id) && typeof t === 'string' && t) map[id] = t.slice(0, 80);
   }
-  return cliTitleCache.map;
+  if (SqliteDb && mtimeOf(CLI_SUMMARY_DB)) {
+    let db = null;
+    try {
+      db = new SqliteDb(CLI_SUMMARY_DB, { readOnly: true });
+      for (const r of db.prepare('select conversation_id id, title, preview from conversation_summaries').iterate()) {
+        if (!UUID_RE.test(String(r.id))) continue;
+        const t = String(r.title || '').trim().slice(0, 80) || cleanPreview(r.preview);
+        if (t) map[r.id] = t;
+      }
+    } catch { /* 库正被 CLI 写着或格式变了：只用 JSON 里的 */ } finally { try { db && db.close(); } catch {} }
+  }
+  cliTitleCache = { key, map };
+  return map;
 }
 // 读别的程序的 JSON（不留底、不改名，读不出来就当没有）
 function readJsonKeepless(file) {
@@ -974,14 +993,20 @@ function cliCallsFor(day) {
   rows.sort((a, b) => b[0] - a[0]);
   return { day, rows, convs, at: Date.now() };
 }
-// 页面经 Runtime.addBinding 加的 window.__agyZhAsk(JSON) 来要数据（2026-11-24 加）。只认 { t: 'cli-calls', day: 'YYYY-MM-DD' }，
-// 回答时调页面的 S.setCliCalls。页面里任何脚本都能调这个函数，所以只给只读的用量数字和 CLI 对话标题，别的一律不理。
+// 页面经 Runtime.addBinding 加的 window.__agyZhAsk(JSON) 来要数据（2026-11-24 加）。只认两种：
+//   { t: 'cli-calls', day: 'YYYY-MM-DD' } → 调页面的 S.setCliCalls（某一天 CLI 的调用明细）；
+//   { t: 'history-all' } → 调页面的 S.setHistoryAll（全部历史，面板选 all 时要一次）。
+// 页面里任何脚本都能调这个函数，所以只给只读的用量数字和 CLI 对话标题，别的一律不理。
 async function onPageAsk(sess, payload) {
   let q;
   try { q = JSON.parse(String(payload || '').slice(0, 200)); } catch { return; }
-  if (!q || q.t !== 'cli-calls' || !/^\d{4}-\d{2}-\d{2}$/.test(String(q.day))) return;
-  const js = JSON.stringify(cliCallsFor(q.day));
-  try { await sess.send('Runtime.evaluate', { expression: `window.__agyStats && window.__agyStats.setCliCalls && window.__agyStats.setCliCalls(${js})` }); } catch {}
+  let expr = '';
+  if (q && q.t === 'cli-calls' && /^\d{4}-\d{2}-\d{2}$/.test(String(q.day))) {
+    expr = `window.__agyStats && window.__agyStats.setCliCalls && window.__agyStats.setCliCalls(${JSON.stringify(cliCallsFor(q.day))})`;
+  } else if (q && q.t === 'history-all') {
+    expr = `window.__agyStats && window.__agyStats.setHistoryAll && window.__agyStats.setHistoryAll(${JSON.stringify(recentHistory(HISTORY_KEEP_DAYS))})`;
+  } else return;
+  try { await sess.send('Runtime.evaluate', { expression: expr }); } catch {}
 }
 const mtimes = {};
 function loadAssets() {
@@ -1051,7 +1076,7 @@ function pageScript() {
 // - Theme 页的 updates 选 off（look.json 的 online = 'off'）：不再联网，也不用 remote/ 里存的，只用安装包自带的。
 // - 换了版本（安装了新的安装包）以后，remote/ 里存的词典和规则先不用，等下一次取到再用（新安装包里的可能更新）。
 // - 测试：环境变量 AGY_REMOTE_BASE 换成别的地址（例如本机起的 http://127.0.0.1:端口/），只试这一个地址。
-const PACK_VERSION = '2.0.4';
+const PACK_VERSION = '2.0.5';
 const REMOTE_DIR = path.join(DATA, 'remote');
 const REMOTE_STATE = path.join(REMOTE_DIR, 'state.json');
 const REMOTE_BASES = process.env.AGY_REMOTE_BASE ? [process.env.AGY_REMOTE_BASE] : [
