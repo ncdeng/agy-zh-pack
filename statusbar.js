@@ -1478,15 +1478,15 @@ function agyStatusBar(CFG) {
     }
     return null;
   };
-  // cap 的精确起点（2026-11-24 加）：周期开始那天只算周期开始以后的调用。原来那天整天都算，例如 11-24 09:31 才开始的
-  // Gemini 周期，把 00:00～04:05 旧周期的花费也算了进去，cap 偏高。
+  // 按每次调用的时间算一段时间里某一组模型的花费（2026-11-24 加）。用在 cap：当前周期开始那天只算周期开始以后的，
+  // 以前的周期两头那两天只算周期里的（原来按整天算，例如 11-24 09:31 才开始的 Gemini 周期，把 00:00～04:05 旧周期的花费也算了进去）。
   // 每次调用的时间来自调用明细同一套数据：桌面版用 S.loadCalls（向本机后台取，按对话缓存，只补取改过的对话），
-  // CLI 用 S.cliCalls（注入程序给，见 S.cliAsk）。桌面版的结果按“组|开始时间”缓存：开始那天是今天时 2 分钟内不重取，
+  // CLI 用 S.cliCalls（注入程序给，见 S.cliAsk）。桌面版的结果按“组|日子|起|止”缓存：日子是今天时 2 分钟内不重取，
   // 以前的天 1 小时内不重取；CLI 的部分每次现算（明细可能比桌面版的晚到）。还没取到时返回 null，调用方先按整天算。
   S.capPart = S.capPart || {};
-  const capStartPart = (grp, start) => {
-    const nm = dayOfMs(start);
-    const k = grp + '|' + start;
+  const inRange = (at, from, to) => at >= from && at < to;
+  const callsPart = (grp, nm, from, to) => {
+    const k = grp + '|' + nm + '|' + from + '|' + to;
     const c = S.capPart[k] || (S.capPart[k] = { at: 0, busy: false, desk: null });
     if (!c.busy && Date.now() - c.at >= (nm === dayName() ? 120000 : 3600e3) && S.lsHeaders && S.loadCalls) {
       c.busy = true;
@@ -1494,7 +1494,7 @@ function agyStatusBar(CFG) {
       S.loadCalls(nm).then((res) => {
         let usd = 0, tok = 0;
         for (const r of res.rows) {
-          if (!(r.at >= start)) continue;
+          if (!inRange(r.at, from, to)) continue;
           const cc = callCost(r.usage, callNames(r.resp, r.key, r.exec), r.at);
           if (!cc || modelGroup(cc.pr ? cc.pr.name : 'Other') !== grp) continue;
           usd += cc.usd || 0;
@@ -1510,13 +1510,45 @@ function agyStatusBar(CFG) {
     if (!c.desk) return null;
     let usd = c.desk.usd, tok = c.desk.tok;
     for (const r of cliRows(nm)) {
-      if (!(r.at >= start)) continue;
+      if (!inRange(r.at, from, to)) continue;
       const cc = callCost(r.usage, r.resp, r.at);
       if (!cc || modelGroup(cc.pr ? cc.pr.name : 'Other') !== grp) continue;
       usd += cc.usd || 0;
       tok += cc.inp + cc.cr + cc.cw + cc.out;
     }
     return { usd, tok, failed: c.desk.failed };
+  };
+  // 一段时间（start～end，end 可以是 Infinity = 到现在）里某一组模型的花费和 token：整天都在里面的按那天的合计，
+  // 只有一部分在里面的那天按每次调用的时间（callsPart）。exact = false：有的天还没按调用时间算好，暂时按整天算的
+  const cycleCost = (grp, start, end) => {
+    let usd = 0, tok = 0, exact = true, failed = 0;
+    const d = new Date(start);
+    d.setHours(12, 0, 0, 0);
+    const today = dayName();
+    for (let i = 0; i < 12; i++) {
+      const nm = d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());
+      const d0 = new Date(nm + 'T00:00:00').getTime(), d1 = new Date(nm + 'T00:00:00').setDate(new Date(nm + 'T00:00:00').getDate() + 1);
+      if (d0 >= end) break;
+      const whole = () => {
+        for (const [name, m] of Object.entries(((dayRecord(nm) || {}).models) || {})) {
+          if (modelGroup(name) === grp) { usd += +m[0] || 0; tok += (+m[2] || 0) + (+m[3] || 0) + (+m[4] || 0) + (+m[5] || 0); }
+        }
+      };
+      if (start <= d0 && end >= d1) whole();
+      else {
+        const p = callsPart(grp, nm, Math.max(start, d0), end >= d1 ? Infinity : end);
+        if (p) { usd += p.usd; tok += p.tok; failed += p.failed; } else { exact = false; whole(); }
+      }
+      if (nm === today) break;
+      d.setDate(d.getDate() + 1);
+    }
+    return { usd, tok, exact, failed };
+  };
+  // 以前的周期（注入程序记的 cycles，见 lib/quota.mjs 的 noteCycleEnd）：这个桶的，最近的在前
+  const pastCycles = (bucketId) => {
+    const seen = new Set();
+    return [S.history, S.historyAll].flatMap((h) => (h && Array.isArray(h.cycles) ? h.cycles : []))
+      .filter((e) => e && e.id === bucketId && e.end > e.start && !seen.has(e.start) && seen.add(e.start)).sort((a, b) => b.start - a.start);
   };
   const recTokens = (r) => {
     const t = [0, 0, 0, 0, 0]; // 调用数、输入、缓存读、缓存写、输出
@@ -1853,7 +1885,7 @@ function agyStatusBar(CFG) {
     //   已用：状态栏查到的这个周期的已用比例；没用过的桶（已用 0）重置时间跟着现在走，周期还没开始，只写 0% used。
     //   整周额度大约值多少（cap，11-22 用户要的“预计周限额 800 刀、900M 用量”）：这个周期开始那天起，每天这一组模型的
     //   花费和 token 合计 ÷ 已用比例，推出用满 100% 大约对应多少钱、多少 token。
-    //   2026-11-24 起周期开始那天只算周期开始以后的调用（见 capStartPart），原来那天整天都算在内。
+    //   2026-11-24 起周期开始那天只算周期开始以后的调用（见 cycleCost / callsPart），原来那天整天都算在内。
     //   已用不到 5% 时误差很大，标 rough；额度按模型和 token 种类怎么折算 Google 没公布，这里按花费和 token 同比例推，只是参考。
     for (const [grp, label] of GROUPS) {
       const wb = weeklyBucket(grp);
@@ -1866,23 +1898,11 @@ function agyStatusBar(CFG) {
         parts.push('resets ' + fmtWhen(wb.reset));
         est = weekEst(wb.id);
         if (est) parts.push('est ' + est.short);
-        // 这个周期开始那天到今天，这一组模型的花费和 token（输入 + 缓存读 + 缓存写 + 输出）。
-        // 开始那天：按每次调用的时间只算周期开始以后的（capStartPart，后台取好之前先按整天算）；之后的天按整天算
-        let usd = 0, tok = 0;
-        const part = capStartPart(grp, start);
-        const startDay = dayOfMs(start);
-        const d = new Date(start);
-        d.setHours(12, 0, 0, 0);
-        const today = dayName();
-        for (let i = 0; i < 9; i++) {
-          const nm = d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());
-          if (nm === startDay && part) { usd += part.usd; tok += part.tok; }
-          else for (const [name, m] of Object.entries(((dayRecord(nm) || {}).models) || {})) {
-            if (modelGroup(name) === grp) { usd += +m[0] || 0; tok += (+m[2] || 0) + (+m[3] || 0) + (+m[4] || 0) + (+m[5] || 0); }
-          }
-          if (nm === today) break;
-          d.setDate(d.getDate() + 1);
-        }
+        // 这个周期开始到现在，这一组模型的花费和 token（输入 + 缓存读 + 缓存写 + 输出）。
+        // 开始那天按每次调用的时间只算周期开始以后的（cycleCost / callsPart，后台取好之前先按整天算）；之后的天按整天算
+        const cost = cycleCost(grp, start, Infinity);
+        const usd = cost.usd, tok = cost.tok;
+        const part = cost.exact ? cost : null;
         const capOk = wb.used >= 0.01 && usd > 0;
         const capUsd = capOk ? usd / wb.used : 0, capTok = capOk ? tok / wb.used : 0;
         const capRough = wb.used < 0.05;
@@ -1906,6 +1926,18 @@ function agyStatusBar(CFG) {
         tip += '\n\n' + RESET_MARK + ' 这个周期是在一次提前重置之后开始的。' + resetText(er) + '。';
       }
       if (est) tip += '\n\n预估（est）：' + est.long + '\n' + SHARE_NOTE;
+      // 以前的周期（2026-11-24 加）：每个周期这台电脑的花费 ÷ 结束前用掉的比例 = 那个周期的 cap，攒几个周期就能看出额度有没有变。
+      // 用掉不到 1% 的周期不推 cap（误差太大）。最近 4 个
+      const pcs = wb ? pastCycles(wb.id).slice(0, 4) : [];
+      if (pcs.length) {
+        const mdhmOf = (ms) => { const x = new Date(ms); return (x.getMonth() + 1) + '-' + x.getDate() + ' ' + pad(x.getHours()) + ':' + pad(x.getMinutes()); };
+        tip += '\n\n以前的周期（cap = 这台电脑在那个周期里的花费 ÷ 结束前用掉的比例）：' + pcs.map((e) => {
+          const c = cycleCost(grp, e.start, e.end);
+          const capTx = e.used >= 0.01 && c.usd > 0 ? ' → cap ≈ ' + fmtUsd(c.usd / e.used) + (e.used < 0.05 ? '（用得少，很粗）' : '') : '';
+          return '\n  ' + mdhmOf(e.start) + ' – ' + mdhmOf(e.end) + (e.early ? ' ' + RESET_MARK + ' 提前重置' : '') + '：用了 ' + pctTx(e.used) + '，花了 ' + fmtUsd(c.usd) + capTx +
+            (c.exact ? '' : '（两头那两天正在按调用时间算）');
+        }).join('') + '\n（从 2026-11-24 起每次换周期都会记一笔；更早的只有提前重置的那几次）';
+      }
       if (S.account) tip += '\n\n账号 ' + S.account.m;
       const line = el('div', 'k-quota', parts.join(' · '));
       setTip(line, tip);
@@ -2022,36 +2054,35 @@ function agyStatusBar(CFG) {
     setTip(back, '回到每日用量');
     back.addEventListener('click', () => { S.panelView = 'usage'; renderPanel(panel); });
     head.append(back, setTip(el('span', 'p-title', 'Calls · ' + lb.wd + ' ' + lb.md), '这一天每次模型调用的明细，最新的在上面'));
-    // 筛选（2026-11-24 加）：全部 / 桌面版 / agy CLI。那天有 CLI 的调用才显示这组按钮；每次打开某一天都从“全部”开始
-    let filt = 'all';
-    let show = 600; // 表格画多少行；“再显示”一次加 600
-    const fseg = el('span', 'p-seg');
-    fseg.hidden = true;
-    const fbtn = {};
-    for (const [k, t, tip] of [['all', 'all', '全部调用'], ['desk', 'desktop', '只看桌面版的调用'], ['cli', 'CLI', '只看 agy CLI 的调用（别的工具直接调 CLI 也在这里）']]) {
-      const b = setTip(el('button', 'p-btn' + (k === filt ? ' on' : ''), t), tip);
-      b.addEventListener('click', () => {
-        if (filt === k) return;
-        filt = k;
-        show = 600;
-        for (const [kk, bb] of Object.entries(fbtn)) bb.classList.toggle('on', kk === k);
-        wrap.scrollTop = 0;
-        if (lastRes) { sig = ''; draw(lastRes); }
-      });
-      fbtn[k] = b;
-      fseg.append(b);
-    }
     const sum = el('span', 'p-range', '');
     const x = el('button', 'p-btn p-x', '×');
     setTip(x, '关闭（Esc）');
     x.addEventListener('click', closePanel);
-    head.append(fseg, sum, el('span', 'p-fill'), x);
+    head.append(sum, el('span', 'p-fill'), x);
     panel.append(head);
+    // 第二行：视图和筛选（2026-11-24 加）。每次打开某一天都从“明细、全部”开始。
+    //   view：calls 每次调用一行；convs 按对话汇总（每个对话一行，按花费从高到低，点一行回到明细并只看这个对话）。
+    //   src：all / desk（桌面版）/ cli（agy CLI），那天有 CLI 的调用才显示；mdl：按价目名（Carbon、Neon…），那天有两种以上才显示；
+    //   conv：只看某个对话（从按对话汇总里点进来），旁边有 × 取消。
+    let view = 'calls', src = 'all', mdl = 'all', conv = null;
+    let show = 600; // 明细表画多少行；“再显示”一次加 600
+    const tools = el('div', 'p-tools');
+    const segOf = (items, cur, onPick) => {
+      const g = el('span', 'p-seg');
+      for (const [k, t, tip, cls] of items) {
+        const b = setTip(el('button', 'p-btn' + (k === cur ? ' on' : '') + (cls ? ' ' + cls : ''), t), tip);
+        b.addEventListener('click', () => { if (k !== cur) onPick(k); });
+        g.append(b);
+      }
+      return g;
+    };
+    const redraw = () => { sig = ''; wrap.scrollTop = 0; if (lastRes) draw(lastRes); };
+    panel.append(tools);
     const status = el('div', 'p-empty', 'loading…');
     panel.append(status);
     const wrap = el('div', 'p-table calls');
     panel.append(wrap);
-    // 超过 show 行：表格下面一个“再显示 600 条”和一个“全部显示”（2026-11-24 加，原来最多 600 行，多的只算进合计）
+    // 超过 show 行：表格下面一个“再显示 600 条”和一个“全部显示”（原来最多 600 行，多的只算进合计）
     const more = el('div', 'p-more');
     more.hidden = true;
     panel.append(more);
@@ -2059,84 +2090,146 @@ function agyStatusBar(CFG) {
     panel.append(note);
     let sig = '';
     let lastRes = null;
+    const labelOf = (r) => (r.cli ? 'CLI · ' + (r.title || r.conv.slice(0, 8)) : convLabel(r.conv));
     const draw = (res) => {
       lastRes = res;
       const all = res.rows.concat(cliRows(nm)).sort((a, b) => b.at - a.at); // 桌面版的 + agy CLI 的，最新的在上面
       const hasCli = all.some((r) => r.cli);
-      fseg.hidden = !hasCli;
-      if (!hasCli && filt !== 'all') { filt = 'all'; for (const [kk, bb] of Object.entries(fbtn)) bb.classList.toggle('on', kk === 'all'); }
-      const rows = filt === 'cli' ? all.filter((r) => r.cli) : filt === 'desk' ? all.filter((r) => !r.cli) : all;
-      // 指纹：筛选、行数上限、调用数、每次调用的时间和 token、耗时；没变化就不动表格
-      // CLI 对话的标题可能比调用晚到（换了插件版本后页面里还留着旧的明细），标题变了也要重画
+      if (!hasCli) src = 'all';
+      // 每次调用的花费和价目名（模型筛选按价目名分：Carbon、Neon、Opus 5.5…，和每日面板的颜色一致）
+      const costs = new Map();
+      for (const r of all) {
+        const cc = callCost(r.usage, r.cli ? r.resp : callNames(r.resp, r.key, r.exec), r.at) || { usd: null };
+        costs.set(r, cc);
+      }
+      const pname = (r) => (costs.get(r).pr ? costs.get(r).pr.name : 'Other');
+      const bySrc = src === 'cli' ? all.filter((r) => r.cli) : src === 'desk' ? all.filter((r) => !r.cli) : all;
+      const models = new Map(); // 价目名 → [调用数, 美元]
+      for (const r of bySrc) { const m = models.get(pname(r)) || [0, 0]; m[0]++; m[1] += costs.get(r).usd || 0; models.set(pname(r), m); }
+      if (mdl !== 'all' && !models.has(mdl)) mdl = 'all';
+      const byModel = mdl === 'all' ? bySrc : bySrc.filter((r) => pname(r) === mdl);
+      if (conv && !byModel.some((r) => r.conv === conv)) conv = null;
+      const rows = conv ? byModel.filter((r) => r.conv === conv) : byModel;
+      // 指纹：视图、筛选、行数上限、CLI 标题、调用数、每次调用的时间和 token、耗时；没变化就不动表格
+      // （CLI 对话的标题可能比调用晚到，标题变了也要重画）
       const cliTitlesSig = JSON.stringify((S.cliCalls[nm] && S.cliCalls[nm].convs) || {});
-      const nsig = filt + '|' + show + '|' + cliTitlesSig + '|' + rows.length + '|' + res.failed + '|' + rows.slice(0, show).map((r) => r.at + ':' + (+r.usage.outputTokens || 0) + ':' + (+r.usage.inputTokens || 0) + ':' + r.stream).join(',');
+      const nsig = [view, src, mdl, conv, show, cliTitlesSig, rows.length, res.failed].join('|') + '|' +
+        rows.slice(0, show).map((r) => r.at + ':' + (+r.usage.outputTokens || 0) + ':' + (+r.usage.inputTokens || 0) + ':' + r.stream).join(',');
       if (nsig === sig) return;
       sig = nsig;
-      const usdOf = (r) => { const cc = callCost(r.usage, callNames(r.resp, r.key, r.exec), r.at); return cc ? cc : { usd: null }; };
-      // 合计按这一天的全部调用算；表格只画最新的 MAX 次
+      // 第二行的按钮：每次重画时按当前数据重建（模型的种类会变）
+      tools.replaceChildren(segOf([['calls', 'calls', '每次调用一行'], ['convs', 'by conversation', '按对话汇总：每个对话一行，按花费从高到低；点一行回到明细，只看这个对话']], view,
+        (k) => { view = k; show = 600; redraw(); }));
+      if (hasCli) tools.append(segOf([['all', 'all', '桌面版和 agy CLI 的调用'], ['desk', 'desktop', '只看桌面版的调用'], ['cli', 'CLI', '只看 agy CLI 的调用（别的工具直接调 CLI 也在这里）']], src,
+        (k) => { src = k; show = 600; redraw(); }));
+      if (models.size > 1 || mdl !== 'all') {
+        const items = [['all', 'all models', '全部模型']];
+        for (const [k, m] of [...models].sort((a, b) => b[1][1] - a[1][1])) items.push([k, k, k + '：' + m[0] + ' 次调用，' + fmtUsd(m[1]), 'k-' + (MODEL_COLOR[k] || 'muted')]);
+        tools.append(segOf(items, mdl, (k) => { mdl = k; show = 600; redraw(); }));
+      }
+      if (conv) {
+        const r0 = byModel.find((r) => r.conv === conv);
+        const chip = setTip(el('button', 'p-btn on p-chip', '× ' + clip(r0 ? labelOf(r0) : conv.slice(0, 8), 32)), '只看这个对话的调用，点一下取消');
+        chip.addEventListener('click', () => { conv = null; redraw(); });
+        tools.append(chip);
+      }
+      tools.hidden = !tools.children.length;
       let total = 0, priced = 0;
-      const costs = new Map();
-      for (const r of rows) { const cc = usdOf(r); costs.set(r, cc); if (cc.usd != null) { total += cc.usd; priced++; } }
+      for (const r of rows) { const u = costs.get(r).usd; if (u != null) { total += u; priced++; } }
+      const filtered = src !== 'all' || mdl !== 'all' || conv;
+      const old = wrap.querySelector('table');
+      const keep = old && view === 'calls' && wrap.dataset.view === 'calls' ? { top: wrap.scrollTop, h: wrap.scrollHeight } : null;
       const table = el('table');
       const hr = el('tr');
-      const heads = [['Time', '调用开始的时间'], ['Conversation', '哪个对话（↳ 是子代理，CLI · 开头的是 agy CLI 的对话）'], ['Model', '模型（界面名；悬停看接口名和配置名）'], ['Cost', '按 API 标准价折算（不是实际扣费）'],
-        ['In', '新增输入（不含缓存）'], ['Out', '输出（含思考）'], ['Cache', '缓存读取'], ['Write', '缓存写入（只有 Claude 有）'], ['Hit', '命中率 = 缓存读 ÷（缓存读 + 输入）'],
-        ['tok/s', '生成速度：输出 token（含思考）÷ 总耗时。思考在首字之前就生成了，所以按总耗时算'], ['TTFT', '首字时间（后台记录的 timeToFirstToken）'], ['Total', '首字 + 生成用时']];
-      for (const [h, t] of heads) { const th = el('th', '', h); setTip(th, t); hr.append(th); }
-      const thead = el('thead'); thead.append(hr);
       const tbody = el('tbody');
       const MAX = show;
-      for (const r of rows.slice(0, MAX)) {
-        const u = r.usage, inp = +u.inputTokens || 0, cr = +u.cacheReadTokens || 0, cw = +u.cacheWriteTokens || 0;
-        const out = Math.max(+u.outputTokens || 0, (+u.thinkingOutputTokens || 0) + (+u.responseOutputTokens || 0));
-        const cc = costs.get(r);
-        const t = new Date(r.at);
-        const tr = el('tr');
-        const model = r.disp || (r.key && S.enumModel.get(r.key)) || r.resp || r.key.replace(/^MODEL_/, '');
-        const label = r.cli ? 'CLI · ' + (r.title || r.conv.slice(0, 8)) : convLabel(r.conv);
-        const tdConv = el('td', 'cv', clip(label, 48)); // 实际宽度由 CSS 限制（放不下出省略号）
-        setTip(tdConv, label + '\n' + (r.cli ? 'agy CLI 的对话 ' + r.conv.slice(0, 8) + '（别的工具直接调 CLI 也在这里）' : '对话 ' + r.conv.slice(0, 8) + ' · 第 ' + (r.step + 1) + ' 步'));
-        // 表里写短名（去掉 Gemini 4 / Claude 前缀），完整的界面名、接口名、配置名在悬停说明里
-        const tdModel = el('td', 'md', clip(model.replace(/^Gemini \d+(\.\d+)?\s+/, '').replace(/^Claude\s+/, ''), 20));
-        const price = cc.pr ? '\n单价按 ' + cc.pr.name + (cc.pr.note ? '（' + cc.pr.note + '）' : '') : '\n价格表里没有这个模型，没算钱';
-        setTip(tdModel, r.cli ? '界面名：' + (r.disp || '?') + '\n模型：' + (r.resp || '?') + price + '\n（agy CLI 的调用，从 CLI 的对话库读的）'
-          : '界面名：' + (r.disp || '?') + '\n接口返回的模型：' + (r.resp || '?') + '\n配置名：' + ((r.key && S.enumModel.get(r.key)) || '?') + '\n编号：' + (r.key || '?') +
-          price + (r.retries ? '\n重试过 ' + r.retries + ' 次' : ''));
-        const tdCost = el('td', 'c', cc.usd != null ? fmtUsdFine(cc.usd) : '—');
-        const hit = cr + inp > 0 ? Math.round(cr / (cr + inp) * 100) + '%' : '—';
-        const totalS = r.ttft + r.stream;
-        const tps = totalS > 0.05 && out > 0 ? String(Math.round(out / totalS)) : '—'; // 单位 tok/s 写在表头
-        tr.append(el('td', '', pad(t.getHours()) + ':' + pad(t.getMinutes()) + ':' + pad(t.getSeconds())), tdConv, tdModel, tdCost,
-          el('td', '', inp.toLocaleString()), el('td', '', out.toLocaleString()), el('td', '', fmtK(cr)), el('td', '', cw ? fmtK(cw) : '—'), el('td', 'h', hit),
-          el('td', '', tps), el('td', '', r.ttft ? r.ttft.toFixed(1) + 's' : '—'), el('td', '', r.ttft || r.stream ? (r.ttft + r.stream).toFixed(1) + 's' : '—'));
-        tbody.append(tr);
-      }
-      table.append(thead, tbody);
-      const old = wrap.querySelector('table');
-      const keep = old ? { top: wrap.scrollTop, h: wrap.scrollHeight } : null;
-      wrap.replaceChildren(table);
-      // 往下翻过时保持看着的那几行不动（新调用加在最上面，表格变高多少就往下挪多少）；在顶部就留在顶部看最新的
-      if (keep && keep.top > 0) wrap.scrollTop = keep.top + (wrap.scrollHeight - keep.h);
-      sum.textContent = rows.length + (filt === 'cli' ? ' CLI' : filt === 'desk' ? ' desktop' : '') + ' calls · ' + fmtUsd(total) + (filt !== 'all' ? ' (of ' + all.length + ')' : '');
-      status.textContent = rows.length ? '' : 'no calls found for this day';
-      status.hidden = !!rows.length;
       more.replaceChildren();
-      more.hidden = rows.length <= MAX;
-      if (rows.length > MAX) {
-        const left = rows.length - MAX;
-        const b1 = el('button', 'p-btn', 'show ' + Math.min(600, left) + ' more');
-        b1.addEventListener('click', () => { show += 600; sig = ''; draw(lastRes); });
-        more.append(el('span', 'dim', MAX + ' of ' + rows.length + ' shown'), b1);
-        if (left > 600) {
-          const b2 = el('button', 'p-btn', 'show all');
-          b2.addEventListener('click', () => { show = rows.length; sig = ''; draw(lastRes); });
-          more.append(b2);
+      more.hidden = true;
+      if (view === 'convs') {
+        // 按对话汇总：对话、来源、调用数、花费、占比、输入、输出、缓存、命中、时间段、用到的模型
+        const agg = new Map();
+        for (const r of rows) {
+          const a = agg.get(r.conv) || { r0: r, n: 0, usd: 0, inp: 0, out: 0, cr: 0, first: r.at, last: r.at, models: new Map() };
+          const cc = costs.get(r);
+          a.n++; a.usd += cc.usd || 0; a.inp += cc.inp || 0; a.out += cc.out || 0; a.cr += cc.cr || 0;
+          a.first = Math.min(a.first, r.at); a.last = Math.max(a.last, r.at);
+          a.models.set(pname(r), (a.models.get(pname(r)) || 0) + (cc.usd || 0));
+          agg.set(r.conv, a);
+        }
+        const heads = [['Conversation', '对话（↳ 是子代理，CLI · 开头的是 agy CLI 的对话）'], ['Calls', '这一天在这个对话里的调用次数'], ['Cost', '按 API 标准价折算（不是实际扣费）'], ['Share', '占这一天（当前筛选下）合计的比例'],
+          ['In', '新增输入（不含缓存）'], ['Out', '输出（含思考）'], ['Cache', '缓存读取'], ['Hit', '命中率 = 缓存读 ÷（缓存读 + 输入）'], ['Time', '这一天里第一次和最后一次调用的时间'], ['Models', '用到的模型，按花费从高到低']];
+        for (const [h, t] of heads) { const th = el('th', '', h); setTip(th, t); hr.append(th); }
+        const hm = (ms) => { const d = new Date(ms); return pad(d.getHours()) + ':' + pad(d.getMinutes()); };
+        for (const [id, a] of [...agg].sort((p, q) => q[1].usd - p[1].usd)) {
+          const tr = el('tr', 'clk');
+          const label = labelOf(a.r0);
+          const tdConv = el('td', 'cv', clip(label, 48));
+          setTip(tdConv, label + '\n' + (a.r0.cli ? 'agy CLI 的对话 ' : '对话 ') + id.slice(0, 8) + '\n点一下看这个对话的每次调用');
+          const ms = [...a.models].sort((p, q) => q[1] - p[1]).map(([k]) => k).join(', ');
+          tr.append(tdConv, el('td', '', String(a.n)), el('td', 'c', fmtUsdFine(a.usd)), el('td', '', total > 0 ? (a.usd / total < 0.005 ? '<1%' : Math.round(a.usd / total * 100) + '%') : '—'),
+            el('td', '', fmtK(a.inp)), el('td', '', fmtK(a.out)), el('td', '', fmtK(a.cr)), el('td', 'h', a.cr + a.inp > 0 ? Math.round(a.cr / (a.cr + a.inp) * 100) + '%' : '—'),
+            el('td', '', hm(a.first) + (a.last - a.first > 60000 ? '–' + hm(a.last) : '')), el('td', 'md', clip(ms, 28)));
+          tr.addEventListener('click', () => { conv = id; view = 'calls'; show = 600; redraw(); });
+          tbody.append(tr);
+        }
+        sum.textContent = agg.size + ' conversations · ' + rows.length + ' calls · ' + fmtUsd(total) + (filtered ? ' (filtered)' : '');
+      } else {
+        const heads = [['Time', '调用开始的时间'], ['Conversation', '哪个对话（↳ 是子代理，CLI · 开头的是 agy CLI 的对话）'], ['Model', '模型（界面名；悬停看接口名和配置名）'], ['Cost', '按 API 标准价折算（不是实际扣费）'],
+          ['In', '新增输入（不含缓存）'], ['Out', '输出（含思考）'], ['Cache', '缓存读取'], ['Write', '缓存写入（只有 Claude 有）'], ['Hit', '命中率 = 缓存读 ÷（缓存读 + 输入）'],
+          ['tok/s', '生成速度：输出 token（含思考）÷ 总耗时。思考在首字之前就生成了，所以按总耗时算'], ['TTFT', '首字时间（后台记录的 timeToFirstToken）'], ['Total', '首字 + 生成用时']];
+        for (const [h, t] of heads) { const th = el('th', '', h); setTip(th, t); hr.append(th); }
+        for (const r of rows.slice(0, MAX)) {
+          const u = r.usage, inp = +u.inputTokens || 0, cr = +u.cacheReadTokens || 0, cw = +u.cacheWriteTokens || 0;
+          const out = Math.max(+u.outputTokens || 0, (+u.thinkingOutputTokens || 0) + (+u.responseOutputTokens || 0));
+          const cc = costs.get(r);
+          const t = new Date(r.at);
+          const tr = el('tr');
+          // 老的 CLI 调用记录里没有界面名，只有 gemini-4-argon 这样的原始名：用价目名（Argon）
+          const model = r.disp || (r.key && S.enumModel.get(r.key)) || (r.cli && cc.pr ? cc.pr.name : '') || r.resp || r.key.replace(/^MODEL_/, '');
+          const label = labelOf(r);
+          const tdConv = el('td', 'cv', clip(label, 48)); // 实际宽度由 CSS 限制（放不下出省略号）
+          setTip(tdConv, label + '\n' + (r.cli ? 'agy CLI 的对话 ' + r.conv.slice(0, 8) + '（别的工具直接调 CLI 也在这里）' : '对话 ' + r.conv.slice(0, 8) + ' · 第 ' + (r.step + 1) + ' 步'));
+          // 表里写短名（去掉 Gemini 4 / Claude 前缀），完整的界面名、接口名、配置名在悬停说明里
+          const tdModel = el('td', 'md', clip(model.replace(/^Gemini \d+(\.\d+)?\s+/, '').replace(/^Claude\s+/, ''), 20));
+          const price = cc.pr ? '\n单价按 ' + cc.pr.name + (cc.pr.note ? '（' + cc.pr.note + '）' : '') : '\n价格表里没有这个模型，没算钱';
+          setTip(tdModel, r.cli ? '界面名：' + (r.disp || '?') + '\n模型：' + (r.resp || '?') + price + '\n（agy CLI 的调用，从 CLI 的对话库读的）'
+            : '界面名：' + (r.disp || '?') + '\n接口返回的模型：' + (r.resp || '?') + '\n配置名：' + ((r.key && S.enumModel.get(r.key)) || '?') + '\n编号：' + (r.key || '?') +
+            price + (r.retries ? '\n重试过 ' + r.retries + ' 次' : ''));
+          const tdCost = el('td', 'c', cc.usd != null ? fmtUsdFine(cc.usd) : '—');
+          const hit = cr + inp > 0 ? Math.round(cr / (cr + inp) * 100) + '%' : '—';
+          const totalS = r.ttft + r.stream;
+          const tps = totalS > 0.05 && out > 0 ? String(Math.round(out / totalS)) : '—'; // 单位 tok/s 写在表头
+          tr.append(el('td', '', pad(t.getHours()) + ':' + pad(t.getMinutes()) + ':' + pad(t.getSeconds())), tdConv, tdModel, tdCost,
+            el('td', '', inp.toLocaleString()), el('td', '', out.toLocaleString()), el('td', '', fmtK(cr)), el('td', '', cw ? fmtK(cw) : '—'), el('td', 'h', hit),
+            el('td', '', tps), el('td', '', r.ttft ? r.ttft.toFixed(1) + 's' : '—'), el('td', '', r.ttft || r.stream ? (r.ttft + r.stream).toFixed(1) + 's' : '—'));
+          tbody.append(tr);
+        }
+        sum.textContent = rows.length + ' calls · ' + fmtUsd(total) + (filtered ? ' (of ' + all.length + ')' : '');
+        more.hidden = rows.length <= MAX;
+        if (rows.length > MAX) {
+          const left = rows.length - MAX;
+          const b1 = el('button', 'p-btn', 'show ' + Math.min(600, left) + ' more');
+          b1.addEventListener('click', () => { show += 600; sig = ''; draw(lastRes); });
+          more.append(el('span', 'dim', MAX + ' of ' + rows.length + ' shown'), b1);
+          if (left > 600) {
+            const b2 = el('button', 'p-btn', 'show all');
+            b2.addEventListener('click', () => { show = rows.length; sig = ''; draw(lastRes); });
+            more.append(b2);
+          }
         }
       }
-      // 和当天合计比：筛选时只和那一部分比（桌面版 / CLI）
+      const thead = el('thead'); thead.append(hr);
+      table.append(thead, tbody);
+      wrap.replaceChildren(table);
+      wrap.dataset.view = view;
+      // 往下翻过时保持看着的那几行不动（新调用加在最上面，表格变高多少就往下挪多少）；在顶部就留在顶部看最新的
+      if (keep && keep.top > 0) wrap.scrollTop = keep.top + (wrap.scrollHeight - keep.h);
+      status.textContent = rows.length ? '' : 'no calls found for this day';
+      status.hidden = !!rows.length;
+      // 和当天合计比：只在没按模型 / 对话筛选时比；按来源筛选时只和那一部分比（桌面版 / CLI）
       const dr = dayRecord(nm) || {};
-      const dayUsd = (filt === 'cli' ? (dr.cli ? dr.cli.usd : 0) : filt === 'desk' && dr.cli ? dr.deskUsd : dr.usd) || 0;
-      note.textContent = (rows.length > MAX ? '表格里是最新的 ' + MAX + ' 次，合计按全部 ' + rows.length + ' 次算。' : '') +
+      const dayUsd = mdl !== 'all' || conv ? 0 : (src === 'cli' ? (dr.cli ? dr.cli.usd : 0) : src === 'desk' && dr.cli ? dr.deskUsd : dr.usd) || 0;
+      note.textContent = (view === 'calls' && rows.length > MAX ? '表格里是最新的 ' + MAX + ' 次，合计按全部 ' + rows.length + ' 次算。' : '') +
         (res.failed ? res.failed + ' 个对话没取到。' : '') +
         (dayUsd > 0 && total < dayUsd * 0.95 ? '明细合计 ' + fmtUsd(total) + '，当天合计 ' + fmtUsd(dayUsd) + '：差的部分可能是已经删掉的对话，或者 Antigravity 关着时补算进当天的用量。' : '') +
         (priced < rows.length ? (rows.length - priced) + ' 次调用的模型不在价格表里，没算钱。' : '');
@@ -2889,6 +2982,11 @@ ${P} .p-seg .p-btn.on{position:relative; z-index:1}
 ${P} .p-more{display:flex; align-items:center; justify-content:center; gap:.6rem; margin-top:.4rem; font-size:11px}
 ${P} .p-more .dim{color:var(--k-muted)}
 ${P} .p-seg[hidden], ${P} .p-more[hidden]{display:none}
+/* 调用明细第二行：视图、来源、模型几组按钮，放不下就换行；模型按钮前面一个和每日面板同色的小方块 */
+${P} .p-tools{display:flex; flex-wrap:wrap; align-items:center; gap:.35rem .6rem; margin:-.1rem 0 .4rem}
+${P} .p-tools[hidden]{display:none}
+${P} .p-tools .p-btn[class*=" k-"]::before{content:""; display:inline-block; width:7px; height:7px; border-radius:2px; background:var(--kc); margin-right:.35em; vertical-align:1px}
+${P} .p-chip{max-width:22em; overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
 ${P} tr.flash td{animation:agyFlash 1.2s ease-out}
 @keyframes agyFlash{0%{background:color-mix(in srgb, var(--k-cost) 24%, transparent)}100%{background:transparent}}
 ${P} .p-empty{padding:.4rem 0}

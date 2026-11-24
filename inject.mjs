@@ -38,7 +38,7 @@ import path from 'node:path';
 import { execFile, spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { chooseSource } from './lib/remote-source.mjs';
-import { r4, samePeriod, noteQuota, noteResetEvent, replayFromSamples } from './lib/quota.mjs';
+import { r4, samePeriod, noteQuota, noteResetEvent, noteCycleEnd, replayFromSamples } from './lib/quota.mjs';
 
 const IS_WIN = process.platform === 'win32';
 const IS_MAC = process.platform === 'darwin';
@@ -277,7 +277,7 @@ function todayConversations() {
   }
   return out;
 }
-// 本机对话库文件清单（2026-11-22 加，v1.6，调用明细页用）：[[对话 ID, 创建时间毫秒, 最后修改毫秒], …]，只给最近 32 天改过的。
+// 本机对话库文件清单（2026-11-22 加，v1.6，调用明细页用）：[[对话 ID, 创建时间毫秒, 最后修改毫秒], …]，只给最近 HISTORY_KEEP_DAYS（400）天改过的（11-24 以前是 32 天）。
 // 后台的对话摘要（GetAllCascadeTrajectories）只列一部分对话（11-22 实测：摘要 21 个，本机库文件 79 个），
 // 没列出的对话按 ID 照样能取到调用记录，所以把文件清单交给页面，明细页按创建 / 修改时间挑出某一天动过的对话。
 // 只读文件名和时间，不打开文件。60 秒内重复要就用上次的结果。
@@ -285,7 +285,7 @@ let convFilesCache = null, convFilesAt = 0;
 function convFiles() {
   if (convFilesCache && Date.now() - convFilesAt < 60000) return convFilesCache;
   const out = [];
-  const cut = Date.now() - 32 * 86400e3;
+  const cut = Date.now() - HISTORY_KEEP_DAYS * 86400e3; // 11-24：32 → 400 天（面板的 all 能点到更早的日子）
   let names = [];
   try { names = fs.readdirSync(CONV_DIR); } catch {}
   for (const f of names) {
@@ -389,10 +389,15 @@ function readHistory() {
       } catch (e) { log(`usage history: quota replay failed: ${e.message}`); }
       h.qr = 1;
     }
+    // 2026-11-24：周期记录（h.cycles，见 lib/quota.mjs 的 noteCycleEnd）。第一次用以前记下的提前重置补出那几个周期
+    if (!Array.isArray(history.cycles)) {
+      history.cycles = (history.resets || []).map((e) => ({ k: e.k, id: e.id, n: e.n, start: e.was - 7 * 86400e3, end: e.at, used: e.from, early: true }));
+      if (history.cycles.length) log(`usage history: ${history.cycles.length} limit periods seeded from early resets`);
+    }
   }
   return history;
 }
-// 记一次提前重置（只记每周额度；读数来回跳时同一次重置只记一条），太旧的删掉
+// 记一次换周期：提前重置记进 resets（只记每周额度；读数来回跳时同一次重置只记一条），每次换周期都记进 cycles；太旧的删掉
 function noteReset(h, key, b, at, ev) {
   const list = h.resets || (h.resets = []);
   const e = noteResetEvent(list, key, b, at, ev);
@@ -402,6 +407,11 @@ function noteReset(h, key, b, at, ev) {
   }
   const cut = Date.now() - HISTORY_KEEP_DAYS * 86400e3;
   while (list.length && list[0].at < cut) list.shift();
+  // 换周期（自然到期或提前重置）都记一条周期记录
+  const cyc = h.cycles || (h.cycles = []);
+  const c = noteCycleEnd(cyc, key, b, at, ev);
+  if (c) log(`limit period ended: ${b.id} ${new Date(c.start).toISOString()} .. ${new Date(c.end).toISOString()}, ${(c.used * 100).toFixed(2)}% used${c.early ? " (early reset)" : ""}`);
+  while (cyc.length && cyc[0].end < cut) cyc.shift();
 }
 // v1 → v2（2026-11-22）：额度记录换成按净变化算（见 noteQuota）。
 // 每周额度按天重算：和前一条记录在同一个周期里，u = 当天最后的值 − 前一条的最后值；换了周期，u = 当天最后的值。
@@ -555,7 +565,8 @@ function recentHistory(n = HISTORY_PUSH_DAYS) {
   }
   const from = keys.length ? new Date(keys[0] + 'T00:00:00').getTime() : 0;
   const resets = h.cur ? (h.resets || []).filter((e) => e.k === h.cur && e.at >= from).map(({ k, ...e }) => e) : [];
-  return { at: Date.now(), days, resets, acct: h.cur && h.accts ? { ...h.accts[h.cur], key: h.cur } : null, est: h.cur ? weeklyEstimate(h.cur) : null };
+  const cycles = h.cur ? (h.cycles || []).filter((e) => e.k === h.cur && e.end >= from).map(({ k, ...e }) => e) : [];
+  return { at: Date.now(), days, resets, cycles, acct: h.cur && h.accts ? { ...h.accts[h.cur], key: h.cur } : null, est: h.cur ? weeklyEstimate(h.cur) : null };
 }
 
 // ---------- 细粒度额度读数（2026-11-22 加，v1.6） ----------
@@ -796,7 +807,12 @@ async function backfillHistory() {
 const CLI_ROOT = path.join(os.homedir(), '.gemini', 'antigravity-cli');
 const CLI_CONV_DIR = path.join(CLI_ROOT, 'conversations');
 const CLI_TITLE_FILE = path.join(CLI_ROOT, 'cache', 'conversation_metadata.json');
-const CLI_BF_V = 2; // v2（11-24）：历史改成留 400 天，重新读一次全部 CLI 对话库
+const CLI_BF_V = 3; // v2（11-24）：历史改成留 400 天，重新读一次全部 CLI 对话库；v3（11-24）：再读一次，建 cli-index.json
+// cli-index.json（2026-11-24 加）：{ v: 1, files: { 文件名: { m 修改时间, d: [有调用的日子] } } }。每次读库时更新，
+// 调用明细要 32 天以前的日子时按它找库（见 cliCallsFor）。只存文件名、时间和日期。
+const CLI_INDEX_FILE = path.join(DATA, 'cli-index.json');
+const cliIndex = (() => { const j = readJsonKeep(CLI_INDEX_FILE); return j && j.files && typeof j.files === 'object' ? j : { v: 1, files: {} }; })();
+let cliIndexDirty = false;
 const CLI_SCAN_MS = 30000;
 const CLI_CALLS_KEEP_MS = 32 * 86400e3;
 const cliCache = new Map(); // 文件名 → { mtime, calls: [[时间, 模型名, 输入, 缓存读, 缓存写, 输出, 首字秒, 生成秒, 界面名, 请求 ID]] }
@@ -866,6 +882,7 @@ async function scanCli() {
     let read = 0, stale = 0, missing = 0;
     const present = new Set(names);
     for (const n of [...cliCache.keys()]) if (!present.has(n)) cliCache.delete(n); // 对话被删了
+    for (const n of Object.keys(cliIndex.files)) if (!present.has(n)) { delete cliIndex.files[n]; cliOld.delete(n); cliIndexDirty = true; }
     for (const n of names) {
       const f = path.join(CLI_CONV_DIR, n);
       let mt = 0;
@@ -875,7 +892,11 @@ async function scanCli() {
       const old = cliCache.get(n);
       if (old && old.mtime === mt) continue;
       try {
-        cliCache.set(n, { mtime: mt, calls: readCliDb(DatabaseSync, f) });
+        const calls = readCliDb(DatabaseSync, f);
+        cliCache.set(n, { mtime: mt, calls });
+        cliOld.delete(n);
+        cliIndex.files[n] = { m: mt, d: [...new Set(calls.map((c) => dayOf(c[0])))].sort() };
+        cliIndexDirty = true;
         read++;
       } catch {
         if (old) stale++; else if (mt >= from) missing++; // 读不了：有旧的就先用旧的
@@ -925,6 +946,10 @@ async function scanCli() {
         (days.length ? ` (${days[0]} .. ${days[days.length - 1]})` : '') + (stale || missing ? `, ${stale + missing} dbs busy` : ''));
       if (!missing) for (const [n, e] of cliCache) if (e.mtime < keepFrom) cliCache.delete(n); // 明细只留最近 32 天的（没扫完时留着，下次不用重读）
     } else if (missing) log(`cli usage: ${missing} cli conversation dbs busy, will retry`);
+    if (cliIndexDirty) {
+      cliIndexDirty = false;
+      try { writeFileSafe(CLI_INDEX_FILE, JSON.stringify(cliIndex)); } catch (e) { log(`write cli-index.json failed: ${e.message}`); }
+    }
     if (changed || full) {
       const keys = Object.keys(h.days).sort();
       for (const k of keys.slice(0, Math.max(0, keys.length - HISTORY_KEEP_DAYS))) delete h.days[k];
@@ -971,13 +996,32 @@ function readJsonKeepless(file) {
   try { return JSON.parse(fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, '')); } catch { return null; }
 }
 // 某一天 CLI 的每次调用，给调用明细页：{ day, rows: [[时间, 对话 ID, 模型名, 输入, 缓存读, 缓存写, 输出, 首字秒, 生成秒, 界面名]], convs: { 对话 ID: 标题 } }
-function cliCallsFor(day) {
+// 内存里只留最近 32 天改过的库（cliCache）。更早的日子：按索引（cliIndex，哪个库在哪几天有调用）找出那天涉及的库，
+// 按需读进 cliOld（最多 100 个库，先进先出；10-20 那种重的一天涉及 41 个库），每读完一个让出一下（2026-11-24 加：all 视图能点到 32 天以前的日子）。
+const CLI_OLD_MAX = 100;
+const cliOld = new Map(); // 文件名 → { mtime, calls }
+async function cliCallsFor(day) {
   const d0 = dayMs(day), d1 = d0 + 86400e3;
   const rows = [];
   const seen = new Set();
   const convs = {};
-  for (const [n, e] of cliCache) {
-    if (e.mtime < d0) continue;
+  const entries = [...cliCache].filter(([, e]) => e.mtime >= d0);
+  if (SqliteDb) {
+    for (const [n, x] of Object.entries(cliIndex.files)) {
+      if (cliCache.has(n) || !Array.isArray(x.d) || !x.d.includes(day)) continue;
+      let e = cliOld.get(n);
+      const f = path.join(CLI_CONV_DIR, n);
+      if (!e || e.mtime !== x.m) {
+        try { e = { mtime: x.m, calls: readCliDb(SqliteDb, f) }; } catch { continue; }
+        cliOld.delete(n);
+        cliOld.set(n, e);
+        while (cliOld.size > CLI_OLD_MAX) cliOld.delete(cliOld.keys().next().value);
+        await new Promise((r) => setImmediate(r));
+      }
+      entries.push([n, e]);
+    }
+  }
+  for (const [n, e] of entries) {
     const id = n.slice(0, -3);
     for (const c of e.calls) {
       if (c[0] < d0 || c[0] >= d1) continue;
@@ -1002,7 +1046,7 @@ async function onPageAsk(sess, payload) {
   try { q = JSON.parse(String(payload || '').slice(0, 200)); } catch { return; }
   let expr = '';
   if (q && q.t === 'cli-calls' && /^\d{4}-\d{2}-\d{2}$/.test(String(q.day))) {
-    expr = `window.__agyStats && window.__agyStats.setCliCalls && window.__agyStats.setCliCalls(${JSON.stringify(cliCallsFor(q.day))})`;
+    expr = `window.__agyStats && window.__agyStats.setCliCalls && window.__agyStats.setCliCalls(${JSON.stringify(await cliCallsFor(q.day))})`;
   } else if (q && q.t === 'history-all') {
     expr = `window.__agyStats && window.__agyStats.setHistoryAll && window.__agyStats.setHistoryAll(${JSON.stringify(recentHistory(HISTORY_KEEP_DAYS))})`;
   } else return;
@@ -1076,7 +1120,7 @@ function pageScript() {
 // - Theme 页的 updates 选 off（look.json 的 online = 'off'）：不再联网，也不用 remote/ 里存的，只用安装包自带的。
 // - 换了版本（安装了新的安装包）以后，remote/ 里存的词典和规则先不用，等下一次取到再用（新安装包里的可能更新）。
 // - 测试：环境变量 AGY_REMOTE_BASE 换成别的地址（例如本机起的 http://127.0.0.1:端口/），只试这一个地址。
-const PACK_VERSION = '2.0.5';
+const PACK_VERSION = '2.0.6';
 const REMOTE_DIR = path.join(DATA, 'remote');
 const REMOTE_STATE = path.join(REMOTE_DIR, 'state.json');
 const REMOTE_BASES = process.env.AGY_REMOTE_BASE ? [process.env.AGY_REMOTE_BASE] : [
