@@ -38,6 +38,7 @@ import path from 'node:path';
 import { execFile, spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { chooseSource } from './lib/remote-source.mjs';
+import { r4, samePeriod, noteQuota, noteResetEvent, replayFromSamples } from './lib/quota.mjs';
 
 const IS_WIN = process.platform === 'win32';
 const IS_MAC = process.platform === 'darwin';
@@ -66,6 +67,35 @@ try { if (fs.statSync(LOG_FILE).size > 200 * 1024) fs.writeFileSync(LOG_FILE, ''
 function log(msg) {
   const line = `${new Date().toISOString()} ${msg}\n`;
   try { fs.appendFileSync(LOG_FILE, line); } catch {}
+}
+
+// ---------- 读写数据文件（2026-11-24 加） ----------
+// 写：先写同目录的临时文件再改名替换，写到一半被结束（关 Antigravity、插件重启）也不会留下半个文件。
+//   改名失败（Windows 上文件正被别的程序打开，比如杀毒软件在扫）就退回直接覆盖。
+// 读：文件存在但不是合法的 JSON 时，先改名留底（<名字>.bad-年月日时分.json）再当没有文件处理，
+//   免得下一次保存把它覆盖掉、连查原因的线索都没了。11-24 发现 Windows 的 quota-samples.json 丢了
+//   11-22 23:00～11-24 00:12 的记录，当时直接覆盖写、读不出来就从空开始，原因没查清。
+function writeFileSafe(file, text) {
+  const tmp = `${file}.tmp-${process.pid}`;
+  try {
+    fs.writeFileSync(tmp, text);
+    fs.renameSync(tmp, file);
+    return;
+  } catch {}
+  try { fs.rmSync(tmp, { force: true }); } catch {}
+  fs.writeFileSync(file, text);
+}
+function readJsonKeep(file) {
+  let text;
+  try { text = fs.readFileSync(file, 'utf8'); } catch { return null; }
+  try { return JSON.parse(text.replace(/^\uFEFF/, '')); } catch (e) { // 去掉 UTF-8 BOM
+    const d = new Date();
+    const p2 = (x) => String(x).padStart(2, '0');
+    const bad = `${file.replace(/\.json$/, '')}.bad-${d.getFullYear()}${p2(d.getMonth() + 1)}${p2(d.getDate())}${p2(d.getHours())}${p2(d.getMinutes())}.json`;
+    try { fs.renameSync(file, bad); log(`${path.basename(file)} unreadable (${e.message}), kept as ${path.basename(bad)}`); }
+    catch (e2) { log(`${path.basename(file)} unreadable (${e.message}), could not keep it: ${e2.message}`); }
+    return null;
+  }
 }
 
 // ---------- 单实例：占用命名管道（Windows）或 Unix Socket（macOS/Linux），占不到说明已有实例在跑 ----------
@@ -162,7 +192,7 @@ const LOOK_FILE = path.join(DATA, 'look.json');
 let lookCache;
 function readLook() {
   if (lookCache === undefined) {
-    try { lookCache = JSON.parse(fs.readFileSync(LOOK_FILE, 'utf8')); } catch { lookCache = null; }
+    lookCache = readJsonKeep(LOOK_FILE);
   }
   return lookCache;
 }
@@ -177,7 +207,7 @@ function saveLook(pick) {
   }
   keep.at = +pick.at || Date.now();
   lookCache = keep;
-  try { fs.writeFileSync(LOOK_FILE, JSON.stringify(keep)); log(`look saved: ${keep.pal} / ${keep.skin} / ${keep.bar} / ${keep.dense}`); }
+  try { writeFileSafe(LOOK_FILE, JSON.stringify(keep)); log(`look saved: ${keep.pal} / ${keep.skin} / ${keep.bar} / ${keep.dense}`); }
   catch (e) { log(`write look.json failed: ${e.message}`); }
 }
 
@@ -195,7 +225,7 @@ const dayName = () => {
 let costBook = null;
 function readCostBook() {
   if (!costBook) {
-    try { costBook = JSON.parse(fs.readFileSync(COST_FILE, 'utf8')); } catch { costBook = null; }
+    costBook = readJsonKeep(COST_FILE);
   }
   if (!costBook || costBook.day !== dayName() || !costBook.by || typeof costBook.by !== 'object') costBook = { day: dayName(), by: {}, det: {} };
   if (!costBook.det || typeof costBook.det !== 'object') costBook.det = {};
@@ -225,7 +255,7 @@ function mergeCostBook(b) {
     }
   }
   if (!changed) return;
-  try { fs.writeFileSync(COST_FILE, JSON.stringify(book)); } catch (e) { log(`write cost-day.json failed: ${e.message}`); }
+  try { writeFileSafe(COST_FILE, JSON.stringify(book)); } catch (e) { log(`write cost-day.json failed: ${e.message}`); }
 }
 // 今天动过的对话：Antigravity 把每个对话存在 %USERPROFILE%\.gemini\antigravity\brain\<对话 ID>\，
 // 对话记录 .system_generated\logs\transcript.jsonl 的修改时间在本地 0 点以后，就算今天动过。
@@ -287,13 +317,16 @@ async function syncCost() {
       const r = await s.send('Runtime.evaluate', {
         expression: `(() => { const S = window.__agyStats; if (!S) return null; S.todayIds = ${ids}; S.history = ${hist}; S.convFiles = ${files};
           if (S.setLook && ${lookJs}) S.setLook(${lookJs}, true);
-          return JSON.stringify({ book: S.costBook || null, quota: ${QUOTA_EXPR}, pick: S.lookPick || null }); })()`,
+          const want = S.panelView === 'calls' && document.querySelector('.agy-usage-panel') ? S.cliWant || null : null;
+          return JSON.stringify({ book: S.costBook || null, quota: ${QUOTA_EXPR}, pick: S.lookPick || null, want }); })()`,
         returnByValue: true,
       });
       const v = r && r.result && r.result.value;
       if (!v) continue;
       const o = JSON.parse(v);
       any = true;
+      // 开着调用明细页：顺带把那天 CLI 的调用再交一次（__agyZhAsk 加不上时靠这个；今天的明细也借此每 30 秒更新）
+      if (o.want) onPageAsk(s, JSON.stringify({ t: 'cli-calls', day: o.want })).catch(() => {});
       if (o.book) mergeCostBook(o.book);
       if (o.quota && (!quota || o.quota.at > quota.at)) quota = o.quota;
       if (o.pick && o.pick.at > 0 && (!pick || o.pick.at > pick.at)) pick = o.pick;
@@ -329,7 +362,9 @@ async function syncCost() {
 //   quota 留着 v3 以前的记录（不知道是哪个账号的）；第一次见到某个账号时，重置时间对得上的旧记录归给它（见 adoptLegacy）。
 //   钱和 token 不分账号（是这台电脑上的花费）。
 //   models：{ 价目名: [美元, 调用数, 输入, 缓存读, 缓存写, 输出] }，由当天账本的 det 合计而来；
-//   quota：{ 桶 ID: { n 组名, w 窗口, l 最近一次的已用比例, u 当天用掉的（只累计上涨）, m 当天最高, r 重置时间（毫秒） } }，比例 0～1。
+//   qa 里每个桶的额度记录见 lib/quota.mjs 开头（u = 当天用掉的，按周期分段算净变化）。
+//   resets（2026-11-24 加）：谷歌提前重置每周额度的事件，[{ k 账号键, id 桶 ID, n 组名, w, at, after, from, was, flips }]，见 lib/quota.mjs 的 noteResetEvent。
+//   qr（2026-11-24 加）：1 = 已经用细粒度采样把额度记录按分段算法回放过一次。
 // 状态栏的每日用量面板显示 u。（v1.4.0 的格式是 f 起点 / a 已累计，u = a + l − f；见 migrateQuota。）
 const HISTORY_FILE = path.join(DATA, 'usage-history.json');
 const HISTORY_KEEP_DAYS = 90;
@@ -338,14 +373,35 @@ let history = null;
 let historyJson = '';
 function readHistory() {
   if (!history) {
-    try { history = JSON.parse(fs.readFileSync(HISTORY_FILE, 'utf8')); } catch { history = null; }
+    history = readJsonKeep(HISTORY_FILE);
     if (!history || !history.days || typeof history.days !== 'object') history = { v: 2, days: {} };
     historyJson = JSON.stringify(history);
     // liveFrom：从哪一天起是注入程序实时记的；更早的天数只能补算（见下面“补算以前的用量”）
     if (!history.liveFrom) history.liveFrom = Object.keys(history.days).filter((k) => !history.days[k].bf).sort()[0] || dayName();
     if (!(history.v >= 2)) migrateHistory(history); // 换算后下次 saveHistory 会写回文件
+    // 2026-11-24：额度记录改成分段算（见 lib/quota.mjs）。采样覆盖整天的日子按新算法重算一次，顺带补出提前重置事件
+    if (!(history.qr >= 1)) {
+      const h = history;
+      try {
+        const ch = replayFromSamples(h.days, readSamples().a, (day, key, id) => prevQuotaOf(h, day, key, id), dayOf,
+          (day) => new Date(day + 'T00:00:00').getTime(), (key, b, at, ev) => noteReset(h, key, b, at, ev));
+        log(`usage history: quota records replayed from samples${ch.length ? ': ' + ch.join(', ') : ', no change'}`);
+      } catch (e) { log(`usage history: quota replay failed: ${e.message}`); }
+      h.qr = 1;
+    }
   }
   return history;
+}
+// 记一次提前重置（只记每周额度；读数来回跳时同一次重置只记一条），太旧的删掉
+function noteReset(h, key, b, at, ev) {
+  const list = h.resets || (h.resets = []);
+  const e = noteResetEvent(list, key, b, at, ev);
+  if (e) {
+    const t = (ms) => (ms ? new Date(ms).toISOString() : '?');
+    log(`quota reset early: ${b.id} at ${t(e.at)} (last seen old period ${t(e.after)}), was ${(e.from * 100).toFixed(2)}% used, planned reset ${t(e.was)}`);
+  }
+  const cut = Date.now() - HISTORY_KEEP_DAYS * 86400e3;
+  while (list.length && list[0].at < cut) list.shift();
 }
 // v1 → v2（2026-11-22）：额度记录换成按净变化算（见 noteQuota）。
 // 每周额度按天重算：和前一条记录在同一个周期里，u = 当天最后的值 − 前一条的最后值；换了周期，u = 当天最后的值。
@@ -378,9 +434,8 @@ function saveHistory() {
   const json = JSON.stringify(history);
   if (json === historyJson) return;
   historyJson = json;
-  try { fs.writeFileSync(HISTORY_FILE, json); } catch (e) { log(`write usage-history.json failed: ${e.message}`); }
+  try { writeFileSafe(HISTORY_FILE, json); } catch (e) { log(`write usage-history.json failed: ${e.message}`); }
 }
-const r4 = (x) => Math.round(x * 1e4) / 1e4;
 function summarizeBook(book) {
   const vals = Object.values(book.by || {}).map(Number).filter((v) => v >= 0);
   const models = {};
@@ -421,39 +476,11 @@ function prevQuota(h, today, id) {
   }
   return null;
 }
-// 记一次额度观察。u = 当天用掉的部分 = 每个周期里“当天最后的值 − 当天开始时的值”之和。
-//   s：这一段（当天、同一个周期）开始时的已用比例；c：当天前面几段（换周期以前）已经结算的用量；u = c + max(0, l − s)。
-// 2026-11-22 改（v1.4.1 的“只累计上涨”会多算）：已用比例在同一个周期里会来回起伏，不只是往下降。
-//   实测：同一个周期、正在生成回复，6 分钟里 Gemini 每周额度 1.699% → 1.594%、5 小时额度 1.907% → 1.487%；
-//   11-22 这一天每周额度最高 3.93%、最后 1.53%，只累计上涨记成了 +7.07%（状态栏显示只用了 2%）。
-//   原因没有官方说法（可能是请求开始时先按估算扣、结束后按实际退回）；按净变化算，起伏不会被重复计算。
-// 换周期：重置时间前后差 1 小时以上（没用过的桶重置时间是“现在 + 7 天 / 5 小时”，跟着时间走，
-//   Antigravity 关着超过 1 小时再打开也会判成换周期，那时前后都是 0，不影响结果）。
+// 记一次额度观察：noteQuota 在 lib/quota.mjs（按周期分段算净变化，2026-11-24 拆出去）。
 // 当天第一次见到某个桶：前面有记录、还在同一个周期里，就从那条记录最后的值接着算（中间没观察到的部分算到今天）；
 //   周期已经换了就从 0 算；以前从没见过就从现在的值算（看不到之前用了多少）。
 // v1.4.0 旧格式（f 起点 / a 已累计）和 v1.4.1 的格式（只有 u）在 migrateHistory 里一次性换算。
 const migrateQuota = (q) => (+q.f === 0 && +q.a > 0 ? +q.a : Math.max(0, (+q.m || 0) - (+q.f || 0)) + (+q.a || 0));
-const samePeriod = (r1, r2) => Math.abs((+r1 || 0) - (+r2 || 0)) < 3600e3;
-// qs：某一天、某个账号的 { 桶 ID: 额度记录 }（v3 起按账号分开，见 updateHistory）
-function noteQuota(qs, buckets, prev) {
-  for (const b of buckets) {
-    let q = qs[b.id];
-    if (!q) {
-      const p = prev(b.id);
-      const s = p ? (samePeriod(p.r, b.reset) ? +p.l || 0 : 0) : b.used;
-      q = qs[b.id] = { n: b.name, w: b.w, l: r4(b.used), m: r4(b.used), r: b.reset, s: r4(s), c: 0 };
-    } else {
-      if (q.s === undefined) { q.s = r4(Math.max(0, (+q.l || 0) - (+q.u || 0))); q.c = 0; } // 迁移漏掉的旧记录：保持原来的 u
-      if (!samePeriod(q.r, b.reset)) { q.c = r4((+q.c || 0) + Math.max(0, (+q.l || 0) - q.s)); q.s = 0; } // 换周期：上一段结算，新一段从 0 起
-    }
-    q.l = r4(b.used);
-    q.u = r4((+q.c || 0) + Math.max(0, q.l - q.s));
-    q.m = r4(Math.max(+q.m || 0, b.used));
-    q.r = b.reset;
-    if (b.name) q.n = b.name;
-    if (b.w) q.w = b.w;
-  }
-}
 // 页面给的账号：{ key 邮箱哈希, m 打码的邮箱, t 套餐名 }（见 statusbar.js 的 acctOf）。只认这几个字段、限制长度。
 function quotaAcct(q) {
   const a = q && q.acct;
@@ -499,7 +526,9 @@ function updateHistory(book, buckets, acct, quotaAt) {
     Object.assign(accts[acct.key], { m: acct.m, t: acct.t, last: today });
     if (h.cur !== acct.key) { if (h.cur) log('usage history: account changed'); h.cur = acct.key; }
     const qa = day.qa || (day.qa = {});
-    noteQuota(qa[acct.key] || (qa[acct.key] = {}), buckets, (id) => prevQuotaOf(h, today, acct.key, id));
+    const at = quotaAt > 0 ? quotaAt : Date.now();
+    noteQuota(qa[acct.key] || (qa[acct.key] = {}), buckets, (id) => prevQuotaOf(h, today, acct.key, id), at,
+      (b, ev) => noteReset(h, acct.key, b, at, ev));
     noteSamples(acct.key, buckets, quotaAt);
   }
   h.v = 3;
@@ -507,16 +536,25 @@ function updateHistory(book, buckets, acct, quotaAt) {
   for (const k of keys.slice(0, Math.max(0, keys.length - HISTORY_KEEP_DAYS))) delete h.days[k];
   saveHistory();
 }
-// 推给页面的历史：每天的 quota 换成当前账号的那一份（不知道当前账号时用旧记录），带上账号和每周额度预估
+// 推给页面的历史：每天的 quota 换成当前账号的那一份（不知道当前账号时用旧记录），带上账号、每周额度预估和当前账号的提前重置事件
+// 每天的额度记录只推页面用得到的字段（分段明细 p 不推）
 function recentHistory() {
   const h = readHistory();
   const days = {};
-  for (const k of Object.keys(h.days).sort().slice(-HISTORY_PUSH_DAYS)) {
+  const slimQ = (qs) => {
+    const out = {};
+    for (const [id, q] of Object.entries(qs || {})) { if (q && typeof q === 'object') { const { p, c0, ...rest } = q; out[id] = rest; } }
+    return out;
+  };
+  const keys = Object.keys(h.days).sort().slice(-HISTORY_PUSH_DAYS);
+  for (const k of keys) {
     const d = h.days[k];
     const { qa, quota, ...rest } = d;
-    days[k] = { ...rest, quota: h.cur ? (qa && qa[h.cur]) || {} : quota || {} };
+    days[k] = { ...rest, quota: slimQ(h.cur ? qa && qa[h.cur] : quota) };
   }
-  return { at: Date.now(), days, acct: h.cur && h.accts ? { ...h.accts[h.cur], key: h.cur } : null, est: h.cur ? weeklyEstimate(h.cur) : null };
+  const from = keys.length ? new Date(keys[0] + 'T00:00:00').getTime() : 0;
+  const resets = h.cur ? (h.resets || []).filter((e) => e.k === h.cur && e.at >= from).map(({ k, ...e }) => e) : [];
+  return { at: Date.now(), days, resets, acct: h.cur && h.accts ? { ...h.accts[h.cur], key: h.cur } : null, est: h.cur ? weeklyEstimate(h.cur) : null };
 }
 
 // ---------- 细粒度额度读数（2026-11-22 加，v1.6） ----------
@@ -529,7 +567,7 @@ let samples = null;
 let samplesAt = {};
 function readSamples() {
   if (!samples) {
-    try { samples = JSON.parse(fs.readFileSync(SAMPLES_FILE, 'utf8')); } catch { samples = null; }
+    samples = readJsonKeep(SAMPLES_FILE);
     if (!samples || typeof samples.a !== 'object') samples = { v: 1, a: {} };
   }
   return samples;
@@ -542,7 +580,7 @@ function noteSamples(key, buckets, at) {
   for (const b of buckets) if (b.w === 'weekly') list.push([at, b.id, r4(b.used), b.reset]);
   const cut = Date.now() - SAMPLES_KEEP_MS;
   while (list.length && list[0][0] < cut) list.shift();
-  try { fs.writeFileSync(SAMPLES_FILE, JSON.stringify(sm)); } catch (e) { log(`write quota-samples.json failed: ${e.message}`); }
+  try { writeFileSafe(SAMPLES_FILE, JSON.stringify(sm)); } catch (e) { log(`write quota-samples.json failed: ${e.message}`); }
 }
 
 // ---------- 每周额度预估（2026-11-22 加，v1.6） ----------
@@ -687,6 +725,9 @@ function readConvDb(DatabaseSync, file, before, seen, acc) {
   } finally { db.close(); }
   return { calls, nodate };
 }
+// 这一天有没有桌面版的用量记录（实时的 models / usd，或补算的 raw）。只有 CLI 用量（cli）或只有额度记录的天不算，
+// 补算时照样补（2026-11-24：CLI 的用量可能先于补算写进某一天，原来按“有记录就是实时记的”判断会跳过那天）
+const deskRec = (rec) => !!rec && (rec.models != null || rec.usd != null || rec.raw != null);
 const BACKFILL_V = 2;
 // 读全部对话库，算到昨天为止每一天的调用：
 // - liveFrom 之前（没有实时记录的日子）：补算出来的（bf）和没有记录的，换成新算的；有实时记录的不动。
@@ -719,12 +760,12 @@ async function backfillHistory() {
   for (const [day, d] of Object.entries(acc)) {
     const rec = h.days[day];
     if (day < h.liveFrom) {
-      if (rec && !rec.bf) continue;
+      if (deskRec(rec) && !rec.bf) continue;
       h.days[day] = { ...(rec || {}), bf: 1, convs: d.convs.size, raw: d.raw };
       daysAdded++;
       continue;
     }
-    if (!rec || rec.bf) continue;
+    if (!deskRec(rec) || rec.bf) continue;
     const live = rec.models ? Object.values(rec.models).reduce((t, m) => t + (+m[1] || 0), 0) : sumCalls(rec.raw);
     const db = sumCalls(d.raw);
     if (!(db > live * 1.02 + 1)) continue;
@@ -738,6 +779,209 @@ async function backfillHistory() {
   const keys = Object.keys(h.days).sort();
   for (const k of keys.slice(0, Math.max(0, keys.length - HISTORY_KEEP_DAYS))) delete h.days[k];
   saveHistory();
+}
+
+// ---------- agy CLI 的用量（2026-11-24 加） ----------
+// 别的工具（其他 agent）直接调 agy CLI 时，用的是同一个账号：额度百分比本来就含 CLI 用掉的（谷歌按账号算），
+// 但花费、调用次数、token 原来只算桌面版。CLI 的对话库在 ~/.gemini/antigravity-cli/conversations/<对话 ID>.db，
+// 格式和桌面版一样（11-24 实测，字段号同上面“补算以前的用量”），另有 chatModel 的 11 = 首字时间、12 = 生成用时
+// （Duration：1 秒、2 纳秒；11-24 对着桌面后台接口的 timeToFirstToken / streamingDuration 逐条核对过）、21 = 界面上的模型名。
+// - 按天汇总存进 usage-history.json 每天的 cli = { raw: { 模型名: [调用数, 输入, 缓存读, 缓存写, 输出] }, convs, calls }，
+//   钱由状态栏按价目表算（和补算的天一样）。
+// - 第一次（history.cliBf 没有或版本不对）读 90 天内改过的全部库（11-24 Windows 实测 167 个、1.7 GB、约 7 秒），
+//   以后每分钟只重读改过的库，只重算“上次扫描那天和昨天里较早的那天”到今天。
+// - 每次调用的明细（调用明细页用）留在内存里，只留最近 32 天改过的库；页面打开某一天的明细时经 __agyZhAsk 来要（见 onPageAsk）。
+// - 只读打开，不写 CLI 的文件；库正被 CLI 写着读不了时（BUSY），留着上次读到的，这次不改那几天的汇总。
+const CLI_ROOT = path.join(os.homedir(), '.gemini', 'antigravity-cli');
+const CLI_CONV_DIR = path.join(CLI_ROOT, 'conversations');
+const CLI_TITLE_FILE = path.join(CLI_ROOT, 'cache', 'conversation_metadata.json');
+const CLI_BF_V = 1;
+const CLI_SCAN_MS = 60000;
+const CLI_CALLS_KEEP_MS = 32 * 86400e3;
+const cliCache = new Map(); // 文件名 → { mtime, calls: [[时间, 模型名, 输入, 缓存读, 缓存写, 输出, 首字秒, 生成秒, 界面名, 请求 ID]] }
+let cliBusy = false;
+let cliScanAt = Date.now() - CLI_SCAN_MS + 20000; // 启动 20 秒后第一次扫
+const pbDur = (b) => (Buffer.isBuffer(b) ? (pbGet(b, 1) || 0) + (pbGet(b, 2) || 0) / 1e9 : 0);
+function readCliDb(DatabaseSync, file) {
+  const db = new DatabaseSync(file, { readOnly: true });
+  const calls = [];
+  try {
+    const stepAt = new Map();
+    const when = new Map();
+    for (const r of db.prepare('select idx, metadata from steps').iterate()) {
+      if (!r.metadata) continue;
+      const m = Buffer.from(r.metadata);
+      const ts = pbGet(m, 1);
+      const sec = Buffer.isBuffer(ts) ? pbGet(ts, 1) : 0;
+      if (!(sec > 0)) continue;
+      stepAt.set(Number(r.idx), sec * 1000);
+      const exec = pbGet(m, 12);
+      if (Buffer.isBuffer(exec) && !when.has(exec.toString('utf8'))) when.set(exec.toString('utf8'), sec * 1000);
+    }
+    for (const r of db.prepare('select data from gen_metadata').iterate()) {
+      if (!r.data) continue;
+      const g = Buffer.from(r.data);
+      const exec = pbGet(g, 4), cm = pbGet(g, 1);
+      if (!Buffer.isBuffer(cm)) continue;
+      const u = pbGet(cm, 4);
+      if (!Buffer.isBuffer(u)) continue;
+      const inp = pbGet(u, 2) || 0, cw = pbGet(u, 4) || 0, cr = pbGet(u, 5) || 0;
+      const out = Math.max(pbGet(u, 3) || 0, (pbGet(u, 9) || 0) + (pbGet(u, 10) || 0));
+      if (!inp && !cr && !cw && !out) continue;
+      const steps = pbGet(g, 2);
+      let at = 0;
+      for (const i of Buffer.isBuffer(steps) ? pbVarints(steps) : typeof steps === 'number' ? [steps] : []) if ((at = stepAt.get(i) || 0)) break;
+      if (!at && Buffer.isBuffer(exec)) at = when.get(exec.toString('utf8')) || 0;
+      if (!(at > 0)) continue;
+      const str = (b, n) => (Buffer.isBuffer(b) ? b.toString('utf8').slice(0, n) : '');
+      const rid = pbGet(u, 11);
+      calls.push([at, str(pbGet(cm, 19), 60) || 'unknown', inp, cr, cw, out,
+        Math.round(pbDur(pbGet(cm, 11)) * 1000) / 1000, Math.round(pbDur(pbGet(cm, 12)) * 1000) / 1000, str(pbGet(cm, 21), 60), str(rid, 80)]);
+    }
+  } finally { db.close(); }
+  return calls;
+}
+// 同一次调用可能在两个库里都有（子代理），按请求 ID 去重；没有请求 ID 用 对话 + 时间 + token 数
+const cliCallKey = (id, c) => c[9] || `${id}:${c[0]}:${c[2]}:${c[5]}`;
+const dayMs = (day) => new Date(day + 'T00:00:00').getTime();
+async function scanCli() {
+  if (cliBusy) return;
+  cliBusy = true;
+  try {
+    let names;
+    try { names = fs.readdirSync(CLI_CONV_DIR).filter((n) => /^[0-9a-f-]{36}\.db$/.test(n)); } catch { return; } // 没装 CLI
+    let DatabaseSync;
+    try { ({ DatabaseSync } = await import('node:sqlite')); } catch { return; }
+    const h = readHistory();
+    const full = !(h.cliBf && h.cliBf.v === CLI_BF_V);
+    const now = Date.now();
+    const today = dayName();
+    const yest = dayOf(now - 86400e3);
+    const fromDay = full ? dayOf(now - (HISTORY_KEEP_DAYS - 1) * 86400e3)
+      : [yest, dayOf(+h.cliBf.at || now)].sort()[0];
+    const from = dayMs(fromDay);
+    const keepFrom = now - CLI_CALLS_KEEP_MS;
+    let read = 0, stale = 0, missing = 0;
+    const present = new Set(names);
+    for (const n of [...cliCache.keys()]) if (!present.has(n)) cliCache.delete(n); // 对话被删了
+    for (const n of names) {
+      const f = path.join(CLI_CONV_DIR, n);
+      let mt = 0;
+      try { mt = fs.statSync(f).mtimeMs; } catch { continue; }
+      try { mt = Math.max(mt, fs.statSync(f + '-wal').mtimeMs); } catch {} // WAL 模式时新写的在 -wal 里
+      if (mt < Math.min(from, keepFrom)) continue;
+      const old = cliCache.get(n);
+      if (old && old.mtime === mt) continue;
+      try {
+        cliCache.set(n, { mtime: mt, calls: readCliDb(DatabaseSync, f) });
+        read++;
+      } catch {
+        if (old) stale++; else if (mt >= from) missing++; // 读不了：有旧的就先用旧的
+      }
+      await new Promise((r) => setImmediate(r));
+    }
+    // 按天汇总 fromDay ～ 今天
+    const agg = {};
+    const seen = new Set();
+    for (const [n, e] of cliCache) {
+      if (e.mtime < from) continue;
+      const id = n.slice(0, -3);
+      for (const c of e.calls) {
+        if (c[0] < from) continue;
+        const k = cliCallKey(id, c);
+        if (seen.has(k)) continue;
+        seen.add(k);
+        const d = dayOf(c[0]);
+        const a = agg[d] || (agg[d] = { raw: {}, convs: new Set(), calls: 0 });
+        const x = a.raw[c[1]] || (a.raw[c[1]] = [0, 0, 0, 0, 0]);
+        x[0]++; x[1] += c[2]; x[2] += c[3]; x[3] += c[4]; x[4] += c[5];
+        a.convs.add(id);
+        a.calls++;
+      }
+    }
+    let changed = 0;
+    if (!missing) { // 有该读的库一个都没读到：这次不改汇总，下次再试
+      for (let t = from + 43200e3; dayOf(t) <= today; t += 86400e3) { // 从中午起算，不怕夏令时那天少一小时
+        const d = dayOf(t);
+        const a = agg[d];
+        const rec = h.days[d];
+        const next = a ? { raw: a.raw, convs: a.convs.size, calls: a.calls } : null;
+        if (JSON.stringify(rec && rec.cli || null) === JSON.stringify(next)) continue;
+        if (next) (h.days[d] || (h.days[d] = {})).cli = next;
+        else if (rec) { delete rec.cli; if (!Object.keys(rec).length) delete h.days[d]; }
+        changed++;
+      }
+      if (full || changed || now - (+h.cliBf.at || 0) > 600000) {
+        h.cliBf = { v: CLI_BF_V, at: now, ...(full ? { first: dayOf(now), dbs: names.length } : { first: h.cliBf.first, dbs: h.cliBf.dbs }) };
+      }
+    }
+    if (full) {
+      const calls = Object.values(agg).reduce((t, a) => t + a.calls, 0);
+      const days = Object.keys(agg).sort();
+      log(`cli usage: ${read}/${names.length} cli conversation dbs read, ${calls} calls on ${days.length} days` +
+        (days.length ? ` (${days[0]} .. ${days[days.length - 1]})` : '') + (stale || missing ? `, ${stale + missing} dbs busy` : ''));
+      if (!missing) for (const [n, e] of cliCache) if (e.mtime < keepFrom) cliCache.delete(n); // 明细只留最近 32 天的（没扫完时留着，下次不用重读）
+    } else if (missing) log(`cli usage: ${missing} cli conversation dbs busy, will retry`);
+    if (changed || full) {
+      const keys = Object.keys(h.days).sort();
+      for (const k of keys.slice(0, Math.max(0, keys.length - HISTORY_KEEP_DAYS))) delete h.days[k];
+      saveHistory();
+    }
+  } finally {
+    cliBusy = false;
+  }
+}
+// CLI 对话的标题：CLI 自己的 cache/conversation_metadata.json（conversations[ID].summary.Title），文件改了才重读
+let cliTitleCache = { mtime: -1, map: {} };
+function cliTitles() {
+  let mt = 0;
+  try { mt = fs.statSync(CLI_TITLE_FILE).mtimeMs; } catch { return {}; }
+  if (mt !== cliTitleCache.mtime) {
+    const map = {};
+    const j = readJsonKeepless(CLI_TITLE_FILE);
+    for (const [id, c] of Object.entries((j && j.conversations) || {})) {
+      const t = c && c.summary && c.summary.Title;
+      if (UUID_RE.test(id) && typeof t === 'string' && t) map[id] = t.slice(0, 80);
+    }
+    cliTitleCache = { mtime: mt, map };
+  }
+  return cliTitleCache.map;
+}
+// 读别的程序的 JSON（不留底、不改名，读不出来就当没有）
+function readJsonKeepless(file) {
+  try { return JSON.parse(fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, '')); } catch { return null; }
+}
+// 某一天 CLI 的每次调用，给调用明细页：{ day, rows: [[时间, 对话 ID, 模型名, 输入, 缓存读, 缓存写, 输出, 首字秒, 生成秒, 界面名]], convs: { 对话 ID: 标题 } }
+function cliCallsFor(day) {
+  const d0 = dayMs(day), d1 = d0 + 86400e3;
+  const rows = [];
+  const seen = new Set();
+  const convs = {};
+  for (const [n, e] of cliCache) {
+    if (e.mtime < d0) continue;
+    const id = n.slice(0, -3);
+    for (const c of e.calls) {
+      if (c[0] < d0 || c[0] >= d1) continue;
+      const k = cliCallKey(id, c);
+      if (seen.has(k)) continue;
+      seen.add(k);
+      rows.push([c[0], id, c[1], c[2], c[3], c[4], c[5], c[6], c[7], c[8]]);
+      convs[id] = '';
+    }
+  }
+  const titles = cliTitles();
+  for (const id of Object.keys(convs)) convs[id] = titles[id] || '';
+  rows.sort((a, b) => b[0] - a[0]);
+  return { day, rows, convs, at: Date.now() };
+}
+// 页面经 Runtime.addBinding 加的 window.__agyZhAsk(JSON) 来要数据（2026-11-24 加）。只认 { t: 'cli-calls', day: 'YYYY-MM-DD' }，
+// 回答时调页面的 S.setCliCalls。页面里任何脚本都能调这个函数，所以只给只读的用量数字和 CLI 对话标题，别的一律不理。
+async function onPageAsk(sess, payload) {
+  let q;
+  try { q = JSON.parse(String(payload || '').slice(0, 200)); } catch { return; }
+  if (!q || q.t !== 'cli-calls' || !/^\d{4}-\d{2}-\d{2}$/.test(String(q.day))) return;
+  const js = JSON.stringify(cliCallsFor(q.day));
+  try { await sess.send('Runtime.evaluate', { expression: `window.__agyStats && window.__agyStats.setCliCalls && window.__agyStats.setCliCalls(${js})` }); } catch {}
 }
 const mtimes = {};
 function loadAssets() {
@@ -807,7 +1051,7 @@ function pageScript() {
 // - Theme 页的 updates 选 off（look.json 的 online = 'off'）：不再联网，也不用 remote/ 里存的，只用安装包自带的。
 // - 换了版本（安装了新的安装包）以后，remote/ 里存的词典和规则先不用，等下一次取到再用（新安装包里的可能更新）。
 // - 测试：环境变量 AGY_REMOTE_BASE 换成别的地址（例如本机起的 http://127.0.0.1:端口/），只试这一个地址。
-const PACK_VERSION = '2.0.3';
+const PACK_VERSION = '2.0.4';
 const REMOTE_DIR = path.join(DATA, 'remote');
 const REMOTE_STATE = path.join(REMOTE_DIR, 'state.json');
 const REMOTE_BASES = process.env.AGY_REMOTE_BASE ? [process.env.AGY_REMOTE_BASE] : [
@@ -1026,6 +1270,7 @@ async function pushRemote(i18nChanged) {
 
 // ---------- 与单个页面的 CDP 连接 ----------
 const sessions = new Map(); // targetId -> { ws, send, scriptId }
+const ASK_BINDING = '__agyZhAsk';
 
 function connect(target) {
   const ws = new WebSocket(target.webSocketDebuggerUrl);
@@ -1042,6 +1287,7 @@ function connect(target) {
   ws.onmessage = (ev) => {
     let m;
     try { m = JSON.parse(ev.data); } catch { return; }
+    if (m.method === 'Runtime.bindingCalled' && m.params && m.params.name === ASK_BINDING) { onPageAsk(sess, m.params.payload).catch(() => {}); return; }
     const p = m.id && pending.get(m.id);
     if (!p) return;
     pending.delete(m.id);
@@ -1050,6 +1296,9 @@ function connect(target) {
   ws.onopen = async () => {
     try {
       await send('Page.enable'); // 不开 Page 域，addScriptToEvaluateOnNewDocument 在刷新后不生效（测试过）
+      // 页面向注入程序要数据的通道（2026-11-24 加，CLI 调用明细用）：页面调 window.__agyZhAsk(JSON) → 这里收到 Runtime.bindingCalled。
+      // 刷新后仍在。加不上也不要紧：syncCost 每 30 秒会看页面的 S.cliWant 补答一次
+      try { await send('Runtime.addBinding', { name: ASK_BINDING }); } catch {}
       await apply(sess);
       log(`injected into ${target.id.slice(0, 8)} ${target.url.slice(0, 60)}`);
       await maybeReload(sess, target);
@@ -1183,6 +1432,10 @@ async function tick() {
   if (sessions.size && Date.now() - costSyncAt >= COST_SYNC_MS) {
     costSyncAt = Date.now();
     syncCost().catch(() => {});
+  }
+  if (!cliBusy && Date.now() - cliScanAt >= CLI_SCAN_MS) {
+    cliScanAt = Date.now();
+    scanCli().catch((e) => log(`cli usage scan failed: ${e.message}`));
   }
   if (sessions.size && !remoteBusy && Date.now() >= remoteNextAt && onlineOn()) checkRemote().catch((e) => log(`remote update failed: ${e.message}`));
 

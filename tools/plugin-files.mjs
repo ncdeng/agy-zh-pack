@@ -11,6 +11,7 @@ export const PLUGIN_FILES = [
   'lib/relaunch.mjs',
   'lib/update.mjs',
   'lib/remote-source.mjs',
+  'lib/quota.mjs',
   'inject.mjs',
   'statusbar.js',
   'debug-port.ps1',

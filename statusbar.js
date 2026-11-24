@@ -1227,12 +1227,16 @@ function agyStatusBar(CFG) {
     }
     if (shown != null) out.push(seg('cost', ICON('cost'), [fmtUsd(shown)], tip));
     // 今天没花钱、但有历史记录时也显示（$0 today），好点开看前几天
-    if (day.usd > 0 || hasHistory()) {
-      const dtip = '今天累计 ' + fmtUsd(day.usd) + '（按 API 标准价，本地 0 点起，' + day.convs + ' 个对话，含子代理）' +
+    // 2026-11-24 起今天花费含 agy CLI 的（注入程序按 CLI 对话库汇总，见 cliDay），悬停说明里分开写
+    const cli = cliDay(dayName());
+    const dayAll = day.usd + (cli ? cli.usd : 0);
+    if (dayAll > 0 || hasHistory()) {
+      const dtip = '今天累计 ' + fmtUsd(dayAll) + '（按 API 标准价，本地 0 点起）' +
+        (cli ? '\n  桌面版 ' + fmtUsd(day.usd) + ' · ' + day.convs + ' 个对话（含子代理）\n  ' + cliNote(cli) : '\n  ' + day.convs + ' 个对话（含子代理）') +
         (day.undated ? '\n  还有 ' + day.undated + ' 次调用正在查时间，暂时没算进今天' : '') +
         (day.loading ? '\n  还有 ' + day.loading + ' 个对话正在读取' : '') +
         '\n' + priceSrcText() + '\n\n点击查看每天的用量和额度';
-      const ts = seg('cost', ICON('today'), [fmtUsd(day.usd) + ' today'], dtip);
+      const ts = seg('cost', ICON('today'), [fmtUsd(dayAll) + ' today'], dtip);
       ts.classList.add('p-open');
       ts.addEventListener('click', () => togglePanel(ts));
       out.push(ts);
@@ -1283,8 +1287,9 @@ function agyStatusBar(CFG) {
   // ---------- 每日用量面板（2026-11-20 加）：点状态栏上的 “$x today” 打开 ----------
   // 过去的天数来自注入程序的 usage-history.json：它每 30 秒把最近 31 天推到 S.history，注入时也经 CFG.history 带过来。
   // 一天的记录：{ usd, convs, models: { 价目名: [美元, 调用数, 输入, 缓存读, 缓存写, 输出] }, quota: { 桶 ID: 额度记录 } }。
-  // 额度记录 { n 组名, w 窗口, l 最近一次, u 当天用掉的（只累计上涨）, m 当天最高 }（都是已用比例 0～1），
-  // 注入程序按观察到的变化累计，见 inject.mjs 的 noteQuota。今天这一行的钱和 token 用页面里实时的账本。
+  // 额度记录 { n 组名, w 窗口, l 最近一次, u 当天用掉的（按周期分段算净变化）, m 当天最高 }（都是已用比例 0～1），
+  // 注入程序按观察到的变化算，见 lib/quota.mjs 的 noteQuota。今天这一行的钱和 token 用页面里实时的账本。
+  // S.history.resets（2026-11-24 加）：当前账号每周额度被谷歌提前重置的记录，见下面 resetsOn。
   if (CFG && CFG.history && CFG.history.days && (!S.history || (+CFG.history.at || 0) > (+S.history.at || 0))) S.history = CFG.history;
   const PANEL_CLASS = 'agy-usage-panel';
   const P = '.' + PANEL_CLASS;
@@ -1308,12 +1313,11 @@ function agyStatusBar(CFG) {
   };
   // 补算的天（注入程序从 Antigravity 对话库补的，bf = 1）只有 raw = { 模型名: [调用数, 输入, 缓存读, 缓存写, 输出] }，
   // 在这里按价目表算钱（按那天中午的价），算成和实时记录一样的 models / usd
-  const priceRaw = (rec, name) => {
-    if (!rec || !rec.raw || rec.models) return rec;
+  const priceRawMap = (raw, name) => {
     const at = new Date(name + 'T12:00:00').getTime();
     const models = {};
     let usd = 0;
-    for (const [mid, r] of Object.entries(rec.raw)) {
+    for (const [mid, r] of Object.entries(raw || {})) {
       if (!Array.isArray(r)) continue;
       const cc = callCost({ inputTokens: r[1], cacheReadTokens: r[2], cacheWriteTokens: r[3], outputTokens: r[4] }, mid, at);
       const pname = cc && cc.pr ? cc.pr.name : 'Other';
@@ -1321,16 +1325,42 @@ function agyStatusBar(CFG) {
       if (cc && cc.usd != null) { m[0] += cc.usd; usd += cc.usd; }
       m[1] += +r[0] || 0; m[2] += +r[1] || 0; m[3] += +r[2] || 0; m[4] += +r[3] || 0; m[5] += +r[4] || 0;
     }
-    return Object.assign({}, rec, { models, usd });
+    return { models, usd };
+  };
+  const priceRaw = (rec, name) => (!rec || !rec.raw || rec.models ? rec : Object.assign({}, rec, priceRawMap(rec.raw, name)));
+  // agy CLI 的用量（2026-11-24 加）：注入程序从 ~/.gemini/antigravity-cli/conversations/*.db 按天汇总，
+  // 放在每天记录的 cli = { raw: { 模型名: [调用数, 输入, 缓存读, 缓存写, 输出] }, convs, calls }（见 inject.mjs 的 scanCli）。
+  // 别的工具调 CLI 用的是同一个账号，额度百分比里本来就有；这里把花费、调用次数、token 也算进每天的合计和今天花费。
+  // 按那天中午的价折算（和补算的天一样）；每 30 秒随历史一起推过来，所以 CLI 正在跑时今天花费最多晚约 1 分钟。
+  const cliDay = (name) => {
+    const c = S.history && S.history.days && S.history.days[name] && S.history.days[name].cli;
+    if (!c || !c.raw) return null;
+    return Object.assign(priceRawMap(c.raw, name), { calls: +c.calls || 0, convs: +c.convs || 0 });
+  };
+  // 桌面版的那天记录 + CLI：models 按价目名相加，usd / convs 加上 CLI 的；cli 换成算好钱的 { models, usd, calls, convs }，deskUsd 留桌面版的金额
+  const withCli = (rec, name) => {
+    const c = cliDay(name);
+    if (!rec && !c) return rec;
+    const base = Object.assign({}, rec || {});
+    delete base.cli;
+    if (!c) return base;
+    const models = {};
+    for (const [k, m] of Object.entries(base.models || {})) models[k] = m.slice();
+    for (const [k, m] of Object.entries(c.models)) {
+      const t = models[k] || (models[k] = [0, 0, 0, 0, 0, 0]);
+      for (let i = 0; i < 6; i++) t[i] += +m[i] || 0;
+    }
+    return Object.assign(base, { models, usd: (+base.usd || 0) + c.usd, convs: (+base.convs || 0) + c.convs, deskUsd: +base.usd || 0, cli: c });
   };
   const dayRecord = (name) => {
     const h = priceRaw((S.history && S.history.days && S.history.days[name]) || null, name);
-    if (name !== dayName()) return h;
+    if (name !== dayName()) return withCli(h, name);
     const book = loadBook();
     const vals = Object.values(book.by || {}).map(Number).filter((v) => v >= 0);
     const live = { usd: vals.reduce((a, b) => a + b, 0), convs: vals.filter((v) => v > 0).length, models: sumDet(book.det) };
-    return Object.assign({}, h || {}, h && h.usd > live.usd ? {} : live);
+    return withCli(Object.assign({}, h || {}, h && h.usd > live.usd ? {} : live), name);
   };
+  const cliNote = (c) => 'agy CLI ' + fmtUsd(c.usd) + ' · ' + c.convs + ' 个对话 · ' + c.calls + ' 次调用';
   const lastDays = (n) => { // 今天在前
     const out = [];
     const d = new Date();
@@ -1349,6 +1379,28 @@ function agyStatusBar(CFG) {
       if (q.w === 'weekly') { wk = Math.max(wk || 0, qUsed(q)); name = q.n || name; } else peak = Math.max(peak || 0, +q.m || 0);
     }
     return { wk, peak, name };
+  };
+  // 提前重置（2026-11-24 加）：每周额度在原定重置时间之前就换了周期（例如 11-24 谷歌提前重置 Gemini 每周额度），注入程序记一条。
+  // [{ id 桶 ID, n 组名, w, at 看到重置的时间, after 最后一次看到旧周期的时间（0 = 不知道）, from 重置前已用, was 原定重置时间, flips 读数来回跳的次数 }]
+  // 面板上用 ↺ 标出来：柱子下的日期、表格的额度格、悬停卡片、底部每周额度那一行（这个周期是提前重置后开始的）。
+  const RESET_MARK = '↺';
+  const resetList = () => ((S.history && Array.isArray(S.history.resets)) ? S.history.resets : []).filter((e) => e && e.at > 0 && e.id);
+  const dayOfMs = (ms) => { const d = new Date(ms); return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()); };
+  const resetsOn = (name, grp) => resetList().filter((e) => dayOfMs(e.at) === name && (!grp || String(e.id).startsWith(grp + '-')));
+  const grpLabel = (id) => (GROUPS.find(([g]) => String(id).startsWith(g + '-')) || [, ''])[1];
+  const hmOf = (ms) => { const d = new Date(ms); return pad(d.getHours()) + ':' + pad(d.getMinutes()); };
+  const mdhm = (ms) => { const d = new Date(ms); return (d.getMonth() + 1) + '-' + d.getDate() + ' ' + hmOf(ms); };
+  // 一条重置记录的说明，例如“Gemini 每周额度 04:05～04:08 之间被提前重置：重置前已用 8.5%，原定 11-29 09:41 重置”
+  const resetText = (e) => {
+    const when = e.after > 0 && dayOfMs(e.after) === dayOfMs(e.at) ? hmOf(e.after) + '～' + hmOf(e.at) + ' 之间' : hmOf(e.at) + ' 以前';
+    return grpLabel(e.id) + ' 每周额度 ' + when + '被提前重置：重置前已用 ' + pctTx(+e.from || 0) + '，原定 ' + mdhm(e.was) + ' 重置' +
+      (e.flips ? '（重置时读数来回跳了 ' + e.flips + ' 次，已按跳回的那段接着算，不会重复计算）' : '');
+  };
+  // 这个周期是不是一次提前重置之后开始的：周期开始（重置时间 − 7 天）前 3 天到开始后 1 小时之间有一条这一组的重置记录。
+  // 周期从重置后第一次使用时才开始算（没用过的桶重置时间跟着现在走），所以重置记录会比周期开始早一点。
+  const resetBefore = (grp, reset) => {
+    const start = reset - WEEK_MS;
+    return resetList().filter((e) => String(e.id).startsWith(grp + '-') && e.at <= start + 3600e3 && e.at >= start - 3 * 86400e3).pop() || null;
   };
   // 每周额度预估（2026-11-22 加，v1.6）。注入程序按细粒度读数算好两种速度：这周到现在的平均、最近 24 小时（至少隔 6 小时）。
   // 有最近 24 小时的就用它（更接近现在的用法），没有就用这周平均；这周过去不到 1 天时这周平均很不准，标 rough。
@@ -1401,9 +1453,11 @@ function agyStatusBar(CFG) {
   const dayCard = (name, r) => {
     const lb = dayLabel(name);
     const out = [el('div', 't', lb.wd + ' ' + lb.md + (name === dayName() ? ' · today' : ''))];
-    if (!r || !(r.usd > 0 || recTokens(r)[0] > 0)) { out.push(el('div', 'dim', '没有用量记录')); return out; }
+    const rs = resetsOn(name).map((e) => el('div', 'q', RESET_MARK + ' ' + resetText(e)));
+    if (!r || !(r.usd > 0 || recTokens(r)[0] > 0)) { out.push(el('div', 'dim', '没有用量记录'), ...rs); return out; }
     const t = recTokens(r);
     out.push(el('div', 'sum', fmtUsd(r.usd || 0) + ' · ' + (r.convs || 0) + ' 个对话 · ' + t[0] + ' 次调用'));
+    if (r.cli) out.push(el('div', 'dim', '其中 ' + cliNote(r.cli) + '；桌面版 ' + fmtUsd(r.deskUsd || 0)));
     let shown = 0;
     for (const [n, m] of Object.entries(r.models || {}).filter(([, m]) => m[0] > 0 || m[1] > 0).sort((a, b) => b[1][0] - a[1][0])) {
       shown += m[0];
@@ -1415,16 +1469,19 @@ function agyStatusBar(CFG) {
       const q = groupQuota(r, grp);
       if (q.wk != null) out.push(el('div', 'q', label + ' 每周额度 +' + pctTx(q.wk) + (q.peak != null ? ' · 5 小时最高 ' + pctTx(q.peak) : '')));
     }
+    out.push(...rs);
     if (r.bf) out.push(el('div', 'dim', '从 Antigravity 对话库补算，没有额度记录'));
     else if (r.fix) out.push(el('div', 'dim', '实时记录少算了，花费和 token 已按 Antigravity 对话库重算'));
     out.push(el('div', 'dim', '钱按 API 标准价折算，不是实际扣费；' + (priceSrc.online ? '在线价格表 ' + priceSrc.updated : '内置价格表')));
     return out;
   };
-  const partCard = (name, model, m, dayUsd) => {
+  const partCard = (name, model, m, dayUsd, r) => {
     const lb = dayLabel(name);
     const head = el('div', 't row k-' + (MODEL_COLOR[model] || 'muted'));
     head.append(el('i'), el('span', '', model + ' · ' + lb.wd + ' ' + lb.md));
     const out = [head, el('div', 'sum', fmtUsd(m[0]) + (dayUsd > 0 ? '（占当天 ' + Math.round(m[0] / dayUsd * 100) + '%）' : '') + (m[1] ? ' · ' + m[1] + ' 次调用' : ''))];
+    const cm = r && r.cli && r.cli.models[model];
+    if (cm && (cm[0] > 0 || cm[1] > 0)) out.push(el('div', 'dim', '其中 agy CLI ' + fmtUsd(cm[0]) + ' · ' + cm[1] + ' 次调用'));
     if (m[2] || m[3] || m[5]) out.push(el('div', 'dim', '输入 ' + fmtK(m[2]) + ' · 缓存 ' + fmtK(m[3]) + (m[4] ? ' · 缓存写 ' + fmtK(m[4]) : '') + ' · 输出 ' + fmtK(m[5])));
     if (m[2] + m[3] > 0) out.push(el('div', 'dim', '缓存命中 ' + Math.round(m[3] / (m[2] + m[3]) * 100) + '%'));
     return out;
@@ -1467,7 +1524,8 @@ function agyStatusBar(CFG) {
     const total = usedDays.reduce((a, { r }) => a + r.usd, 0);
     const head = el('div', 'p-head');
     const title = el('span', 'p-title', 'Daily usage');
-    setTip(title, '每天的用量：钱按 API 标准价折算（不是实际扣费），额度是当天用掉的每周额度\n' + priceSrcText());
+    setTip(title, '每天的用量：钱按 API 标准价折算（不是实际扣费），额度是当天用掉的每周额度\n' +
+      '花费、调用和 token 含这台电脑上 agy CLI 的用量（别的工具直接调 CLI 也算在内）\n' + priceSrcText());
     head.append(title);
     for (const k of [7, 30]) {
       const b = el('button', 'p-btn' + (k === n ? ' on' : ''), k + 'd');
@@ -1505,8 +1563,9 @@ function agyStatusBar(CFG) {
     const kpi = el('div', 'p-kpi');
     const kcell = (lab, val, tip, kind) => { const c = el('div', 'kc k-' + kind); c.append(el('span', 'kl', lab), el('span', 'kv', val)); setTip(c, tip); return c; };
     kpi.append(
-      kcell('today', fmtUsd((tr0 && tr0.usd) || 0), '今天按 API 标准价折算的花费（不是实际扣费）', 'cost'),
-      kcell('calls', String(t0[0]), '今天的模型调用次数（含子代理）', 'model'),
+      kcell('today', fmtUsd((tr0 && tr0.usd) || 0), '今天按 API 标准价折算的花费（不是实际扣费）' +
+        (tr0 && tr0.cli ? '\n桌面版 ' + fmtUsd(tr0.deskUsd || 0) + ' + ' + cliNote(tr0.cli) : ''), 'cost'),
+      kcell('calls', String(t0[0]), '今天的模型调用次数（含子代理' + (tr0 && tr0.cli ? '，其中 agy CLI ' + tr0.cli.calls + ' 次' : '') + '）', 'model'),
       kcell('tokens', fmtTok(tokSum(t0)), '今天的' + tokTip(t0), 'tokens'),
       kcell('cache hit', t0[1] + t0[2] > 0 ? Math.round(t0[2] / (t0[1] + t0[2]) * 100) + '%' : '—', '今天的缓存命中率 = 缓存读 ÷（缓存读 + 输入）', 'cache'));
     panel.append(kpi);
@@ -1530,7 +1589,7 @@ function agyStatusBar(CFG) {
         const part = el('div', 'p-part k-' + (MODEL_COLOR[model] || 'muted'));
         part.style.height = (m[0] / max * 100) + '%';
         part.dataset.m = model;
-        tips.set(part, () => partCard(nm, model, m, r.usd));
+        tips.set(part, () => partCard(nm, model, m, r.usd, r));
         col.append(part);
         top = part;
         shown += m[0];
@@ -1568,6 +1627,13 @@ function agyStatusBar(CFG) {
       const lab = el('span', isToday ? 'today' : '');
       if (n <= 7) lab.append(el('b', '', lb.wd), el('i', '', lb.md));
       else if (isToday || new Date(nm + 'T12:00:00').getDay() === 1) lab.append(el('i', '', lb.md));
+      // 那天有提前重置：日期后面加 ↺（30 天视图里没写日期的那天也标），悬停和柱子一样显示当天的卡片
+      if (resetsOn(nm).length) {
+        let host = lab.querySelector('i');
+        if (!host) { host = el('i'); lab.append(host); }
+        host.append(el('em', 'p-rs', RESET_MARK));
+        tips.set(lab, () => dayCard(nm, r));
+      }
       labels.append(lab);
     }
     if (usedDays.length >= 2) {
@@ -1611,7 +1677,7 @@ function agyStatusBar(CFG) {
       const hr = el('tr');
       const heads = [['Date', ''], ['Cost', '按 API 标准价折算的花费（不是实际扣费）'], ['Convs', '当天动过的对话数（含子代理）'], ['Calls', '模型调用次数'], ['Tokens', 'token 合计 = 输入 + 缓存读 + 缓存写 + 输出'],
         ['In', '输入 token（不含缓存）'], ['Cache', '缓存读取 token'], ['Out', '输出 token（含思考）'], ['Hit', '缓存命中率 = 缓存读取 ÷（缓存读取 + 输入）'],
-        ...GROUPS.map(([, label]) => [label + ' wk', '当天用掉了多少个百分点的' + label + '每周额度'])];
+        ...GROUPS.map(([, label]) => [label + ' wk', '当天用掉了多少个百分点的' + label + '每周额度\n' + RESET_MARK + ' = 那天这组每周额度被提前重置了（还没到原定的重置时间）'])];
       for (const [h, t] of heads) { const th = el('th', '', h); setTip(th, t); hr.append(th); }
       thead.append(hr);
       const tbody = el('tbody');
@@ -1625,13 +1691,18 @@ function agyStatusBar(CFG) {
         const hit = t[1] + t[2] > 0 ? Math.round(t[2] / (t[1] + t[2]) * 100) + '%' : '—';
         const tdTok = el('td', 'tk', fmtK(tokSum(t)));
         setTip(tdTok, tokTip(t));
-        tr.append(td0, el('td', 'c', fmtUsd(r.usd || 0)), el('td', '', String(r.convs || 0)), el('td', '', String(t[0])), tdTok,
+        const tdCost = el('td', 'c', fmtUsd(r.usd || 0));
+        if (r.cli) setTip(tdCost, '桌面版 ' + fmtUsd(r.deskUsd || 0) + ' + ' + cliNote(r.cli));
+        tr.append(td0, tdCost, el('td', '', String(r.convs || 0)), el('td', '', String(t[0])), tdTok,
           el('td', '', fmtK(t[1])), el('td', '', fmtK(t[2])), el('td', '', fmtK(t[4])), el('td', 'h', hit));
         for (const [grp] of GROUPS) {
           const q = groupQuota(r, grp);
+          const rs = resetsOn(nm, grp);
           const td = el('td', 'q', q.wk == null ? '—' : '+' + pctTx(q.wk));
-          if (q.peak != null) setTip(td, '5 小时额度当天最高 ' + pctTx(q.peak));
-          else if (r.bf) setTip(td, '补算的天没有额度记录');
+          if (rs.length) td.append(el('em', 'p-rs', RESET_MARK));
+          const tip = [q.peak != null ? '5 小时额度当天最高 ' + pctTx(q.peak) : r.bf ? '补算的天没有额度记录' : '', ...rs.map(resetText)].filter(Boolean);
+          if (rs.length && q.wk != null) tip.push('当天用掉的 = 重置前那段的净增加 + 重置后这段的已用');
+          if (tip.length) setTip(td, tip.join('\n'));
           tr.append(td);
         }
         const col = cols.get(nm);
@@ -1699,8 +1770,14 @@ function agyStatusBar(CFG) {
             '还剩约 ' + fmtUsd(capUsd - usd) + '、' + fmtTok(Math.max(0, capTok - tok)) + ' token。' +
             (capRough ? '\n现在才用了 ' + pctTx(wb.used) + '，推算误差很大，用得越多越准。' : '') +
             '\n钱按 API 标准价折算，不是实际扣费；Google 没公布额度按模型和 token 种类怎么折算，这里按同比例推，只是参考。' +
-            '\n和家人共享额度、或者别的电脑也在用这个号时，别人用掉的算进了已用比例、却不在这台电脑的花费里，推出来的总量会偏小。' : '');
+            '\n这台电脑上 agy CLI 的花费已经算在里面；和家人共享额度、或者别的电脑也在用这个号时，别人用掉的算进了已用比例、却不在这台电脑的花费里，推出来的总量会偏小。' : '');
       } else tip += '\n已用 0%：这个号这一组还没开始用，周期从第一次用的时候开始算，重置时间跟着现在走。';
+      // 这个周期是提前重置之后开始的：行末加 “↺ early reset 11-24”，悬停写明重置前用了多少、原定什么时候重置
+      const er = wb.used > 0 && wb.reset > 0 ? resetBefore(grp, wb.reset) : null;
+      if (er) {
+        parts.push(RESET_MARK + ' early reset ' + (new Date(er.at).getMonth() + 1) + '-' + new Date(er.at).getDate());
+        tip += '\n\n' + RESET_MARK + ' 这个周期是在一次提前重置之后开始的。' + resetText(er) + '。';
+      }
       if (est) tip += '\n\n预估（est）：' + est.long + '\n' + SHARE_NOTE;
       if (S.account) tip += '\n\n账号 ' + S.account.m;
       const line = el('div', 'k-quota', parts.join(' · '));
@@ -1776,6 +1853,27 @@ function agyStatusBar(CFG) {
     rows.sort((a, b) => b.at - a.at);
     return { rows, convs: ids.length, failed };
   };
+  // agy CLI 的调用（2026-11-24 加）：CLI 的对话不在桌面版后台里，取不到；打开某一天的明细时向注入程序要（S.cliAsk），
+  // 注入程序读 CLI 对话库后调 S.setCliCalls 交回 { day, rows: [[时间, 对话 ID, 模型名, 输入, 缓存读, 缓存写, 输出, 首字秒, 生成秒, 界面名]], convs: { 对话 ID: 标题 } }。
+  S.cliCalls = S.cliCalls || {};
+  S.setCliCalls = (o) => {
+    if (!o || !/^\d{4}-\d{2}-\d{2}$/.test(String(o.day)) || !Array.isArray(o.rows)) return;
+    S.cliCalls[o.day] = { rows: o.rows, convs: o.convs && typeof o.convs === 'object' ? o.convs : {} };
+    if (S.cliRedraw) S.cliRedraw(o.day);
+  };
+  S.cliAsk = (day) => {
+    S.cliWant = day;
+    try { if (typeof window.__agyZhAsk === 'function') window.__agyZhAsk(JSON.stringify({ t: 'cli-calls', day })); } catch (e) {}
+  };
+  const cliRows = (nm) => {
+    const c = S.cliCalls[nm];
+    if (!c) return [];
+    return c.rows.filter((x) => Array.isArray(x) && x.length >= 9).map((x) => ({
+      cli: true, at: +x[0] || 0, conv: String(x[1]), resp: String(x[2] || ''), key: '', exec: '', step: -1, disp: String(x[9] || ''), retries: 0,
+      usage: { inputTokens: +x[3] || 0, cacheReadTokens: +x[4] || 0, cacheWriteTokens: +x[5] || 0, outputTokens: +x[6] || 0 }, ttft: +x[7] || 0, stream: +x[8] || 0,
+      title: String((c.convs && c.convs[x[1]]) || ''),
+    }));
+  };
   const convLabel = (id) => {
     const sub = S.subInfo.get(id);
     const title = (S.casMeta.get(id) || {}).title || '';
@@ -1809,8 +1907,10 @@ function agyStatusBar(CFG) {
     const note = el('div', 'p-note');
     panel.append(note);
     let sig = '';
+    let lastRes = null;
     const draw = (res) => {
-      const rows = res.rows;
+      lastRes = res;
+      const rows = res.rows.concat(cliRows(nm)).sort((a, b) => b.at - a.at); // 桌面版的 + agy CLI 的，最新的在上面
       // 指纹：调用数、每次调用的时间和 token、耗时；没变化就不动表格
       const nsig = rows.length + '|' + res.failed + '|' + rows.slice(0, 600).map((r) => r.at + ':' + (+r.usage.outputTokens || 0) + ':' + (+r.usage.inputTokens || 0) + ':' + r.stream).join(',');
       if (nsig === sig) return;
@@ -1822,7 +1922,7 @@ function agyStatusBar(CFG) {
       for (const r of rows) { const cc = usdOf(r); costs.set(r, cc); if (cc.usd != null) { total += cc.usd; priced++; } }
       const table = el('table');
       const hr = el('tr');
-      const heads = [['Time', '调用开始的时间'], ['Conversation', '哪个对话（↳ 是子代理）'], ['Model', '模型（界面名；悬停看接口名和配置名）'], ['Cost', '按 API 标准价折算（不是实际扣费）'],
+      const heads = [['Time', '调用开始的时间'], ['Conversation', '哪个对话（↳ 是子代理，CLI · 开头的是 agy CLI 的对话）'], ['Model', '模型（界面名；悬停看接口名和配置名）'], ['Cost', '按 API 标准价折算（不是实际扣费）'],
         ['In', '新增输入（不含缓存）'], ['Out', '输出（含思考）'], ['Cache', '缓存读取'], ['Write', '缓存写入（只有 Claude 有）'], ['Hit', '命中率 = 缓存读 ÷（缓存读 + 输入）'],
         ['tok/s', '生成速度：输出 token（含思考）÷ 总耗时。思考在首字之前就生成了，所以按总耗时算'], ['TTFT', '首字时间（后台记录的 timeToFirstToken）'], ['Total', '首字 + 生成用时']];
       for (const [h, t] of heads) { const th = el('th', '', h); setTip(th, t); hr.append(th); }
@@ -1836,12 +1936,15 @@ function agyStatusBar(CFG) {
         const t = new Date(r.at);
         const tr = el('tr');
         const model = r.disp || (r.key && S.enumModel.get(r.key)) || r.resp || r.key.replace(/^MODEL_/, '');
-        const tdConv = el('td', 'cv', clip(convLabel(r.conv), 48)); // 实际宽度由 CSS 限制（放不下出省略号）
-        setTip(tdConv, convLabel(r.conv) + '\n对话 ' + r.conv.slice(0, 8) + ' · 第 ' + (r.step + 1) + ' 步');
+        const label = r.cli ? 'CLI · ' + (r.title || r.conv.slice(0, 8)) : convLabel(r.conv);
+        const tdConv = el('td', 'cv', clip(label, 48)); // 实际宽度由 CSS 限制（放不下出省略号）
+        setTip(tdConv, label + '\n' + (r.cli ? 'agy CLI 的对话 ' + r.conv.slice(0, 8) + '（别的工具直接调 CLI 也在这里）' : '对话 ' + r.conv.slice(0, 8) + ' · 第 ' + (r.step + 1) + ' 步'));
         // 表里写短名（去掉 Gemini 4 / Claude 前缀），完整的界面名、接口名、配置名在悬停说明里
         const tdModel = el('td', 'md', clip(model.replace(/^Gemini \d+(\.\d+)?\s+/, '').replace(/^Claude\s+/, ''), 20));
-        setTip(tdModel, '界面名：' + (r.disp || '?') + '\n接口返回的模型：' + (r.resp || '?') + '\n配置名：' + ((r.key && S.enumModel.get(r.key)) || '?') + '\n编号：' + (r.key || '?') +
-          (cc.pr ? '\n单价按 ' + cc.pr.name + (cc.pr.note ? '（' + cc.pr.note + '）' : '') : '\n价格表里没有这个模型，没算钱') + (r.retries ? '\n重试过 ' + r.retries + ' 次' : ''));
+        const price = cc.pr ? '\n单价按 ' + cc.pr.name + (cc.pr.note ? '（' + cc.pr.note + '）' : '') : '\n价格表里没有这个模型，没算钱';
+        setTip(tdModel, r.cli ? '界面名：' + (r.disp || '?') + '\n模型：' + (r.resp || '?') + price + '\n（agy CLI 的调用，从 CLI 的对话库读的）'
+          : '界面名：' + (r.disp || '?') + '\n接口返回的模型：' + (r.resp || '?') + '\n配置名：' + ((r.key && S.enumModel.get(r.key)) || '?') + '\n编号：' + (r.key || '?') +
+          price + (r.retries ? '\n重试过 ' + r.retries + ' 次' : ''));
         const tdCost = el('td', 'c', cc.usd != null ? fmtUsdFine(cc.usd) : '—');
         const hit = cr + inp > 0 ? Math.round(cr / (cr + inp) * 100) + '%' : '—';
         const totalS = r.ttft + r.stream;
@@ -1869,7 +1972,10 @@ function agyStatusBar(CFG) {
     const key = nm;
     S.callsKey = key;
     let busy = false;
+    // CLI 的调用到了（或更新了）：用上次桌面版的结果重画一次（指纹没变就不动表格）
+    S.cliRedraw = (day) => { if (day === nm && lastRes && S.callsKey === key && panel.isConnected && S.panelView === 'calls') draw(lastRes); };
     const load = (first) => {
+      S.cliAsk(nm);
       if (busy) return;
       busy = true;
       S.loadCalls(nm, first ? (d, n) => { if (S.callsKey === key && n > 1) status.textContent = 'loading ' + d + '/' + n + ' conversations…'; } : null)
@@ -2571,6 +2677,9 @@ ${P} .p-labels b{font-weight:500}
 ${P} .p-labels i{font-style:normal; opacity:.7}
 ${P} .p-labels.dense i{opacity:1}
 ${P} .p-labels span.today{color:var(--k-cost); font-weight:600}
+/* ↺：那天每周额度被提前重置（日期后面、表格额度格后面） */
+${P} .p-rs{font-style:normal; font-weight:600; color:var(--k-quota); margin-left:.25em}
+${P} .p-labels .p-rs{opacity:1}
 ${P} .p-legend{display:flex; flex-wrap:wrap; gap:.15rem 1rem; margin-bottom:.45rem}
 ${P} .p-legend > span{color:var(--kc); display:inline-flex; align-items:center; cursor:default}
 ${P} .p-legend i{display:inline-block; width:8px; height:8px; border-radius:2px; background:var(--kc); margin-right:.35em}

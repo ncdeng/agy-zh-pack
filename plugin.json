@@ -1,7 +1,7 @@
 {
   "name": "agy-zh-pack",
   "displayName": "agy-zh",
-  "version": "2.0.3",
+  "version": "2.0.4",
   "description": "非官方的 Antigravity 中文插件：界面汉化，加上输入框上方的用量状态栏（模型、上下文、缓存、花费、首字、速度、额度）。词典和价格在线更新，代码更新经签名校验。",
   "author": { "name": "ncdeng", "url": "https://github.com/ncdeng" },
   "homepage": "https://github.com/ncdeng/agy-zh-pack",
