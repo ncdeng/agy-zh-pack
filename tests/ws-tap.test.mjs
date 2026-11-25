@@ -13,7 +13,7 @@ function setup({ storage = {}, appToken } = {}) {
   const got = [], timers = [];
   const S = { onMessage: (name, p) => got.push([name, p]), fetchQuota: () => {} };
   const env = {
-    location: { origin: ORIGIN },
+    location: { origin: ORIGIN, host: '127.0.0.1:62832' },
     localStorage: { getItem: (k) => (k in storage ? storage[k] : null) },
     window: { __APP_CONFIG__: { csrfToken: appToken } },
     setTimeout: (f, ms) => timers.push(ms),
@@ -58,6 +58,14 @@ test('别的服务、没有令牌的 start 帧不改请求头；别的 WebSocket
   S.wsSend(other, start('c', 'GetUserStatus', { 'x-codeium-csrf-token': ['t'] }));
   assert.equal(other.ls.length, 0);
   assert.equal(S.wsProc.has('c'), false);
+  // 别的主机上同名的 /connect-websocket 也不旁听（代码审查 11-26：原来只看路径）
+  const far = sock('wss://example.test/connect-websocket');
+  S.wsSend(far, start('d', 'GetUserStatus', { 'x-codeium-csrf-token': ['evil'] }));
+  assert.equal(far.ls.length, 0);
+  assert.equal(S.lsHeaders, undefined);
+  assert.equal(sock('不是地址').ls.length, 0);
+  S.wsSend(sock('不是地址'), start('e', 'GetUserStatus', { 'x-codeium-csrf-token': ['t'] }));
+  assert.equal(S.wsProc.has('e'), false);
   const bin = sock();
   S.wsSend(bin, new Uint8Array(4));
   assert.equal(bin.ls.length, 0);
@@ -77,18 +85,39 @@ test('收到的帧：要旁听的流交给 S.onMessage，别的流不解析，en
   assert.equal(S.wsProc.get('m'), 'GetMendelFlags');
 });
 
-test('热更新前就开着的流：带 update.conversationId 的认成状态流，别的记成 ? 以后不再解析，空 payload 先不认', () => {
+test('别的服务的同名方法：记成 ?，收到的帧不交给 S.onMessage', () => {
+  const { S, got } = setup();
+  const ws = sock();
+  S.wsSend(ws, start('o', 'GetUserStatus', { 'x-codeium-csrf-token': ['t'] }, 'exa.other_pb.OtherService'));
+  assert.equal(S.wsProc.get('o'), '?');
+  assert.equal(S.lsHeaders, undefined);
+  ws.recv(data('o', { userStatus: { name: 'n' } }));
+  assert.deepEqual(got, []);
+});
+
+test('热更新前就开着的流：update 里有 conversationId 和别的状态字段的认成状态流，连续 3 帧不像才记成 ?', () => {
   const { S, got } = setup();
   const ws = sock();
   S.wsSend(ws, JSON.stringify({ streamId: 'x', type: 'ping' })); // 应用发了一帧，连接才挂上监听
   ws.recv(data('old', {}));
+  ws.recv(data('old', { update: { conversationId: 'c1' } })); // 只有 conversationId（确认包）：先不认
   assert.equal(S.wsProc.has('old'), false);
+  assert.equal(S.wsUnk.get('old'), 1);
   ws.recv(data('old', { update: { conversationId: 'c1', status: 'CASCADE_RUN_STATUS_RUNNING' } }));
-  ws.recv(data('side', { sidecars: [1] }));
-  ws.recv(data('side', { update: { conversationId: 'c2' } })); // 已经记成 ?，不再看
   assert.equal(S.wsProc.get('old'), 'StreamAgentStateUpdates');
+  assert.equal(S.wsUnk.has('old'), false);
+  ws.recv(data('side', { sidecars: [1] }));
+  ws.recv(data('side', { sidecars: [2] }));
+  assert.equal(S.wsProc.has('side'), false);
+  ws.recv(data('side', { sidecars: [3] }));
   assert.equal(S.wsProc.get('side'), '?');
+  assert.equal(S.wsUnk.has('side'), false);
+  ws.recv(data('side', { update: { conversationId: 'c2', status: 'X' } })); // 已经记成 ?，不再看
   assert.deepEqual(got.map((g) => g[0] + ':' + g[1].update.conversationId), ['StreamAgentStateUpdates:c1']);
+  // end 帧把计数也删掉
+  ws.recv(data('gone', { a: 1 }));
+  ws.recv(end('gone'));
+  assert.equal(S.wsUnk.has('gone'), false);
 });
 
 test('帧的键顺序变了（payload 在前）：整帧解析，照样处理', () => {
@@ -110,6 +139,19 @@ test('streamId 记录超过 5000 条时删掉最早的 1000 条', () => {
   assert.equal(S.wsProc.has('s0'), false);
   assert.equal(S.wsProc.has('s1000'), true);
   assert.equal(S.wsProc.get('new'), 'GetUserStatus');
+});
+
+test('删最早的记录时跳过正在旁听的流（长时间开着的状态流不删）', () => {
+  const { S, got } = setup();
+  const ws = sock();
+  S.wsProc.set('state', 'StreamAgentStateUpdates');
+  for (let i = 0; i <= 5000; i++) S.wsProc.set('s' + i, 'X');
+  S.wsSend(ws, start('new', 'GetUserStatus', { 'x-codeium-csrf-token': ['t'] }));
+  assert.equal(S.wsProc.get('state'), 'StreamAgentStateUpdates');
+  assert.equal(S.wsProc.has('s999'), false);
+  assert.equal(S.wsProc.has('s1000'), true);
+  ws.recv(data('state', { update: { conversationId: 'c9', status: 'S' } }));
+  assert.deepEqual(got.map((g) => g[0]), ['StreamAgentStateUpdates']);
 });
 
 test('还没看到应用发请求：先用 localStorage 里的令牌，再退到 __APP_CONFIG__；已经有请求头就不动', () => {

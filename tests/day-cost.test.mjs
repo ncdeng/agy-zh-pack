@@ -1,4 +1,5 @@
-// 每次调用的时间（statusbar.js 的 callTimes / timeFetchFrom / fetchTimes）、账本 v2（inject.mjs 的 readCostBook / mergeCostBook）、
+// 每次调用的时间（statusbar.js 的 callTimes / timeFetchFrom / fetchTimes）、账本 v3（inject.mjs 的 readCostBook / mergeCostBook /
+// updateHistory，statusbar.js 的 mergeBook）、
 // 读数据文件出错时不覆盖（inject.mjs 的 readJsonKeep，代码审查 A1）、调用明细取步骤失败（statusbar.js 的 loadConv0，审查 A4）
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -10,10 +11,11 @@ import { cut, cutInject, read, T, H } from './_helpers.mjs';
 const D0 = T('2026-11-25T00:00:00');
 const M = 60e3;
 const mkS = () => ({ stepAt: new Map(), detCache: new Map(), execAt: new Map(), costs: new Map() });
-// callTimes 一段（含 priceCut、canFetch、timeFetchFrom），换掉 Date.now 好让测试结果不随运行时间变
-const timesOf = (S, { meta, now, rules = [] }) => new Function('S', 'convMeta', 'dayStart', 'priceRules', 'callNames', 'Date',
+// callTimes 一段（含 priceCut、canFetch、timeFetchFrom），换掉 Date.now 好让测试结果不随运行时间变。
+// ownFrom（副本的分界，见 copy.test.mjs）默认当成不是副本
+const timesOf = (S, { meta, now, rules = [], ownFrom = () => 0 }) => new Function('S', 'convMeta', 'dayStart', 'priceRules', 'callNames', 'Date', 'ownFrom',
   cut('statusbar.js', '  // 调价时间点：', '  S.fetchTimes = ') + '\nreturn { callTimes, timeFetchFrom, priceCut, canFetch };')(
-  S, () => meta, () => D0, rules, (resp) => resp || '', { now: () => now });
+  S, () => meta, () => D0, rules, (resp) => resp || '', { now: () => now }, ownFrom);
 const calls = (n, resp = 'gemini-4-carbon') => Array.from({ length: n }, (_, i) => ({ exec: 'e1', step: i * 10, resp }));
 
 test('callTimes：按前后已知的时间夹出范围；整个在 0 点前算昨天，在 0 点后算今天，跨 0 点才算不知道', () => {
@@ -114,7 +116,7 @@ test('readJsonKeep：只有文件不存在才返回 null；读出错重试几次
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('注入程序的账本：cost-day.json 读不出来时不合并、不写（免得盖掉文件里今天别的对话）；v1 的账本丢掉', () => {
+test('注入程序的账本：cost-day.json 读不出来时不合并、不写（免得盖掉文件里今天别的对话）；旧版本（v1、v2）的账本丢掉', () => {
   const id = 'a'.repeat(8) + '-1111-2222-3333-' + 'b'.repeat(12);
   const writes = [];
   const UNREAD = Symbol('unread');
@@ -124,31 +126,113 @@ test('注入程序的账本：cost-day.json 读不出来时不合并、不写（
   // 读不出来
   const bad = load(() => { throw Object.assign(Error('busy'), { code: 'AGY_READ_FAILED' }); });
   assert.ok(bad.readCostBook()[UNREAD]);
-  bad.mergeCostBook({ day: '2026-11-25', v: 2, by: { [id]: 7.46 }, det: {} });
+  bad.mergeCostBook({ day: '2026-11-25', v: 3, by: { [id]: 7.46 }, det: {} });
   assert.equal(writes.length, 0);
-  // v1 的文件：丢掉；v1 页面交来的不收；v2 之间取较大的数
+  // v1 的文件：丢掉；v1、v2 页面交来的不收；v3 之间取较大的数
   const v1 = load(() => ({ day: '2026-11-25', by: { [id]: 14.18 }, det: {} }));
   const book = v1.readCostBook();
-  assert.equal(book.v, 2);
+  assert.equal(book.v, 3);
   assert.deepEqual(book.by, {});
   v1.mergeCostBook({ day: '2026-11-25', by: { [id]: 20 }, det: {} });
+  v1.mergeCostBook({ day: '2026-11-25', v: 2, by: { [id]: 13.79 }, det: {} }); // v2：旁支复制来的调用算进了今天（11-26）
   assert.equal(writes.length, 0);
-  v1.mergeCostBook({ day: '2026-11-25', v: 2, by: { [id]: 7.46 }, det: {} });
-  v1.mergeCostBook({ day: '2026-11-25', v: 2, by: { [id]: 7.0 }, det: {} });
+  v1.mergeCostBook({ day: '2026-11-25', v: 3, by: { [id]: 7.46 }, det: {} });
+  v1.mergeCostBook({ day: '2026-11-25', v: 3, by: { [id]: 7.0 }, det: {} });
   assert.equal(writes.length, 1);
   assert.equal(writes[0].by[id], 7.46);
+  // v2 的文件也丢掉
+  const v2 = load(() => ({ day: '2026-11-25', v: 2, by: { [id]: 13.79 }, det: {} }));
+  assert.deepEqual(v2.readCostBook().by, {});
 });
 
-test('页面账本 v2：v1 的不合并，v2 之间取较大的数；todayCost 交给账本的数要带版本号', () => {
+test('注入程序的账本：带 fix 的数直接替换（可以改小），以后只认带 fix 的数；明细跟着换，没带就删（代码审查 11-26）', () => {
+  const id = 'c'.repeat(8) + '-1111-2222-3333-' + 'd'.repeat(12);
+  const other = 'e'.repeat(8) + '-1111-2222-3333-' + 'f'.repeat(12);
+  const writes = [];
+  const fns = new Function('readJsonKeep', 'COST_FILE', 'dayName', 'writeFileSafe', 'log', 'UNREAD',
+    cutInject('let costBook = null;', '// 今天动过的对话') + '\nreturn { readCostBook, mergeCostBook };')(
+    () => null, 'cost-day.json', () => '2026-11-26', (f, s) => writes.push(JSON.parse(s)), () => {}, Symbol('unread'));
+  const det = (usd, n) => ({ 'Claude Opus 4.6': [usd, n, 1, 2, 3, 4] });
+  // 确认前多算了一次（复制来的调用算进了今天）
+  fns.mergeCostBook({ day: '2026-11-26', v: 3, by: { [id]: 13.79, [other]: 2 }, det: { [id]: det(13.79, 40) } });
+  assert.equal(writes.at(-1).by[id], 13.79);
+  // 确认是副本：改小
+  fns.mergeCostBook({ day: '2026-11-26', v: 3, by: { [id]: 0.16 }, det: { [id]: det(0.16, 2) }, fix: { [id]: 1 } });
+  assert.equal(writes.at(-1).by[id], 0.16);
+  assert.deepEqual(writes.at(-1).fix, { [id]: 1 });
+  assert.deepEqual(writes.at(-1).det[id], det(0.16, 2));
+  assert.equal(writes.at(-1).by[other], 2); // 别的对话不动
+  // 别的窗口（还没确认）交来的旧数、旧明细：不收
+  const n = writes.length;
+  fns.mergeCostBook({ day: '2026-11-26', v: 3, by: { [id]: 13.79 }, det: { [id]: det(13.79, 40) } });
+  assert.equal(writes.length, n);
+  // 副本今天自己的调用变多了：照样替换；没带明细就删掉旧明细
+  fns.mergeCostBook({ day: '2026-11-26', v: 3, by: { [id]: 0.3 }, det: {}, fix: { [id]: 1 } });
+  assert.equal(writes.at(-1).by[id], 0.3);
+  assert.equal(writes.at(-1).det[id], undefined);
+  // 同样的数再交一次不写文件
+  const m = writes.length;
+  fns.mergeCostBook({ day: '2026-11-26', v: 3, by: { [id]: 0.3 }, fix: { [id]: 1 } });
+  assert.equal(writes.length, m);
+});
+
+test('使用历史里今天的数：新版本账本还空着不换；纠正了副本（fix 个数变了）可以改小；账本读不出来不动', () => {
+  const UNREAD = Symbol('unread');
+  const run = (day, book) => {
+    const h = { v: 3, days: { '2026-11-26': day } };
+    new Function('readHistory', 'summarizeBook', 'COST_BOOK_V', 'UNREAD', 'saveHistory', 'HISTORY_KEEP_DAYS', 'log',
+      cutInject('function updateHistory(', '// 推给页面的历史') + '\nreturn updateHistory;')(
+      () => h, (b) => ({ usd: Object.values(b.by).reduce((a, x) => a + x, 0), convs: 1, models: {} }), 3, UNREAD, () => {}, 400, () => {})(
+      book, null, null, 0);
+    return h.days['2026-11-26'];
+  };
+  const book = (by, fix = {}) => ({ day: '2026-11-26', v: 3, by, det: {}, fix });
+  // 旧版本（v2）记的今天 13.79：新版本账本还空着（页面脚本还是旧版本）时先不换，免得今天被写成 0
+  assert.equal(run({ usd: 13.79, bv: 2 }, book({})).usd, 13.79);
+  // 新版本账本有数了：换成新的（可以更小）
+  assert.deepEqual(run({ usd: 13.79, bv: 2 }, book({ a: 0.5 })), { usd: 0.5, convs: 1, models: {}, bv: 3, fx: 0 });
+  // 同版本：文件里的数更大（账本被重置过）就保留
+  assert.equal(run({ usd: 5, bv: 3, fx: 0 }, book({ a: 0.5 })).usd, 5);
+  // 同版本、账本里新纠正了一个副本：换一次，可以改小；之后照旧保留较大的
+  assert.deepEqual(run({ usd: 5, bv: 3, fx: 0 }, book({ a: 0.5 }, { a: 1 })), { usd: 0.5, convs: 1, models: {}, bv: 3, fx: 1 });
+  assert.equal(run({ usd: 5, bv: 3, fx: 1 }, book({ a: 0.5 }, { a: 1 })).usd, 5);
+  // 账本这次读不出来：不动
+  const b = book({ a: 0.5 });
+  b[UNREAD] = true;
+  assert.equal(run({ usd: 5, bv: 2 }, b).usd, 5);
+});
+
+test('页面账本 v3：v1、v2 的不合并，v3 之间取较大的数；带 fix 的直接替换、以后只认带 fix 的；todayCost 交给账本的数要带版本号', () => {
   const mergeBook = new Function(cut('statusbar.js', '  const detCalls = ', '  const loadBook = ') + '\nreturn mergeBook;')();
-  const book = { day: '2026-11-25', v: 2, by: {}, det: {} };
+  const book = { day: '2026-11-25', v: 3, by: {}, det: {} };
   mergeBook(book, { day: '2026-11-25', by: { c: 14.18 } }); // v1（没有 v）：不合并
+  mergeBook(book, { day: '2026-11-25', v: 2, by: { c: 13.79 } }); // v2：旁支复制来的调用算进了今天
   assert.deepEqual(book.by, {});
-  mergeBook(book, { day: '2026-11-25', v: 2, by: { c: 7.46 } });
-  mergeBook(book, { day: '2026-11-25', v: 2, by: { c: 7.0 } });
+  mergeBook(book, { day: '2026-11-25', v: 3, by: { c: 7.46 } });
+  mergeBook(book, { day: '2026-11-25', v: 3, by: { c: 7.0 } });
   assert.equal(book.by.c, 7.46);
+  // 副本：确认前多算过（13.79），确认后改小（代码审查 11-26：原来取较大的数，改对了也写不回去）
+  const det = (usd, n) => ({ M: [usd, n, 0, 0, 0, 0] });
+  mergeBook(book, { day: '2026-11-25', v: 3, by: { s: 13.79 }, det: { s: det(13.79, 40) } });
+  mergeBook(book, { day: '2026-11-25', v: 3, by: { s: 0.16 }, det: { s: det(0.16, 2) }, fix: { s: 1 } });
+  assert.equal(book.by.s, 0.16);
+  assert.deepEqual(book.fix, { s: 1 });
+  assert.deepEqual(book.det.s, det(0.16, 2));
+  // localStorage、别的窗口里没纠正的旧数盖不回去
+  mergeBook(book, { day: '2026-11-25', v: 3, by: { s: 13.79 }, det: { s: det(13.79, 40) } });
+  assert.equal(book.by.s, 0.16);
+  assert.deepEqual(book.det.s, det(0.16, 2));
+  // 没带明细的纠正：删掉旧明细
+  mergeBook(book, { day: '2026-11-25', v: 3, by: { s: 0 }, fix: { s: 1 } });
+  assert.equal(book.by.s, 0);
+  assert.equal(book.det.s, undefined);
+  // 从 localStorage 读回来的账本（带 fix）合并进新账本：fix 记号也带过去
+  const fresh = { day: '2026-11-25', v: 3, by: {}, det: {} };
+  mergeBook(fresh, book);
+  assert.deepEqual(fresh.fix, { s: 1 });
+  assert.equal(fresh.by.c, 7.46);
   // 11-25 实测漏过一次：todayCost 交给账本的数没带 v，全被当成 v1 丢掉，今天花费一直是 0
-  assert.match(read('statusbar.js'), /mergeBook\(book, \{ day: book\.day, v: BOOK_V, by, det: detBy \}\)/);
+  assert.match(read('statusbar.js'), /mergeBook\(book, \{ day: book\.day, v: BOOK_V, by, det: detBy, fix: fixBy \}\)/);
 });
 
 test('调用明细 loadConv0：取步骤失败时抛错，不记成“取完了”（审查 A4）', async () => {
@@ -156,9 +240,10 @@ test('调用明细 loadConv0：取步骤失败时抛错，不记成“取完了�
   let stepsAnswer = null;
   const lsCall = (method) => Promise.resolve(method === 'GetCascadeTrajectoryGeneratorMetadata'
     ? { generatorMetadata: [{ executionId: 'e1', stepIndices: [3], chatModel: { usage: { inputTokens: '10' } } }] } : stepsAnswer);
-  const loadConv0 = new Function('S', 'fileMeta', 'lsCall', 'slimCall', 'tms',
+  const noted = [];
+  const loadConv0 = new Function('S', 'fileMeta', 'lsCall', 'slimCall', 'tms', 'noteExecs',
     cut('statusbar.js', '  const loadConv0 = async', '  // 同一个对话正在取时') + '\nreturn loadConv0;')(
-    S, () => null, lsCall, (m) => ({ exec: m.executionId, step: m.stepIndices[0] }), (iso) => Date.parse(iso));
+    S, () => null, lsCall, (m) => ({ exec: m.executionId, step: m.stepIndices[0] }), (iso) => Date.parse(iso), (id, gens) => noted.push([id, gens.length]));
   await assert.rejects(loadConv0('c'), /no trajectory steps/);
   assert.ok(!S.detCache.get('c').done);
   stepsAnswer = { steps: [0, 1, 2, 3].map((i) => ({ metadata: { createdAt: `2026-11-25T01:0${i}:00Z` } })) };

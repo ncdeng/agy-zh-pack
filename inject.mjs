@@ -239,14 +239,16 @@ const dayName = () => {
 };
 let costBook = null;
 // 账本版本 v2（2026-11-25）：状态栏起每次调用按自己的时间定日子。v1 的账本里跨 0 点的一轮整轮算进了今天，
-// 合并又取较大的数，改正以后盖不掉，所以 v1 的账本丢掉、v1 页面交来的账本也不收（今天的数由状态栏从头重算）
-const COST_BOOK_V = 2;
+// 合并又取较大的数，改正以后盖不掉，所以 v1 的账本丢掉、v1 页面交来的账本也不收（今天的数由状态栏从头重算）。
+// v3（2026-11-26）：状态栏不再把 /btw 旁支、分叉出来的对话里复制来的原对话调用算进今天，v2 的账本同样丢掉重算
+const COST_BOOK_V = 3;
 function readCostBook() {
   if (!costBook) {
     try { costBook = readJsonKeep(COST_FILE); } catch { return { day: dayName(), v: COST_BOOK_V, by: {}, det: {}, [UNREAD]: true }; }
   }
-  if (!costBook || costBook.day !== dayName() || costBook.v !== COST_BOOK_V || !costBook.by || typeof costBook.by !== 'object') costBook = { day: dayName(), v: COST_BOOK_V, by: {}, det: {} };
+  if (!costBook || costBook.day !== dayName() || costBook.v !== COST_BOOK_V || !costBook.by || typeof costBook.by !== 'object') costBook = { day: dayName(), v: COST_BOOK_V, by: {}, det: {}, fix: {} };
   if (!costBook.det || typeof costBook.det !== 'object') costBook.det = {};
+  if (!costBook.fix || typeof costBook.fix !== 'object') costBook.fix = {};
   return costBook;
 }
 // det[对话 ID] = { 价目名: [美元, 调用数, 输入, 缓存读, 缓存写, 输出] }；同一个对话取调用数较多的那份
@@ -257,16 +259,27 @@ function mergeCostBook(b) {
   const book = readCostBook();
   if (book[UNREAD]) return; // cost-day.json 这次读不出来：不合并，免得盖掉文件里今天别的对话
   if (!b || b.day !== book.day || b.v !== COST_BOOK_V || !b.by || typeof b.by !== 'object') return;
+  // fix[对话 ID] = 1：页面确认这个对话是副本（/btw 旁支、分叉），交来的是只算它自己调用的数，直接替换（可以改小）；
+  // 替换过的对话以后只认带 fix 的数（和 statusbar.js 的 mergeBook 一样，代码审查 11-26）
+  const fix = b.fix && typeof b.fix === 'object' ? b.fix : {};
   let changed = false;
   for (const [id, v] of Object.entries(b.by)) {
     const n = Number(v);
-    if (!/^[0-9a-f-]{36}$/.test(id) || !(n >= 0) || book.by[id] >= n) continue;
+    if (!/^[0-9a-f-]{36}$/.test(id) || !(n >= 0)) continue;
+    if (fix[id]) {
+      if (book.by[id] === n && book.fix[id]) continue;
+      book.by[id] = n; book.fix[id] = 1; changed = true;
+      if (b.det && validDet(b.det[id])) book.det[id] = b.det[id];
+      else delete book.det[id]; // 没交来新明细（今天自己没有调用）：旧明细是按多算的数记的，删掉
+      continue;
+    }
+    if (book.fix[id] || book.by[id] >= n) continue;
     book.by[id] = n;
     changed = true;
   }
   if (b.det && typeof b.det === 'object') {
     for (const [id, d] of Object.entries(b.det)) {
-      if (!/^[0-9a-f-]{36}$/.test(id) || !validDet(d)) continue;
+      if (!/^[0-9a-f-]{36}$/.test(id) || !validDet(d) || fix[id] || book.fix[id]) continue;
       if (book.det[id] && detCalls(d) < detCalls(book.det[id])) continue;
       if (JSON.stringify(book.det[id]) === JSON.stringify(d)) continue;
       book.det[id] = d;
@@ -617,9 +630,16 @@ function updateHistory(book, buckets, acct, quotaAt) {
   const today = book.day;
   const day = h.days[today] || (h.days[today] = {});
   const s = summarizeBook(book);
-  // 文件里今天的数更大（账本被重置过）就保留文件里的。例外：今天的记录还是 v1 账本记的（bv 不是 2）时换一次，
-  // v1 把跨 0 点的一轮整轮算进了今天（见 readCostBook）。以前的日子不改：分不清是多算了还是对话被删了
-  if (!book[UNREAD] && (day.bv !== COST_BOOK_V || !(day.usd > s.usd))) { Object.assign(day, s); day.bv = COST_BOOK_V; } // 账本这次读不出来（UNREAD）就不动今天的数
+  // 文件里今天的数更大（账本被重置过）就保留文件里的。例外：
+  // - 今天的记录是旧版本账本记的（bv 不是当前版本）时换一次：v1 把跨 0 点的一轮整轮算进了今天，v2 把旁支、分叉复制来的调用算进了今天
+  //   （见 readCostBook）。但新版本账本还是空的（页面还没交来新账本，例如页面脚本还是旧版本）时先不换，免得今天被写成 0（代码审查 11-26）；
+  // - 账本里新纠正了副本（fix 的个数变了）时换一次，纠正后的数可以比原来小。
+  // 以前的日子不改：分不清是多算了还是对话被删了
+  const fixN = Object.keys(book.fix || {}).length;
+  const fresh = Object.keys(book.by || {}).length > 0;
+  if (!book[UNREAD] && (day.bv === COST_BOOK_V || fresh) && (day.bv !== COST_BOOK_V || !(day.usd > s.usd) || (day.fx || 0) !== fixN)) { // 账本这次读不出来（UNREAD）就不动今天的数
+    Object.assign(day, s); day.bv = COST_BOOK_V; day.fx = fixN;
+  }
   // 额度只在知道是哪个账号时才记（页面一般几秒内就拿到账号；拿到之前查到的额度跳过，下一次再记）
   if (buckets && buckets.length && acct) {
     const accts = h.accts || (h.accts = {});
@@ -1248,7 +1268,7 @@ function pageScript() {
 // - Theme 页的 updates 选 off（look.json 的 online = 'off'）：不再联网，也不用 remote/ 里存的，只用安装包自带的。
 // - 换了版本（安装了新的安装包）以后，remote/ 里存的词典和规则先不用，等下一次取到再用（新安装包里的可能更新）。
 // - 测试：环境变量 AGY_REMOTE_BASE 换成别的地址（例如本机起的 http://127.0.0.1:端口/），只试这一个地址。
-const PACK_VERSION = '2.0.12';
+const PACK_VERSION = '2.0.13';
 const REMOTE_DIR = path.join(DATA, 'remote');
 const REMOTE_STATE = path.join(REMOTE_DIR, 'state.json');
 const REMOTE_BASES = process.env.AGY_REMOTE_BASE ? [process.env.AGY_REMOTE_BASE] : [

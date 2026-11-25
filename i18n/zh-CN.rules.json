@@ -220,6 +220,10 @@
     "你的套餐：$1"
   ],
   [
+    "^Your plan: (Google AI [A-Za-z ]+|Free)$",
+    "你的套餐：$1"
+  ],
+  [
     "^Send feedback as (.+)$",
     "反馈身份：$1"
   ],
@@ -442,5 +446,49 @@
   [
     "^(\\S+): last step failed \\(error\\)$",
     "$1：上一步失败（出错）"
+  ],
+  [
+    "^Waiting on (\\d+) subagents?$",
+    "正在等待 $1 个子智能体"
+  ],
+  [
+    "^(\\d+) active goals?$",
+    "$1 个进行中的目标"
+  ],
+  [
+    "^(\\d+) tasks? running$",
+    "$1 个任务正在运行"
+  ],
+  [
+    "^Compacting · (.+)$",
+    "正在压缩 · $1"
+  ],
+  [
+    "^Model unavailable, retrying in (\\d+)s \\(attempt (\\d+)/(\\d+)\\)$",
+    "模型暂时不可用，$1 秒后重试（第 $2/$3 次）"
+  ],
+  [
+    "^Post #(\\d+) was not found$",
+    "没有找到第 $1 条消息"
+  ],
+  [
+    "^Loading earlier posts… \\((\\d+) older\\)$",
+    "正在加载更早的消息…（前面还有 $1 条）"
+  ],
+  [
+    "^Retry loading (\\d+) earlier posts?$",
+    "重新加载 $1 条更早的消息"
+  ],
+  [
+    "^Show (\\d+) earlier posts? \\((\\d+) older\\)$",
+    "显示 $1 条更早的消息（前面还有 $2 条）"
+  ],
+  [
+    "^Loading (\\d+) earlier posts?\\.$",
+    "正在加载 $1 条更早的消息。"
+  ],
+  [
+    "^(\\d+) earlier posts? could not be loaded\\.$",
+    "$1 条更早的消息没能加载。"
   ]
 ]

@@ -67,6 +67,9 @@ function agyStatusBar(CFG) {
   S.execAt = S.execAt || new Map();       // executionId → 这一轮里最近见到的一次调用的时间（executionId 是一轮共用的；费用估算按它选价）
   S.stepAt = S.stepAt || new Map();       // 对话 ID → Map(步骤序号 → 这一步开始的毫秒)：给每次调用定日子和选价（11-25 加，见 callTimes）
   const stepMap = (id) => { let m = S.stepAt.get(id); if (!m) { m = new Map(); S.stepAt.set(id, m); } return m; };
+  S.copyKind = S.copyKind || new Map();   // 对话 ID → 'side'：后台摘要里类型是 SIDE_QUESTION 的 /btw 旁支（见 ownFrom，11-26 加）
+  S.inhCut = S.inhCut || new Map();       // 副本 → 第一步自己的步骤序号（取到步骤时间以后确定，见 S.fetchInh）
+  S.execOwner = S.execOwner || new Map(); // executionId → 含有这次调用、创建最早的对话 { id, created }（分叉出来的对话和原对话共用 executionId）
   // 模型编号 → 最近一次见到的实际模型名。存在本地（localStorage），子代理的流没打开时也能显示实际名。
   const ENUM_KEY = 'agy.statusbar.enumModel';
   if (!S.enumModel) {
@@ -375,6 +378,7 @@ function agyStatusBar(CFG) {
   // 请求头按 start 帧里的 CSRF 令牌拼。2.35 页面里 __APP_CONFIG__.csrfToken 是空的，令牌只在应用自己的变量和 localStorage 里。
   const WATCH_WS = new Set(['StreamAgentStateUpdates', 'GetUserStatus', 'RetrieveUserQuotaSummary']);
   const LS_SVC = 'exa.language_server_pb.LanguageServerService';
+  // streamId 是应用用 crypto.randomUUID() 生成的（2.35.1 前端代码），几条连接之间也不会重复，所以不按连接分开记
   S.wsProc = S.wsProc || new Map();     // streamId → 方法名；'?' = 热更新前就开着、看形状不是状态流
   S.wsSeen = S.wsSeen || new WeakSet(); // 已经挂上旁听的 WebSocket 连接
   const grpcHeaders = (token, host) => {
@@ -405,8 +409,11 @@ function agyStatusBar(CFG) {
     S.lsFrom = 'storage';
     if (typeof S.fetchQuota === 'function') setTimeout(() => S.fetchQuota(), 1500);
   };
+  // 只认同源（本机后台）的 /connect-websocket（代码审查 11-26：原来只看路径，别的主机的同名连接也会改掉请求头）
+  const lsSocket = (ws) => { try { const u = new URL(String(ws.url || '')); return u.host === location.host && u.pathname === '/connect-websocket'; } catch (e) { return false; } };
+  S.wsUnk = S.wsUnk || new Map(); // 没见过 start 帧的流 → 已经看过几帧不像状态流
   S.wsSend = (ws, data) => {
-    if (typeof data !== 'string' || String(ws.url || '').indexOf('/connect-websocket') < 0) return;
+    if (typeof data !== 'string' || !lsSocket(ws)) return;
     if (!S.wsSeen.has(ws)) {
       S.wsSeen.add(ws);
       ws.addEventListener('message', (ev) => {
@@ -417,9 +424,11 @@ function agyStatusBar(CFG) {
     const f = JSON.parse(data);
     const m = f && f.type === 'start' && /^\/([\w.]+)\/(\w+)$/.exec(f.procedure || '');
     if (!m) return;
-    if (S.wsProc.size > 5000) { let n = 0; for (const k of S.wsProc.keys()) { S.wsProc.delete(k); if (++n >= 1000) break; } }
-    S.wsProc.set(f.streamId, m[2]);
-    if (/\.LanguageServerService$/.test(m[1])) takeWsHeaders(m[1], f.headers);
+    // 记录太多（end 帧丢了）时删掉最早的，但不删正在旁听的流（审查：原来按先后删，长时间开着的状态流也会被删）
+    if (S.wsProc.size > 5000) { let n = 0; for (const [k, v] of S.wsProc) { if (WATCH_WS.has(v)) continue; S.wsProc.delete(k); if (++n >= 1000) break; } }
+    const ls = /\.LanguageServerService$/.test(m[1]);
+    S.wsProc.set(f.streamId, ls ? m[2] : '?'); // 只给本机后台服务记方法名；别的服务的同名方法不旁听
+    if (ls) takeWsHeaders(m[1], f.headers);
   };
   // 收到的帧开头是 {"streamId":"…","type":"…"：先按开头判断，只解析要旁听的流（别的流的大帧不解析）
   const WS_HEAD = /^\{"streamId":"([^"]+)","type":"(\w+)"/;
@@ -428,7 +437,7 @@ function agyStatusBar(CFG) {
     let f = null, sid, type;
     const h = WS_HEAD.exec(s.slice(0, 120));
     if (h) { sid = h[1]; type = h[2]; } else { f = JSON.parse(s); sid = f && f.streamId; type = f && f.type; }
-    if (type === 'end') { S.wsProc.delete(sid); return; }
+    if (type === 'end') { S.wsProc.delete(sid); S.wsUnk.delete(sid); return; }
     if (type !== 'data') return;
     let name = S.wsProc.get(sid);
     if (name !== undefined && !WATCH_WS.has(name)) return;
@@ -436,12 +445,19 @@ function agyStatusBar(CFG) {
     const p = f && f.payload;
     if (!p || typeof p !== 'object') return;
     if (name === undefined) {
-      // 热更新到这一版之前就开着的流（没看到它的 start 帧）：带 update.conversationId 的是状态流，别的记成 '?' 以后不再解析
-      if (p.update && p.update.conversationId) name = 'StreamAgentStateUpdates';
-      else if (Object.keys(p).length) name = '?';
-      else return;
+      // 热更新到这一版之前就开着的流（没看到它的 start 帧）：update 里有 conversationId 和别的状态字段的是状态流；
+      // 连续 3 帧都不像才记成 '?' 以后不再解析（审查：原来第一帧不像就永远不认，状态流第一帧可能是确认包）
+      // 空 payload（心跳）不算
+      const u = p.update;
+      if (u && u.conversationId && Object.keys(u).length > 1) name = 'StreamAgentStateUpdates';
+      else if (!Object.keys(p).length) return;
+      else {
+        const n = (S.wsUnk.get(sid) || 0) + 1;
+        if (n >= 3) { S.wsUnk.delete(sid); S.wsProc.set(sid, '?'); } else S.wsUnk.set(sid, n);
+        return;
+      }
+      S.wsUnk.delete(sid);
       S.wsProc.set(sid, name);
-      if (name === '?') return;
     }
     S.onMessage(name, p);
   };
@@ -552,7 +568,13 @@ function agyStatusBar(CFG) {
           const prev = S.casStatus.get(id);
           if (!prev || prev.status !== status) changed = true;
           S.casStatus.set(id, { status, at: now });
-          S.casMeta.set(id, { created: tms(s.createdTime), modified: tms(s.lastModifiedTime), title: String(s.summary || '').slice(0, 120) });
+          const pm = S.casMeta.get(id);
+          const created = tms(s.createdTime);
+          S.casMeta.set(id, { created, modified: tms(s.lastModifiedTime), title: String(s.summary || '').slice(0, 120), steps: +s.stepCount || 0 });
+          if (!pm || pm.created !== created) noteAll(id); // 调用列表比摘要先到时没登记 executionId，这里补上（见 ownFrom）
+          if (/SIDE_QUESTION$/.test(String(s.trajectoryType || ''))) S.copyKind.set(id, 'side'); // /btw 旁支（见 ownFrom）
+          const sq = s.annotations && s.annotations.sideQuestionCascadeIds; // 原对话摘要列出的旁支（旁支自己的摘要可能还没来）
+          if (Array.isArray(sq)) for (const x of sq) if (typeof x === 'string') { S.copyKind.set(x, 'side'); S.copyParent.set(x, id); }
           if (ACTIVE.test(status)) active = true;
           const tm = s.trajectoryMetadata || {};
           if (tm.rootConversationId && tm.rootConversationId !== id) S.rootOf.set(id, tm.rootConversationId);
@@ -689,6 +711,7 @@ function agyStatusBar(CFG) {
         const g = j && Array.isArray(j.generatorMetadata) ? j.generatorMetadata : null;
         if (!g) return;
         g.forEach((m, i) => { c.list[off + i] = slimGen(m); });
+        noteExecs(id, c.list);
         c.at = Date.now();
         c.more = g.length > 1; // 一次补上了好几条：再查一次，确认已经到最后
         S.render();
@@ -759,7 +782,9 @@ function agyStatusBar(CFG) {
     const meta = convMeta(id);
     const d0 = dayStart();
     if (!c || !c.list.length || !meta || !(meta.modified >= d0)) return null;
-    const list = c.list;
+    const k0 = ownFrom(id, c.list, meta); // 副本：复制来的调用不用补时间（见 ownFrom）
+    if (k0 < 0) return null;
+    const list = k0 ? c.list.slice(k0) : c.list;
     const ts = callTimes(id, list, meta, d0);
     const need = (i) => !!list[i] && (ts[i].day == null || (ts[i].day === 'today' && ts[i].priceAt == null));
     let b = list.length - 1;
@@ -801,6 +826,151 @@ function agyStatusBar(CFG) {
         S.render();
       })
       .then(() => { S.timeBusy.delete(id); }, () => { note(false); S.timeBusy.delete(id); });
+  };
+
+  // ---------- 副本：/btw 旁支、分叉出来的对话（2026-11-26 加） ----------
+  // 后台建旁支（StartCascade 带 baseTrajectoryIdentifier）或分叉（ForkConversation）时，把原对话的步骤和调用元数据原样复制过来
+  // （executionId、步骤时间都不变），再接着放自己的步骤。复制来的那一段排在最前面，步骤时间都早于这个对话的创建时间。
+  // 原来把它们当成这个对话的调用：旁支是今天建的，复制来的旧调用没有自己的时间，按创建时间算成了今天
+  // （11-26 实测：一个旁支自己只花了 $1.36，今天花费多出 $12.4），调用明细里同一次调用也会在原对话和副本里各出现一次。
+  // 旁支：自己的摘要类型是 SIDE_QUESTION；原对话摘要的 annotations.sideQuestionCascadeIds 也列出它（见 S.fetchCascades）。
+  // 分叉：类型就是普通对话，摘要里没有指向原对话的字段，只能靠时间和 executionId 认。
+  // 11-26 用真实数据核对：199 个取过全部步骤时间的对话（186 个子智能体）里，步骤早于创建时间的只有 3 个副本；
+  // 171 对父对话和子智能体之间没有共用的 executionId。
+  // 代码审查（Devin、Grok，11-26）后改成：今天新建、还没确认是不是副本的对话先不算（不进账本），确认了再算；
+  // 确认是副本的，账本里的数可以改小（见 mergeBook 的 fix）。
+  S.copyParent = S.copyParent || new Map(); // 旁支 → 原对话（原对话摘要的 annotations.sideQuestionCascadeIds）
+  // 子智能体：rootConversationId 指向别的对话（根对话、旁支、分叉的是自己；状态流里根对话也会记一条指向自己的）
+  const isSub = (id) => S.subInfo.has(id) || (S.rootOf.has(id) && S.rootOf.get(id) !== id);
+  const noteExecs = (id, list) => {
+    const m = S.casMeta.get(id);
+    if (!m || !m.created) return;
+    for (const g of list) {
+      if (!g || !g.exec) continue;
+      const o = S.execOwner.get(g.exec);
+      if (!o || m.created < o.created) S.execOwner.set(g.exec, { id, created: m.created });
+    }
+  };
+  // 热更新到这一版时，已经取到的调用列表也登记一遍（S.casMeta 在这次页面会话里不删，删掉的对话也还有创建时间；
+  // 刷新页面以后删掉的对话不在摘要里，就不登记了）。摘要后到的对话在 S.fetchCascades 里补登记。
+  const noteAll = (id) => {
+    const c = S.costs.get(id);
+    if (c && Array.isArray(c.list)) noteExecs(id, c.list);
+    const d = S.detCache && S.detCache.get(id);
+    if (d && Array.isArray(d.gens)) noteExecs(id, d.gens);
+  };
+  for (const id of S.costs ? S.costs.keys() : []) noteAll(id);
+  for (const id of S.detCache ? S.detCache.keys() : []) noteAll(id);
+  // 第一次调用（列表里第一条有步骤号的）和它的步骤时间（状态流、补取、调用明细取过的步骤里有）
+  const stepTime = (id, step) => {
+    const sm = S.stepAt.get(id), dc = S.detCache && S.detCache.get(id);
+    return (sm && sm.get(step)) || (dc && dc.times && dc.times.get(step)) || 0;
+  };
+  const firstCall = (id, list) => {
+    const g0 = list.find((g) => g && g.step >= 0) || null;
+    return { g0, t0: g0 ? stepTime(id, g0.step) : 0 };
+  };
+  // 有没有“是副本”的证据：旁支；第一次调用的步骤时间早于创建时间；第一次调用的 executionId 属于别的、更早建的对话
+  // （子智能体不看 executionId：审查提到子智能体的调用可能也在父对话里，虽然实测没有）
+  // created：摘要里的创建时间（没有是 0）；born：比先后用的创建时间（摘要里没有就用对话文件时间）。
+  // 不能只看“executionId 属于别的对话”：摘要里没有的旧对话被分叉后，分叉会先登记成主人，旧对话自己反而像副本
+  const copyEvidence = (id, g0, t0, created, born) => {
+    if (S.copyKind.has(id)) return true;
+    if (t0 && created && t0 < created) return true;
+    return !!(g0 && !isSub(id) && execFromOlder(id, g0, born));
+  };
+  const execFromOlder = (id, g, born) => {
+    const o = g && g.exec && S.execOwner.get(g.exec);
+    return !!(o && o.id !== id && born && o.created < born);
+  };
+  // 分界：前 k 条是复制来的（k = 第一次自己的调用的下标）
+  const idxFrom = (list, step) => { let k = 0; while (k < list.length && (!list[k] || list[k].step < step)) k++; return k; };
+  S.metaWait = S.metaWait || new Map(); // 只有对话文件、摘要里还没有的今天新对话 → 第一次见到的时间
+  // 第一次自己的调用在 list 里的下标：0 = 普通对话（或确认过不是副本）；k > 0 = 副本，前 k 条是复制来的；
+  // -1 = 还没确认（先不算，正在取步骤时间、或在等摘要 / 原对话的调用列表）
+  const ownFrom = (id, list, meta) => {
+    if (!list.length) return 0;
+    const m = S.casMeta.get(id);
+    const created = (m && m.created) || 0; // 创建时间只信后台摘要里的（对话文件时间不准，可能晚于第一步好几分钟）
+    const cut = S.inhCut.get(id);
+    if (cut && cut.created === created && created) { // 摘要里的创建时间变了（例如对话被恢复）就重新确认
+      if (!cut.giveUp) return idxFrom(list, cut.step);
+      // 连续取不到步骤时间、放弃了的副本：只算已经知道时间、不早于创建时间的调用
+      let k = 0;
+      while (k < list.length && !(list[k] && stepTime(id, list[k].step) >= created)) k++;
+      return k;
+    }
+    const { g0, t0 } = firstCall(id, list);
+    const born = created || (meta && meta.created) || 0;
+    const ev = copyEvidence(id, g0, t0, created, born);
+    if (created) {
+      if (ev) { S.fetchInh(id, list, created, 'tail'); return -1; }
+      if (t0 || !g0) return 0; // 第一次调用的时间不早于创建时间：普通对话
+      // 今天新建、第一次调用还不知道时间：可能是认不出的分叉（原对话没加载时 executionId 对不上），确认前先不算（审查 A）。
+      // 子智能体实测都不是副本，不用确认；以前的对话里复制来的调用都在建对话之前，按调用时间本来就不算今天
+      if (created >= dayStart() && !isSub(id)) { S.fetchInh(id, list, created, 'full'); return -1; }
+      return 0;
+    }
+    // 摘要里没有创建时间（只有对话文件）：按 executionId 找分界（复制来的调用的 executionId 属于原对话）
+    if (ev) {
+      const p = S.copyParent.get(id);
+      if (p && !S.costs.has(p) && typeof S.fetchCost === 'function') S.fetchCost(p); // 原对话的调用列表还没取：取来登记 executionId
+      let k = 0;
+      while (k < list.length && (!list[k] || execFromOlder(id, list[k], born || Infinity))) k++;
+      return k > 0 ? k : S.copyKind.has(id) ? -1 : 0; // 旁支，但原对话的调用列表还没登记：先不算
+    }
+    if (meta && meta.created >= dayStart() && !isSub(id)) { // 今天新建、摘要还没来：最多等 3 分钟
+      const w = S.metaWait.get(id) || Date.now();
+      S.metaWait.set(id, w);
+      if (Date.now() - w < 180000) return -1;
+    }
+    return 0;
+  };
+  // 找分界（确认是不是副本）。mode：
+  //   'tail'：有副本的证据。从最后几步往前取步骤时间（8 步、32 步、128 步……），这一段里出现早于创建时间的步骤就停，
+  //           那一步之后都是自己的；副本自己的部分一般很短，取的数据很少。取到第 0 步都没有早于创建时间的，就不是副本。
+  //   'full'：今天新建、没有证据、只是还没确认。从第一次调用那一步取到最后（普通对话一次就确认，分叉也一次就找到分界）。
+  // 空列表算没取到（审查：原来当成“不是副本”）。没取到 60 秒后再试；连续 3 次没取到：'tail' 只算知道时间、不早于创建时间的调用，
+  // 'full' 当普通对话全算（删掉的普通对话也照算）。同一个对话同时只取一份，每次请求最多等 2 分钟（审查：原来慢请求会叠加）。
+  S.inhRun = S.inhRun || new Map(); // 对话 → { running, failedAt, fails }（不用旧名 inhBusy：热更新前的旧版本在里面存的是时间戳）
+  const INH_WAIT = 120000;
+  S.fetchInh = (id, list, created, mode) => {
+    const b = S.inhRun.get(id) || { running: false, failedAt: 0, fails: 0 };
+    S.inhRun.set(id, b);
+    if (b.running || (b.failedAt && Date.now() - b.failedAt < 60000)) return;
+    if (b.fails >= 3) {
+      S.inhCut.set(id, mode === 'tail' ? { created, giveUp: true } : { created, step: 0 });
+      return;
+    }
+    b.running = true;
+    const sm = stepMap(id);
+    const steps = list.filter((g) => g && g.step >= 0).map((g) => g.step);
+    let top = Math.max(0, ((S.casMeta.get(id) || {}).steps || 0) - 1);
+    let first = Infinity;
+    for (const s of steps) { if (s > top) top = s; if (s < first) first = s; }
+    if (!Number.isFinite(first)) first = 0;
+    const seg = (from) => Promise.race([lsCall('GetCascadeTrajectorySteps', { cascadeId: id, stepOffset: from }), new Promise((r) => setTimeout(() => r(null), INH_WAIT))]);
+    (async () => {
+      for (let m = 8; ; m *= 4) {
+        const from = mode === 'full' ? first : Math.max(0, top - m + 1);
+        const j = await seg(from);
+        const st = j && Array.isArray(j.steps) ? j.steps : null;
+        if (!st || !st.length) return false;
+        let lastOld = -1, seen = 0;
+        st.forEach((x, i) => {
+          const at = x && x.metadata && x.metadata.createdAt ? tms(x.metadata.createdAt) : 0;
+          if (!at) return;
+          seen++;
+          sm.set(from + i, at);
+          if (at < created) lastOld = from + i;
+        });
+        if (!seen) return false;
+        if (lastOld >= 0 || from === 0 || mode === 'full') { S.inhCut.set(id, { created, step: lastOld + 1 }); return true; }
+      }
+    })().then((ok) => {
+      b.running = false;
+      if (ok) { b.fails = 0; b.failedAt = 0; S.render(); } else { b.fails++; b.failedAt = Date.now(); }
+    }, () => { b.running = false; b.fails++; b.failedAt = Date.now(); });
   };
 
   // 定时器每秒调一次：正在显示的对话树 + 今天动过的对话里，有调用在我们上次查之后结束、对话又被改过、
@@ -1388,10 +1558,14 @@ function agyStatusBar(CFG) {
     for (const id of ids) {
       const c = S.costs.get(id);
       if (!c || !c.list.length) continue;
+      const meta = convMeta(id);
+      const k0 = ownFrom(id, c.list, meta); // 副本只算自己的调用；分界还不知道时先不算（见 ownFrom）
+      if (k0 < 0) continue;
+      const list = k0 ? c.list.slice(k0) : c.list;
       t.cascades++;
-      const ts = callTimes(id, c.list, convMeta(id), dayStart()); // 选价按每次调用自己的时间（见 callTimes，审查 A2）
-      for (let i = 0; i < c.list.length; i++) {
-        const g = c.list[i];
+      const ts = callTimes(id, list, meta, dayStart()); // 选价按每次调用自己的时间（见 callTimes，审查 A2）
+      for (let i = 0; i < list.length; i++) {
+        const g = list[i];
         if (!g) continue;
         t.calls++;
         const x = ts[i];
@@ -1416,25 +1590,37 @@ function agyStatusBar(CFG) {
   const dayName = () => { const d = new Date(); return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()); };
   const detCalls = (d) => { let n = 0; if (d && typeof d === 'object') for (const k in d) n += +(d[k] && d[k][1]) || 0; return n; };
   // 账本版本：v2（2026-11-25）起每次调用按自己的时间定日子。v1 的账本里跨 0 点的一轮整轮算进了今天，而且合并时取较大的数，
-  // 改正以后也盖不掉，所以 v1 的账本不再合并（今天的数从头重算一次；注入程序那边同样丢掉 v1 的 cost-day.json）
-  const BOOK_V = 2;
+  // 改正以后也盖不掉，所以 v1 的账本不再合并（今天的数从头重算一次；注入程序那边同样丢掉 v1 的 cost-day.json）。
+  // v3（2026-11-26）：/btw 旁支、分叉出来的对话不再把复制来的原对话调用算进今天（见 ownFrom），v2 账本里多算的数同样盖不掉，丢掉重算
+  const BOOK_V = 3;
+  // fix = { 对话 ID: 1 }：这个对话确认是副本、交来的是只算自己调用的数。同一个对话取较大的数挡不住纠正
+  // （代码审查 11-26：确认前短暂多算过一次，改对了也写不回去），所以带 fix 的直接替换（可以改小），
+  // 替换过的对话以后只认带 fix 的数，不让没纠正的旧数（别的窗口、localStorage、注入程序的文件）盖回去。
   const mergeBook = (into, b) => {
     if (!b || b.day !== into.day || (b.v || 1) !== into.v || !b.by || typeof b.by !== 'object') return;
     if (!into.det || typeof into.det !== 'object') into.det = {};
+    if (!into.fix || typeof into.fix !== 'object') into.fix = {};
+    const fix = b.fix && typeof b.fix === 'object' ? b.fix : {};
+    const det = b.det && typeof b.det === 'object' ? b.det : {};
     for (const [id, v] of Object.entries(b.by)) {
       const n = Number(v);
-      if (n >= 0 && !(into.by[id] >= n)) into.by[id] = n;
-    }
-    if (b.det && typeof b.det === 'object') {
-      for (const [id, d] of Object.entries(b.det)) {
-        if (d && typeof d === 'object' && (!into.det[id] || detCalls(d) >= detCalls(into.det[id]))) into.det[id] = d;
+      if (!(n >= 0)) continue;
+      if (fix[id]) { // 副本纠正后的数：直接替换；没带明细（今天自己没有调用）就删掉按多算的数记的旧明细
+        into.by[id] = n; into.fix[id] = 1;
+        if (det[id] && typeof det[id] === 'object') into.det[id] = det[id]; else delete into.det[id];
+        continue;
       }
+      if (!into.fix[id] && !(into.by[id] >= n)) into.by[id] = n;
+    }
+    for (const [id, d] of Object.entries(det)) {
+      if (fix[id] || into.fix[id]) continue;
+      if (d && typeof d === 'object' && (!into.det[id] || detCalls(d) >= detCalls(into.det[id]))) into.det[id] = d;
     }
   };
   const loadBook = () => {
     const day = dayName();
     if (!S.costBook || S.costBook.day !== day || S.costBook.v !== BOOK_V) {
-      const book = { day, v: BOOK_V, by: {}, det: {} };
+      const book = { day, v: BOOK_V, by: {}, det: {}, fix: {} };
       try { mergeBook(book, JSON.parse(localStorage.getItem(DAY_KEY) || 'null')); } catch (e) {}
       S.costBook = book;
     }
@@ -1449,6 +1635,7 @@ function agyStatusBar(CFG) {
     const d0 = dayStart();
     const by = {};
     const detBy = {};
+    const fixBy = {};
     let calls = 0, undated = 0, loading = 0;
     // 今天动过的对话 = 后台摘要里最后修改时间在 0 点以后的 + 注入程序从磁盘找到的（对话日志和对话库文件，摘要里不一定有）
     const dayIds = new Set(S.todayIds || []);
@@ -1460,11 +1647,15 @@ function agyStatusBar(CFG) {
       if (!(meta.modified >= d0)) continue;
       const c = S.costs.get(id);
       if (!c || !c.list.length) { loading++; continue; }
+      const k0 = ownFrom(id, c.list, meta); // 副本（/btw 旁支、分叉）只算自己的调用；还没确认时算“正在加载”、不进账本
+      if (k0 < 0) { loading++; continue; }
+      if (k0 > 0) fixBy[id] = 1; // 确认是副本：账本里这个对话的数可以改小（见 mergeBook）
+      const list = k0 ? c.list.slice(k0) : c.list;
       let usd = 0;
       const det = {};
-      const ts = callTimes(id, c.list, meta, d0); // 每次调用的时间（见 callTimes）
-      for (let i = 0; i < c.list.length; i++) {
-        const g = c.list[i];
+      const ts = callTimes(id, list, meta, d0); // 每次调用的时间（见 callTimes）
+      for (let i = 0; i < list.length; i++) {
+        const g = list[i];
         if (!g) continue;
         const x = ts[i];
         if (x.day == null) { undated++; continue; } // 还不知道是不是今天的（跨 0 点、在补取时间）
@@ -1483,9 +1674,9 @@ function agyStatusBar(CFG) {
       detBy[id] = det;
     }
     const book = loadBook();
-    const before = JSON.stringify([book.by, book.det]);
-    mergeBook(book, { day: book.day, v: BOOK_V, by, det: detBy });
-    const after = JSON.stringify([book.by, book.det]);
+    const before = JSON.stringify([book.by, book.det, book.fix]);
+    mergeBook(book, { day: book.day, v: BOOK_V, by, det: detBy, fix: fixBy });
+    const after = JSON.stringify([book.by, book.det, book.fix]);
     if (after !== before) { try { localStorage.setItem(DAY_KEY, JSON.stringify(book)); } catch (e) {} }
     const vals = Object.values(book.by);
     return { usd: vals.reduce((a, b) => a + b, 0), convs: vals.filter((v) => v > 0).length, calls, undated, loading };
@@ -2314,6 +2505,7 @@ function agyStatusBar(CFG) {
     const list = (g && Array.isArray(g.generatorMetadata)) ? g.generatorMetadata : null;
     if (!list) throw Error('no call metadata');
     list.forEach((m, i) => { c.gens[off + i] = slimCall(m); });
+    noteExecs(id, c.gens);
     // 步骤：从还没有时间的最早那次调用的步骤开始取到最后（第一次取时一般是整个对话）
     const need = c.gens.filter((x) => x && x.step >= 0 && !c.times.has(x.step)).map((x) => x.step);
     if (need.length) {
@@ -2355,11 +2547,15 @@ function agyStatusBar(CFG) {
       try {
         const c = await loadConv(id);
         // 缓存没命中按整个对话找（当天第一次调用要和前一天最后那次比），再挑出这一天的
+        // 早于对话创建时间的调用是从原对话复制来的（/btw 旁支、分叉，见 ownFrom），原对话里已经有了，跳过
+        // 摘要里没有这个对话（没有可信的创建时间）时，改看 executionId 是不是属于更早建的对话（审查：原来这时不过滤）
+        const born = (S.casMeta.get(id) || {}).created || 0;
+        const fborn = born || (convMeta(id) || {}).created || 0;
         const list = [];
         for (const x of c.gens) {
           if (!x) continue;
           const at = c.times.get(x.step) || 0;
-          if (at > 0) list.push({ x, at, ttft: x.ttft, stream: x.stream, step: x.step, cc: callCost(x.usage, callNames(x.resp, x.key, x.exec), at) });
+          if (at > 0 && !(at < born) && !(!born && execFromOlder(id, x, fborn || Infinity))) list.push({ x, at, ttft: x.ttft, stream: x.stream, step: x.step, cc: callCost(x.usage, callNames(x.resp, x.key, x.exec), at) });
         }
         list.sort((a, b) => a.at - b.at || a.step - b.step);
         const miss = missScan(list, { user: c.user, ckpt: c.ckpt });
