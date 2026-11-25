@@ -1248,7 +1248,7 @@ function pageScript() {
 // - Theme 页的 updates 选 off（look.json 的 online = 'off'）：不再联网，也不用 remote/ 里存的，只用安装包自带的。
 // - 换了版本（安装了新的安装包）以后，remote/ 里存的词典和规则先不用，等下一次取到再用（新安装包里的可能更新）。
 // - 测试：环境变量 AGY_REMOTE_BASE 换成别的地址（例如本机起的 http://127.0.0.1:端口/），只试这一个地址。
-const PACK_VERSION = '2.0.11';
+const PACK_VERSION = '2.0.12';
 const REMOTE_DIR = path.join(DATA, 'remote');
 const REMOTE_STATE = path.join(REMOTE_DIR, 'state.json');
 const REMOTE_BASES = process.env.AGY_REMOTE_BASE ? [process.env.AGY_REMOTE_BASE] : [

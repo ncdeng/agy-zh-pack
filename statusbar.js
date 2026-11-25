@@ -351,7 +351,7 @@ function agyStatusBar(CFG) {
 
   // 请求发出前：记下应用访问后台用的地址和请求头（自己查额度时照用）。请求本身原样发出。
   S.beforeFetch = (url, init) => {
-    if (!init) return init;
+    if (!init || init.headers === S.lsHeaders) return init; // 插件自己发的请求（lsCall 等）不用再记
     try {
       const h = {};
       new Headers(init.headers || {}).forEach((v, k) => { if (k !== 'content-length') h[k] = v; });
@@ -359,10 +359,91 @@ function agyStatusBar(CFG) {
         const first = !S.lsHeaders;
         S.lsHeaders = h;
         S.lsService = url.replace(/\/[A-Za-z]+(\?.*)?$/, '');
+        S.lsFrom = 'http';
         if (first && typeof S.fetchQuota === 'function') setTimeout(() => S.fetchQuota(), 1500);
       }
     } catch (e) {}
     return init;
+  };
+
+  // ---------- 2.35 起：应用经 WebSocket 访问后台 ----------
+  // Antigravity 2.35.0（2026-11-23）起，页面访问本机后台默认走一条 WebSocket（同源的 /connect-websocket），连不上才退回
+  // 上面的 HTTP（grpc-web+json）；地址带 ?useWebSocket=false 时只走 HTTP。帧都是 JSON 文本：
+  //   发出 {streamId, type:"start", procedure:"/服务/方法", stream, headers:{名字:[值]}, payload} 和 ping / 取消；
+  //   收到 {streamId, type:"data", payload}、{streamId, type:"end", statusCode, error} 和 pong。
+  // payload 和 HTTP 返回的 JSON 一样，直接交给 S.onMessage。插件自己查数据（lsCall、fetchQuota）照旧走 HTTP，
+  // 请求头按 start 帧里的 CSRF 令牌拼。2.35 页面里 __APP_CONFIG__.csrfToken 是空的，令牌只在应用自己的变量和 localStorage 里。
+  const WATCH_WS = new Set(['StreamAgentStateUpdates', 'GetUserStatus', 'RetrieveUserQuotaSummary']);
+  const LS_SVC = 'exa.language_server_pb.LanguageServerService';
+  S.wsProc = S.wsProc || new Map();     // streamId → 方法名；'?' = 热更新前就开着、看形状不是状态流
+  S.wsSeen = S.wsSeen || new WeakSet(); // 已经挂上旁听的 WebSocket 连接
+  const grpcHeaders = (token, host) => {
+    const h = { 'content-type': 'application/grpc-web+json', 'x-grpc-web': '1', 'x-codeium-csrf-token': token };
+    if (host) h['x-host-client'] = host;
+    return h;
+  };
+  // start 帧的请求头：只取令牌和 x-host-client（其余是这一次调用自己的，比如超时）
+  const takeWsHeaders = (svc, hdrs) => {
+    const one = (k) => { const v = hdrs && hdrs[k]; return v == null ? '' : String(Array.isArray(v) ? v[0] : v); };
+    const token = one('x-codeium-csrf-token');
+    if (!token) return;
+    const first = !S.lsHeaders;
+    S.lsHeaders = grpcHeaders(token, one('x-host-client'));
+    S.lsService = location.origin + '/' + svc;
+    S.lsFrom = 'ws';
+    if (first && typeof S.fetchQuota === 'function') setTimeout(() => S.fetchQuota(), 1500);
+  };
+  // 还没看到应用发请求（刚热更新、应用空闲）时，先用 localStorage 里的令牌；看到 start 帧或 HTTP 请求就换成应用正在用的
+  const lsFromStorage = () => {
+    if (S.lsHeaders) return;
+    let token = '';
+    try { token = localStorage.getItem('agy_session_csrf_token') || ''; } catch (e) {}
+    if (!token) token = (window.__APP_CONFIG__ && window.__APP_CONFIG__.csrfToken) || '';
+    if (!token) return;
+    S.lsHeaders = grpcHeaders(token, '');
+    S.lsService = location.origin + '/' + LS_SVC;
+    S.lsFrom = 'storage';
+    if (typeof S.fetchQuota === 'function') setTimeout(() => S.fetchQuota(), 1500);
+  };
+  S.wsSend = (ws, data) => {
+    if (typeof data !== 'string' || String(ws.url || '').indexOf('/connect-websocket') < 0) return;
+    if (!S.wsSeen.has(ws)) {
+      S.wsSeen.add(ws);
+      ws.addEventListener('message', (ev) => {
+        try { if (typeof S.wsRecv === 'function') S.wsRecv(ev.data); } catch (e) { /* 数据格式变了就忽略 */ }
+      });
+    }
+    if (data.indexOf('"start"') < 0) return;
+    const f = JSON.parse(data);
+    const m = f && f.type === 'start' && /^\/([\w.]+)\/(\w+)$/.exec(f.procedure || '');
+    if (!m) return;
+    if (S.wsProc.size > 5000) { let n = 0; for (const k of S.wsProc.keys()) { S.wsProc.delete(k); if (++n >= 1000) break; } }
+    S.wsProc.set(f.streamId, m[2]);
+    if (/\.LanguageServerService$/.test(m[1])) takeWsHeaders(m[1], f.headers);
+  };
+  // 收到的帧开头是 {"streamId":"…","type":"…"：先按开头判断，只解析要旁听的流（别的流的大帧不解析）
+  const WS_HEAD = /^\{"streamId":"([^"]+)","type":"(\w+)"/;
+  S.wsRecv = (s) => {
+    if (typeof s !== 'string') return;
+    let f = null, sid, type;
+    const h = WS_HEAD.exec(s.slice(0, 120));
+    if (h) { sid = h[1]; type = h[2]; } else { f = JSON.parse(s); sid = f && f.streamId; type = f && f.type; }
+    if (type === 'end') { S.wsProc.delete(sid); return; }
+    if (type !== 'data') return;
+    let name = S.wsProc.get(sid);
+    if (name !== undefined && !WATCH_WS.has(name)) return;
+    if (!f) f = JSON.parse(s);
+    const p = f && f.payload;
+    if (!p || typeof p !== 'object') return;
+    if (name === undefined) {
+      // 热更新到这一版之前就开着的流（没看到它的 start 帧）：带 update.conversationId 的是状态流，别的记成 '?' 以后不再解析
+      if (p.update && p.update.conversationId) name = 'StreamAgentStateUpdates';
+      else if (Object.keys(p).length) name = '?';
+      else return;
+      S.wsProc.set(sid, name);
+      if (name === '?') return;
+    }
+    S.onMessage(name, p);
   };
 
   // 额度（5 小时、每周）：后台接口 RetrieveUserQuotaSummary。应用只在打开“查看用量”时才调，
@@ -762,6 +843,16 @@ function agyStatusBar(CFG) {
       try { return typeof S.onResponse === 'function' ? S.onResponse(url, res) : res; } catch (e) { return res; }
     });
   };
+  // WebSocket 旁听（2.35 起）只装一次（S 跨热更新保留，不看 FIRST：v2.0.11 及以前注入的窗口热更新后也要装上）。
+  // 包 send 不包构造函数：热更新时连接早已建好，应用下一次发帧就能拿到这条连接；断线重连的新连接也一样。
+  if (!S.wsTapped && typeof WebSocket === 'function' && WebSocket.prototype && typeof WebSocket.prototype.send === 'function') {
+    S.wsTapped = true;
+    const origSend = WebSocket.prototype.send;
+    WebSocket.prototype.send = function (data) {
+      try { if (typeof S.wsSend === 'function') S.wsSend(this, data); } catch (e) { /* 旁听出错不影响发送 */ }
+      return origSend.apply(this, arguments);
+    };
+  }
 
   // ---------- 显示 ----------
   const fmtK = (n) => {
@@ -3579,6 +3670,7 @@ ${T}{position:fixed; z-index:2147483600; pointer-events:none; box-sizing:border-
     let ticks = 0;
     S.timer = setInterval(() => {
       ticks++;
+      if (!S.lsHeaders && ticks >= 3) lsFromStorage(); // 2.35 起：3 秒还没看到应用发请求，先用 localStorage 里的令牌
       // 按时间判断（不按 ticks）：窗口在后台时 Chromium 把定时器压到约每分钟一次，按 ticks 算会变成半小时才查一次
       if (Date.now() - (S.quotaAskAt || 0) >= 170000 && (!S.quota || Date.now() - S.quota.at > 170000)) S.fetchQuota();
       const casEvery = S.casActive || (S.lastConv && isRunning(S.lastConv)) ? 3000 : 15000;
