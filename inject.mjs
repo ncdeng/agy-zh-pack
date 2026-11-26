@@ -194,8 +194,13 @@ const EMPTY = { dict: null, rules: [] };
 
 // 传给状态栏的参数。costDay：今天花费的账本（见下面“今天花费的账本”）；history：最近 31 天的用量（见“每天用量历史”）。
 function barConfig() {
-  return { costDay: readCostBook(), history: recentHistory(), look: readLook(), remote: remoteForPage() };
+  return { costDay: readCostBook(), history: recentHistory(), look: readLook(), remote: remoteForPage(), barOff: !barOn() };
 }
+// 插件面板的两个开关（v2.0.15，存在 look.json）：中文界面、显示状态栏
+const zhOn = () => (readLook() || {}).zh !== 'off';
+const barOn = () => (readLook() || {}).statusbar !== 'off';
+// 关汉化时先把译文换回原文（setPaused），再停掉翻译器（disable 只停、不换回）
+const I18N_OFF_JS = 'window.__agyI18n && (window.__agyI18n.setPaused && window.__agyI18n.setPaused(true, true), window.__agyI18n.disable());';
 
 // ---------- 状态栏外观（2026-11-22 加） ----------
 // look.json：{ pal 配色, skin 外形, bar 进度条, dense 信息密度, icons 图标整套（v1.5 是 true / false，v1.6 起是 material / outline / unicode / off）,
@@ -211,9 +216,13 @@ function readLook() {
   }
   return lookCache;
 }
+// zh（中文界面）、statusbar（显示状态栏）：插件面板的两个开关（v2.0.15），'off' = 关。页面的 Theme 页不知道这两项，
+// 页面交来的外观里没有它们时沿用文件里的，免得在 Theme 页换个配色就把开关冲掉
 function saveLook(pick) {
   const keep = {};
-  for (const k of ['pal', 'skin', 'bar', 'dense', 'online']) if (typeof pick[k] === 'string') keep[k] = pick[k].slice(0, 24);
+  const prev = readLook() || {};
+  for (const k of ['pal', 'skin', 'bar', 'dense', 'online', 'zh', 'statusbar']) if (typeof pick[k] === 'string') keep[k] = pick[k].slice(0, 24);
+  for (const k of ['zh', 'statusbar']) if (keep[k] === undefined && typeof prev[k] === 'string') keep[k] = prev[k];
   if (typeof pick.icons === 'boolean' || typeof pick.icons === 'string') keep.icons = typeof pick.icons === 'string' ? pick.icons.slice(0, 24) : pick.icons;
   // v1.6：每一项单独选的图标 { 项目名: 图标名 }，最多 16 项
   if (pick.iconMap && typeof pick.iconMap === 'object') {
@@ -351,7 +360,7 @@ async function syncCost() {
           if (S.setLook && ${lookJs}) S.setLook(${lookJs}, true);
           const want = S.panelView === 'calls' && document.querySelector('.agy-usage-panel') ? S.cliWant || null : null;
           const I = window.__agyI18n; const miss = I && I.takeMissing ? I.takeMissing() : null;
-          return JSON.stringify({ book: S.costBook || null, quota: ${QUOTA_EXPR}, pick: S.lookPick || null, want, miss }); })()`,
+          return JSON.stringify({ book: S.costBook || null, quota: ${QUOTA_EXPR}, pick: S.lookPick || null, want, miss, spd: S.spd || null }); })()`,
         returnByValue: true,
       });
       const v = r && r.result && r.result.value;
@@ -362,6 +371,7 @@ async function syncCost() {
       if (o.want) onPageAsk(s, JSON.stringify({ t: 'cli-calls', day: o.want })).catch(() => {});
       if (o.book) mergeCostBook(o.book);
       if (Array.isArray(o.miss) && o.miss.length) noteMissing(o.miss);
+      if (o.spd) noteSpeedDays(o.spd);
       if (o.quota && (!quota || o.quota.at > quota.at)) quota = o.quota;
       if (o.pick && o.pick.at > 0 && (!pick || o.pick.at > pick.at)) pick = o.pick;
     } catch { /* 窗口刚关或还没注入：下次再读 */ }
@@ -466,6 +476,7 @@ function clearMissing() {
 //   qa 里每个桶的额度记录见 lib/quota.mjs 开头（u = 当天用掉的，按周期分段算净变化）。
 //   resets（2026-11-24 加）：谷歌提前重置每周额度的事件，[{ k 账号键, id 桶 ID, n 组名, w, at, after, from, was, flips }]，见 lib/quota.mjs 的 noteResetEvent。
 //   qr（2026-11-24 加）：1 = 已经用细粒度采样把额度记录按分段算法回放过一次。
+//   每天的 spd（v2.0.15）：生成速度的每日摘要 { at, m: { 模型名: [7 个数] } }，见 noteSpeedDays。
 // 状态栏的每日用量面板显示 u。（v1.4.0 的格式是 f 起点 / a 已累计，u = a + l − f；见 migrateQuota。）
 const HISTORY_FILE = path.join(DATA, 'usage-history.json');
 const HISTORY_KEEP_DAYS = 400; // 2026-11-24：90 → 400 天（面板加了 all；每天只有几个数字，400 天约几百 KB）
@@ -656,6 +667,34 @@ function updateHistory(book, buckets, acct, quotaAt) {
   const keys = Object.keys(h.days).sort();
   for (const k of keys.slice(0, Math.max(0, keys.length - HISTORY_KEEP_DAYS))) delete h.days[k];
   saveHistory();
+}
+// 生成速度的每日摘要（v2.0.15）：页面算好放在 S.spd（{ 日子: { at 算的时间, m: { 模型名: [算进速度的调用数, P25, 中位数, P75,
+// 首字中位数, 首字 P90, 全部调用数] } } }，见 statusbar.js 的“生成速度统计”），这里存进 day.spd，随历史推回页面。
+// 同一天有更晚算的就换（几个窗口各算各的，取最新的）；只认格式对的，限制模型数和名字长度。
+// 只给已经有记录的日子存（不为速度新建一天：补算以前的用量按“这天有没有记录”判断）；今天的记录由 updateHistory 建，下一次同步再存。
+const SPD_DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
+function cleanSpeed(v) {
+  if (!isObj(v) || !(+v.at > 0) || !isObj(v.m)) return null;
+  const m = {};
+  for (const [k, a] of Object.entries(v.m).slice(0, 24)) {
+    if (!Array.isArray(a) || a.length !== 7) continue;
+    if (!a.every((x) => x === null || (typeof x === 'number' && Number.isFinite(x) && x >= 0 && x < 1e7))) continue;
+    m[String(k).slice(0, 80)] = a;
+  }
+  return { at: Math.round(+v.at), m };
+}
+function noteSpeedDays(spd) {
+  if (!isObj(spd)) return;
+  const h = readHistory();
+  if (h[UNREAD]) return; // 历史这次读不出来：改了也存不下，下次再记
+  const today = dayName();
+  for (const [day, v] of Object.entries(spd).slice(0, 80)) {
+    if (!SPD_DAY_RE.test(day) || day > today || !h.days[day]) continue;
+    const c = cleanSpeed(v);
+    if (!c || c.at > Date.now() + 60e3) continue;
+    const d = h.days[day];
+    if (!d.spd || c.at > (+d.spd.at || 0)) d.spd = c;
+  }
 }
 // 推给页面的历史：每天的 quota 换成当前账号的那一份（不知道当前账号时用旧记录），带上账号、每周额度预估和当前账号的提前重置事件
 // 每天的额度记录只推页面用得到的字段（分段明细 p 不推）
@@ -1225,9 +1264,9 @@ function loadAssets() {
 function pageScript() {
   // 在页面里执行：建一个固定 id 的 <style>，已有就只更新内容；再启动或更新翻译器
   const i18 = i18nData();
-  const i18n = i18.dict && assets.translator
+  const i18n = zhOn() && i18.dict && assets.translator
     ? `try { (${assets.translator})(${JSON.stringify(i18.dict)}, ${JSON.stringify(i18.rules || [])}); } catch (e) { console.warn('agy i18n', e); }`
-    : `window.__agyI18n && window.__agyI18n.disable();`;
+    : I18N_OFF_JS;
   // 状态栏：删掉 statusbar.js 就不再加载（已打开的窗口要刷新才会消失）
   const bar = assets.statusbar
     ? `try { (${assets.statusbar})(${JSON.stringify(barConfig())}); } catch (e) { console.warn('agy statusbar', e); }`
@@ -1268,7 +1307,7 @@ function pageScript() {
 // - Theme 页的 updates 选 off（look.json 的 online = 'off'）：不再联网，也不用 remote/ 里存的，只用安装包自带的。
 // - 换了版本（安装了新的安装包）以后，remote/ 里存的词典和规则先不用，等下一次取到再用（新安装包里的可能更新）。
 // - 测试：环境变量 AGY_REMOTE_BASE 换成别的地址（例如本机起的 http://127.0.0.1:端口/），只试这一个地址。
-const PACK_VERSION = '2.0.14';
+const PACK_VERSION = '2.0.15';
 const REMOTE_DIR = path.join(DATA, 'remote');
 const REMOTE_STATE = path.join(REMOTE_DIR, 'state.json');
 const REMOTE_BASES = process.env.AGY_REMOTE_BASE ? [process.env.AGY_REMOTE_BASE] : [
@@ -1600,7 +1639,7 @@ const frames = new Map(); // targetId -> { ws, send, scriptId, cfg }
 const frameFailAt = new Map(); // targetId -> 上次连接失败的时间
 function frameScript(cfg) {
   const i18 = i18nData();
-  if (!i18.dict || !assets.translator) return 'window.__agyI18n && window.__agyI18n.disable();';
+  if (!zhOn() || !i18.dict || !assets.translator) return I18N_OFF_JS;
   return `try { (${assets.translator})(${JSON.stringify(i18.dict)}, ${JSON.stringify(i18.rules || [])}, ${JSON.stringify(cfg.opts)}); } catch (e) { console.warn('agy i18n', e); }`;
 }
 async function applyFrame(fr) {
@@ -1790,7 +1829,7 @@ async function tick() {
 // 插件重启（版本更新、覆盖安装、被结束）后，Antigravity 会重新打开插件面板：一个 iframe，地址是 plugin://agy-zh-pack--core-<面板端口>/。
 // 打开的那一下如果没连上面板端口（插件还没开始监听，或者电脑很忙、本机连接一时变慢），Antigravity 就显示 “plugin unavailable”，
 // 之后不会自己重试，要关掉面板再打开才好（11-23 Windows 上从 v2.0.0 更新到 v2.0.1 后遇到过）。
-// 这里每次轮询时看一下我们的面板：页面里没有我们的内容就重新加载。正常的面板 30 秒看一次；
+// 这里每次轮询时看一下我们的面板：页面里没有我们的内容（v2.0.15 起认 #s-now，更新过程中可能还是旧页面的 #s-run）就重新加载。正常的面板 30 秒看一次；
 // 重新加载以后等 10 秒再看，没好就等 20、40、80、160 秒再试，最多 6 次；连不上 iframe 时 10 秒后再看。只管连着这次面板端口的 iframe（端口对不上的是旧的，Antigravity 会换掉）。
 const PANEL_URL_RE = /^plugin:\/\/agy-zh-pack--[^/]*?-(\d+)\//;
 const PANEL_CHECK_MS = 30e3;
@@ -1814,7 +1853,7 @@ async function fixStuckPanels(targets) {
       if (Date.now() - c.at < wait) continue;
       c.at = Date.now();
       const v = await evalOnce(t.webSocketDebuggerUrl,
-        `JSON.stringify({ ok: !!document.getElementById('s-run'), ready: document.readyState, text: (document.body ? document.body.innerText : '').trim().slice(0, 60) })`).catch(() => null);
+        `JSON.stringify({ ok: !!(document.getElementById('s-now') || document.getElementById('s-run')), ready: document.readyState, text: (document.body ? document.body.innerText : '').trim().slice(0, 60) })`).catch(() => null);
       let s = null;
       try { s = typeof v === 'string' ? JSON.parse(v) : null; } catch {}
       c.failed = !isObj(s);
@@ -1861,6 +1900,68 @@ function main() {
   loop();
 }
 
+// ---------- 插件面板的数据（v2.0.15） ----------
+// 面板每 3 秒问一次状态；状态栏那边算好的数（S.panelSnapshot：状态栏 HTML、今天花费、额度、最近 7 天）最多每 2.5 秒取一次。
+// 状态栏的样式表（约 30 KB）按指纹缓存，变了才重取；面板也按指纹要，没变就不发。
+// 几个窗口时用看得见的那个（都看不见就用第一个有数据的）。每次请求最多等 5 秒，页面卡住也不会一直占着。
+const panelSnap = { at: 0, v: null, sess: null, busy: null, cssKey: '', css: '' };
+// 请求失败或超时都返回 undefined（失败要在请求本身上接住：超时先返回以后它再失败，没接住会成为未处理的拒绝，Node 会因此退出）
+const cdpEval = (s, expression) => Promise.race([
+  s.send('Runtime.evaluate', { expression, returnByValue: true }).then((r) => (r && r.result ? r.result.value : undefined), () => undefined),
+  new Promise((resolve) => setTimeout(() => resolve(undefined), 5000)),
+]);
+function refreshPanelSnap() {
+  if (panelSnap.busy) return panelSnap.busy;
+  panelSnap.busy = (async () => {
+    let best = null, bestSess = null;
+    for (const s of sessions.values()) {
+      if (!s.ws || s.ws.readyState !== 1) continue;
+      try {
+        const t = await cdpEval(s, '(() => { const S = window.__agyStats; return S && S.panelSnapshot ? JSON.stringify(S.panelSnapshot()) : null; })()');
+        const v = typeof t === 'string' ? JSON.parse(t) : null;
+        if (v && (!best || (v.visible && !best.visible))) { best = v; bestSess = s; }
+      } catch { /* 窗口刚关或还没注入 */ }
+    }
+    if (best && best.bar && best.bar.css !== panelSnap.cssKey) {
+      const css = await cdpEval(bestSess, 'window.__agyStats && window.__agyStats.barCss ? window.__agyStats.barCss() : ""');
+      if (typeof css === 'string' && css) { panelSnap.css = css; panelSnap.cssKey = best.bar.css; }
+    }
+    panelSnap.v = best;
+    panelSnap.sess = bestSess;
+    panelSnap.at = Date.now();
+  })().finally(() => { panelSnap.busy = null; });
+  return panelSnap.busy;
+}
+// cssHave：面板手里样式表的指纹，和现在的一样就不再发样式表。还没取过时等这一次取完（最多 5 秒），以后先返回上次的、后台再取
+async function panelData(cssHave) {
+  if (Date.now() - panelSnap.at > 2500) {
+    const p = refreshPanelSnap();
+    if (!panelSnap.at) await p.catch(() => {});
+  }
+  return { snap: panelSnap.v, snapAt: panelSnap.at, cssKey: panelSnap.cssKey, css: cssHave !== panelSnap.cssKey ? panelSnap.css : undefined };
+}
+// 插件面板的按钮：在 Antigravity 窗口里打开每日用量面板的某一页，并把窗口调到前面
+async function openView(view, day) {
+  const s = (panelSnap.sess && panelSnap.sess.ws && panelSnap.sess.ws.readyState === 1 && panelSnap.sess)
+    || [...sessions.values()].find((x) => x.ws && x.ws.readyState === 1);
+  if (!s) throw Error('no Antigravity window connected');
+  const v = ['usage', 'calls', 'look', 'speed', 'miss'].includes(view) ? view : 'usage'; // miss：今天的调用明细，只看缓存没命中的
+  const d = /^\d{4}-\d{2}-\d{2}$/.test(String(day || '')) ? day : '';
+  const ok = await cdpEval(s, `!!(window.__agyStats && window.__agyStats.openPanel && window.__agyStats.openPanel(${JSON.stringify(v)}, ${JSON.stringify(d)}))`);
+  s.send('Page.bringToFront').catch(() => {});
+  if (!ok) throw Error('this window has no input box yet');
+  return true;
+}
+// 两个开关：存进 look.json，再把页面脚本重新注入一次（已打开的窗口立刻换，刷新后也照这个来）
+function setLookFlag(key, on, what) {
+  const l = readLook() || {};
+  if ((l[key] !== 'off') === !!on) return;
+  saveLook({ ...l, [key]: on ? 'on' : 'off', at: Date.now() });
+  log(`${what} ${on ? 'on' : 'off'}`);
+  for (const s of sessions.values()) apply(s).catch(() => {});
+  if (key === 'zh') applyFrames();
+}
+
 // ---------- 交给插件 sidecar 的状态和操作（v2.0） ----------
 // sidecar（sidecars/core/main.mjs）和本脚本在同一个进程里；侧边栏面板、在线更新、代码更新都通过这里拿状态、做操作。
 globalThis.__agyZh = {
@@ -1872,7 +1973,13 @@ globalThis.__agyZh = {
     windows: sessions.size, port: { ...portState, file: PORT_FILE },
     online: onlineOn(), remote: remoteForPage(),
     i18n: !!assets.dict, statusbar: !!assets.statusbar, style: !!assets.css, frames: frames.size,
+    zhOn: zhOn(), barOn: barOn(),
   }),
+  // 插件面板（v2.0.15）：状态栏那边的数、打开每日用量面板、两个开关
+  panelData,
+  openView,
+  setZh: (on) => setLookFlag('zh', on, 'chinese ui'),
+  setBar: (on) => setLookFlag('statusbar', on, 'status bar'),
   // 在线更新：马上查一次
   checkRemoteNow: () => { remoteNextAt = 0; },
   // 在线更新开关（和 Theme 页的 updates 一样，存在 look.json）

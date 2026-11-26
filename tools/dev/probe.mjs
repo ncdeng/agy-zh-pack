@@ -4,7 +4,8 @@
 //   node tools/dev/probe.mjs <命令> [参数] [--shot <目录>] [--ssh <主机>] [--port-file <DevToolsActivePort 文件>]
 //
 // 命令：
-//   all                 发版前用：依次跑 status、bar、panel、calls（都是只读的），最后列出每项 OK / WARN / FAIL
+//   all                 发版前用：依次跑 status、plugin、bar、panel、calls（都是只读的），最后列出每项 OK / WARN / FAIL
+//   plugin              插件面板（agy-zh）本身：顶部状态、横幅、状态栏预览、今天和额度、最近 7 天、设置项的开关、“高级”的摘要（要先打开插件面板）
 //   status              插件面板接口：版本、最新版本、完整性、在线更新、没翻译的文字条数（要先打开插件面板：右上角插件菜单 → agy-zh）
 //   missing             插件面板接口：列出记下的没翻译的界面文字（补词典用）
 //   check               插件面板的“立即检查”，15 秒后再读一次 status
@@ -13,6 +14,7 @@
 //   panel               打开每日用量面板：KPI、今天那一行、底部几行（花费、缓存没命中、每周额度）和悬停说明
 //   calls [日子|most]   打开某一天的调用明细（默认今天；日子写 11-22 或 2026-11-22；most = 调用最多的那天）：
 //                       合计、筛选按钮、很贵的调用和缓存没命中各几行、第一条没命中的说明
+//   speed               每日用量面板的 speed 页（30 天速度走势：图里几条线、多少个点，表里每个模型的速度）和今天调用明细的 by model（v2.0.15）
 //   miss                点每日面板底部的 “cache miss today” 进今天的明细（只看没命中的），读合计和一条说明
 //   ckpt                点状态栏上的压缩徽章 ↻N×，读压缩查看器
 //   english             在屏幕外放一个测试文字，合成 Ctrl+Alt+E 切到英文、再切回中文（屏幕上会闪两次提示）
@@ -20,7 +22,7 @@
 //   swarm               列出 Swarm 面板框架里看得见的英文文字（要先打开 Swarm 面板）
 //   eval <表达式>        在主窗口里求值并打印结果（调试用）
 //
-//   --shot <目录>    panel / calls / miss / ckpt / bar 顺便截图，存成 <目录>/<win|mac>-<命令>.png
+//   --shot <目录>    plugin / panel / calls / speed / miss / ckpt / bar 顺便截图，存成 <目录>/<win|mac>-<命令>.png
 //   --ssh <主机>     在另一台 macOS 上跑：把这个脚本复制到对方的 /tmp，用 Antigravity 自带的 Node（ELECTRON_RUN_AS_NODE）运行；
 //                    有 --shot 时把截图拷回本机的那个目录。需要能免密 ssh / scp 到那台电脑
 //   --port-file      DevToolsActivePort 文件的位置（默认：Windows 在 %APPDATA%\Antigravity\，macOS 在 ~/Library/Application Support/Antigravity/）
@@ -193,6 +195,42 @@ CMDS.missing = async () => {
   for (const e of m.items) say(`  ${String(e.n).padStart(4)}× ${JSON.stringify(e.t)}`);
   return { ok: 'OK', note: m.count + ' 条' };
 };
+// 插件面板（v2.0.15 起的页面）：读各块的文字，开关和分段按钮读当前选中的；截图截整个面板（iframe 自己截，不用算缩放）
+CMDS.plugin = async () => {
+  const c = await connect(isPluginPanel, '插件面板');
+  if (!c) throw Error('没找到插件面板：先打开 Antigravity 右上角的插件菜单 → agy-zh');
+  try {
+    const v = await until(c, `(() => { const n = document.getElementById('s-now'); if (!n || !n.textContent.trim()) return null;
+      const q = (s) => [...document.querySelectorAll(s)], tx = (e) => (e ? e.textContent.trim() : '');
+      return { pill: tx(document.getElementById('pill')), banners: q('.banner .t b').map(tx), conv: tx(n.querySelector('.card-h')),
+        barRows: n.querySelectorAll('.sbwrap .ln').length, barCss: document.getElementById('barcss').textContent.length, noicons: !!n.querySelector('.sbwrap.noicons'),
+        tiles: q('#s-now .tile').map((e) => tx(e.querySelector('.k')) + ' ' + tx(e.querySelector('.v'))), empty: tx(n.querySelector('.empty')),
+        week: q('#s-week .week button').length, wsum: tx(document.querySelector('#s-week .wsum')),
+        items: q('#s-set .item').map((e) => { const w = e.querySelector('.sw'), g = e.querySelector('.seg button.on');
+          return tx(e.querySelector('.tx b')) + (w ? (w.classList.contains('on') ? ' [开]' : ' [关]') : g ? ' [' + tx(g) + ']' : ''); }),
+        adv: tx(document.getElementById('adv-sum')), kv: q('#s-adv .kv').map((e) => tx(e.firstElementChild) + '：' + tx(e.lastElementChild)) }; })()`, 8000);
+    if (!v) return { ok: 'FAIL', note: '面板页面没有 #s-now（还是 v2.0.15 以前的面板？）' };
+    say('  顶部：' + v.pill + (v.banners.length ? '；横幅：' + v.banners.join(' / ') : ''));
+    say('  ' + (v.conv || '当前对话') + (v.empty ? '：' + v.empty : ''));
+    say(`  状态栏预览 ${v.barRows} 行（样式表 ${v.barCss} 字符${v.noicons ? '，图标字体没加载' : ''}）`);
+    if (v.tiles.length) say('  ' + v.tiles.join(' · '));
+    say(`  最近 7 天：${v.week} 根柱子；${v.wsum}`);
+    for (const it of v.items) say('  · ' + it);
+    say('  ' + v.adv);
+    for (const k of v.kv) say('    ' + k);
+    if (SHOT) {
+      const s = await c.send('Page.captureScreenshot', { format: 'png', captureBeyondViewport: true });
+      if (s.result && s.result.data) {
+        fs.mkdirSync(SHOT, { recursive: true });
+        const file = path.join(SHOT, PLAT + '-plugin.png').replace(/\\/g, '/');
+        fs.writeFileSync(file, Buffer.from(s.result.data, 'base64'));
+        say('shot ' + file);
+      }
+    }
+    const bad = !v.barRows && !v.empty;
+    return { ok: bad ? 'WARN' : 'OK', note: bad ? '有对话但没有状态栏预览' : v.pill };
+  } finally { c.close(); }
+};
 CMDS.check = async () => {
   const r = await pluginApi('/api/action', { action: 'check-data' });
   say('  立即检查：' + r.status + ' ' + r.text + '，15 秒后再看');
@@ -267,6 +305,54 @@ CMDS.calls = async (day) => {
     printCalls(v);
     await shot(c, PANEL, 'calls');
     return { ok: v.rows > 0 || /no calls/.test(v.empty) ? 'OK' : 'FAIL', note: v.rows + ' 行' + (v.miss ? '，没命中 ' + v.miss : '') };
+  } finally { await closePanel(c); c.close(); }
+};
+
+// speed 页和 by model（v2.0.15）
+CMDS.speed = async () => {
+  const c = await main();
+  try {
+    await openPanel(c);
+    const ok = await c.ev(`(() => { const b = [...document.querySelectorAll('${PANEL} .p-head .p-btn')].find((x) => /speed/.test(x.textContent)); if (!b) return false; b.click(); return true; })()`);
+    if (!ok) return { ok: 'FAIL', note: '每日面板标题行没有 speed 按钮（还是旧版本的状态栏？）' };
+    await until(c, `!!document.querySelector('${PANEL} .p-spd, ${PANEL} .p-empty')`, 8000);
+    const v = await c.ev(`(() => {
+      const p = document.querySelector('${PANEL}');
+      const tx = (e) => (e ? e.textContent.trim() : '');
+      return { title: tx(p.querySelector('.p-title')), range: tx(p.querySelector('.p-range')), empty: tx(p.querySelector('.p-empty')),
+        lines: [...p.querySelectorAll('.p-spd .sl')].map((g) => g.getAttribute('data-m').replace(/^Gemini \\d+ /, '') + ' ' + g.querySelectorAll('.pt').length + ' 个点'),
+        legend: [...p.querySelectorAll('.p-legend > span')].map(tx),
+        rows: [...p.querySelectorAll('.p-table tbody tr')].map((tr) => [...tr.children].map(tx).join(' | ')),
+        firstTip: ((p.querySelector('.p-spd .hit') || { getAttribute: () => '' }).getAttribute('data-agy-tip') || '').replace(/\\n/g, ' / '),
+        note: tx(p.querySelector('.p-note')) };
+    })()`);
+    say('  ' + v.title + ' · ' + v.range + (v.empty ? '；' + v.empty : ''));
+    if (v.lines.length) say('  图：' + v.lines.join('；'));
+    if (v.firstTip) say('  第一个点：' + v.firstTip);
+    say('  表（Model | Today | 7d | 30d | TTFT 7d | Calls 30d）：');
+    for (const r of v.rows) say('    ' + r);
+    if (v.note) say('  说明：' + v.note);
+    await shot(c, PANEL, 'speed');
+    // 今天调用明细的 by model
+    await c.ev(`(() => { const b = [...document.querySelectorAll('${PANEL} .p-head .p-btn')].find((x) => /usage/.test(x.textContent)); if (b) b.click(); return true; })()`);
+    await until(c, `!!document.querySelector('${PANEL} tr.clk')`, 8000);
+    await c.ev(`(() => { const tr = document.querySelector('${PANEL} tr.today.clk') || document.querySelector('${PANEL} tr.clk'); if (tr) tr.click(); return true; })()`);
+    const cv = await readCalls(c);
+    if (!cv) return { ok: 'WARN', note: 'speed 页 ' + v.rows.length + ' 个模型；今天的明细 2 分钟内没出来' };
+    await c.ev(`(() => { const b = [...document.querySelectorAll('${PANEL} .p-tools .p-btn')].find((x) => x.textContent === 'by model'); if (b) b.click(); return !!b; })()`);
+    await wait(500);
+    const mv = await c.ev(`(() => {
+      const p = document.querySelector('${PANEL}');
+      const tx = (e) => (e ? e.textContent.trim() : '');
+      return { sum: tx(p.querySelector('.p-range')), heads: [...p.querySelectorAll('.p-table thead th')].map(tx).join(' | '),
+        rows: [...p.querySelectorAll('.p-table tbody tr')].map((tr) => [...tr.children].map(tx).join(' | ')) };
+    })()`);
+    say('  今天的 by model · ' + mv.sum);
+    say('    ' + mv.heads);
+    for (const r of mv.rows) say('    ' + r);
+    await shot(c, PANEL, 'models');
+    const good = v.rows.length > 0 && mv.rows.length > 0;
+    return { ok: good ? 'OK' : 'WARN', note: 'speed 页 ' + v.rows.length + ' 个模型，by model ' + mv.rows.length + ' 行' };
   } finally { await closePanel(c); c.close(); }
 };
 
@@ -399,7 +485,7 @@ CMDS.eval = async (...expr) => {
 
 CMDS.all = async () => {
   const res = [];
-  for (const name of ['status', 'bar', 'panel', 'calls']) {
+  for (const name of ['status', 'plugin', 'bar', 'panel', 'calls']) {
     say('== ' + name);
     let r;
     try { r = (await CMDS[name]()) || { ok: 'OK' }; } catch (e) { say('  出错：' + e.message); r = { ok: name === 'status' && /插件面板/.test(e.message) ? 'WARN' : 'FAIL', note: e.message }; }

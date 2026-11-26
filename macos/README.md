@@ -55,5 +55,5 @@ node macos/manage.mjs uninstall
 - 调试端口文件：`~/Library/Application Support/Antigravity/DevToolsActivePort`
 - 单实例锁：`/tmp/agy-zh-pack-<uid>.sock`
 - 登录自启的配置：`~/Library/LaunchAgents/com.ncdeng.agy-zh-pack.plist`。里面优先写 `/opt/homebrew/bin/node`、`/usr/local/bin/node` 这类不随版本号变的路径；用 nvm、fnm 等版本管理器的，升级 Node 后重新运行一次 `node macos/manage.mjs install-agent`。
-- 只要状态栏、不要汉化：删掉或移走 `i18n/zh-CN.json`，再在 Antigravity 里按一次 `Cmd+R`。
+- 只要状态栏、不要汉化：v2.0.15 起在插件面板里关掉“中文界面”；以前的版本删掉或移走 `i18n/zh-CN.json`，再在 Antigravity 里按一次 `Cmd+R`。
 - Antigravity 没带 `--remote-debugging-port` 启动时（比如从程序坞直接打开，或者自动更新后自己重启），注入程序会用系统通知提醒一次。关掉 Antigravity，再用 `macos/launch-agy.command` 打开就行。

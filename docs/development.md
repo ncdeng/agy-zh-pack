@@ -29,7 +29,7 @@ node inject.mjs
 - 改了 `statusbar.js` 或 `i18n` 下的文件后，已打开的窗口会自动更新，不用重启。改了 `inject.mjs` 要重启注入程序。
 - 想给页面加自己的样式（比如换回复字体），在数据目录（从源码运行时是 `inject.mjs` 同一个文件夹）放一个 `style.css`，注入程序会自动加载；没有这个文件就不改任何样式。
 - 改了 `i18n/translator.js` 的逻辑，要把里面的 `VERSION` 加 1，已打开的窗口才会换用新翻译器。
-- 发版前，开着 Antigravity 运行 `node tools/dev/probe.mjs all`：经调试端口打开插件面板、状态栏、每日用量面板和当天的调用明细，读出界面上的文字和悬停说明，每项写 OK / WARN / FAIL。单元测试只管函数算得对不对，这里看功能在真的 Antigravity 里有没有显示出来。另有 `missing`（列出记下的没翻译的文字）、`calls <日子>`、`miss`、`ckpt`、`english`、`swarm`、`eval` 等命令，`node tools/dev/probe.mjs help` 看全部。加 `--shot <目录>` 顺便截图；加 `--ssh <主机>` 在另一台 macOS 上跑（把脚本复制过去，用 Antigravity 自带的 Node 运行，截图拷回来）。除了 `check`、`update`、`english`，命令都只读。
+- 发版前，开着 Antigravity 运行 `node tools/dev/probe.mjs all`：经调试端口打开插件面板、状态栏、每日用量面板和当天的调用明细，读出界面上的文字和悬停说明，每项写 OK / WARN / FAIL。单元测试只管函数算得对不对，这里看功能在真的 Antigravity 里有没有显示出来。另有 `plugin`（读插件面板各块的文字和开关，v2.0.15 起 `all` 也跑它）、`speed`（每日面板的 speed 页和调用明细的 by model）、`missing`（列出记下的没翻译的文字）、`calls <日子>`、`miss`、`ckpt`、`english`、`swarm`、`eval` 等命令，`node tools/dev/probe.mjs help` 看全部。加 `--shot <目录>` 顺便截图；加 `--ssh <主机>` 在另一台 macOS 上跑（把脚本复制过去，用 Antigravity 自带的 Node 运行，截图拷回来）。除了 `check`、`update`、`english`，命令都只读。
 - Antigravity 升级以后，开着 Antigravity 运行 `node tools/find-ui-strings.mjs`，找新出现的界面文字。结果在 `dist/ui-strings.md`，标 NEW 的是上一次没有的。提取是按规则猜的，会混进代码里的字符串，要人工挑出界面文字再翻。
 - 如果注入程序在 Antigravity 打开很久以后才启动，状态栏会提示 `Press Ctrl+R to reload this window`，按一次 Ctrl+R 刷新窗口就好。
 

@@ -1991,7 +1991,13 @@ function agyStatusBar(CFG) {
         if (S.panelView === 'usage' && document.querySelector(P)) refreshPanel();
       });
     }
-    if (!c.rows) return null;
+    return missOfDay(nm);
+  };
+  // 今天缓存没命中的合计，用 S.missDay 里已经取到的调用算，不触发取数（每日面板底部、插件面板的“缓存没命中”格子）。
+  // S.missDay 由 missToday（每日面板开着时）和后台的速度统计（今天的每 5 分钟，见 speedTick）更新
+  const missOfDay = (nm) => {
+    const c = S.missDay;
+    if (!c || c.day !== nm || !c.rows) return null;
     const rows = c.rows.concat(cliMiss(cliRows(nm)));
     const s = missSum(rows);
     s.total = 0;
@@ -2171,6 +2177,7 @@ function agyStatusBar(CFG) {
     if (S.panelView === 'look') { renderLook(panel); return; }
     if (S.panelView === 'calls') { renderCalls(panel, refresh); return; }
     if (S.panelView === 'ckpt') { renderCkpt(panel); return; }
+    if (S.panelView === 'speed') { renderSpeed(panel); return; }
     // all（2026-11-24 加）：从最早有记录的那天到今天；全部历史还没要来时先用最近 31 天，要来后自动重画
     const isAll = S.panelDays === 'all';
     if (isAll && (!S.historyAll || Date.now() - (S.historyAllAsk || 0) > 600000)) S.askHistoryAll();
@@ -2204,6 +2211,10 @@ function agyStatusBar(CFG) {
     th.append(el('span', 'ic', 'palette'), 'theme');
     setTip(th, '状态栏外观：配色、外形、进度条、信息密度');
     th.addEventListener('click', () => { S.panelView = 'look'; renderPanel(panel); });
+    const sp = el('button', 'p-btn');
+    sp.append(el('span', 'ic', 'speed'), 'speed');
+    setTip(sp, '生成速度：最近 30 天每个模型每天的 tok/s 中位数和首字时间');
+    sp.addEventListener('click', () => { S.panelView = 'speed'; renderPanel(panel); });
     // 账号（v1.6）：打码邮箱 + 套餐；额度历史按账号分开记，钱和 token 是这台电脑上所有账号的合计
     const ac = S.account || (S.history && S.history.acct);
     const acEl = ac && ac.m ? el('span', 'p-acct', ac.m + (ac.t ? ' · ' + ac.t.replace(/^Google AI\s+/i, '') : '')) : null;
@@ -2216,7 +2227,7 @@ function agyStatusBar(CFG) {
         '，你装的是 v' + rm.version + '。\n到 GitHub 上 ncdeng/agy-zh-pack 项目的 Releases 页下载安装包，覆盖安装就行（每日记录和外观都保留）。' +
         '\n词典和价格平时会自动更新，不用为它们升级。')
       : null;
-    head.append(el('span', 'p-fill'), ...(upEl ? [upEl] : []), ...(acEl ? [acEl] : []), th, x);
+    head.append(el('span', 'p-fill'), ...(upEl ? [upEl] : []), ...(acEl ? [acEl] : []), sp, th, x);
     panel.append(head);
 
     // 今天的汇总（11-22 加）：花费、调用次数、token 合计、缓存命中率。今天这一行用页面里实时的账本（同表格第一行）
@@ -2567,6 +2578,129 @@ function agyStatusBar(CFG) {
     rows.sort((a, b) => b.at - a.at);
     return { rows, convs: ids.length, failed };
   };
+  // ---------- 生成速度统计（v2.0.15） ----------
+  // 每次调用的生成速度 = 输出 token（含思考）÷（首字时间 + 生成用时），和调用明细的 tok/s 一列一样。
+  // （“回复 token ÷ 生成用时”不可靠：有的模型思考是在首字之后才输出的，11-26 实测 Neon XHigh 这样算比整体速度还低。）
+  // 输出不到 100 token 的调用（多半是工具调用）、总用时不到 0.3 秒的不算速度；首字时间算全部有记录的调用。
+  // 同一个模型的速度波动很大（11-26 实测中间一半的调用差 2～2.5 倍），所以只给中位数和中间一半的范围（P25～P75），不给平均数。
+  const SPEED_MIN_OUT = 100;
+  const callOut = (u) => Math.max(+u.outputTokens || 0, (+u.thinkingOutputTokens || 0) + (+u.responseOutputTokens || 0));
+  const callSpeed = (r) => {
+    const out = callOut(r.usage || {}), t = (+r.ttft || 0) + (+r.stream || 0);
+    return out >= SPEED_MIN_OUT && t >= 0.3 ? out / t : null;
+  };
+  // 分位数（线性插值），a 要先从小到大排好
+  const quantile = (a, p) => {
+    if (!a.length) return null;
+    const i = (a.length - 1) * p, lo = Math.floor(i), hi = Math.ceil(i);
+    return a[lo] + (a[hi] - a[lo]) * (i - lo);
+  };
+  // 按模型汇总：{ 模型名: [算进速度的调用数, P25, 中位数, P75, 首字中位数, 首字 P90, 全部调用数] }；速度取整，首字时间（秒）留 1 位小数
+  const speedSummary = (rows, nameOf) => {
+    const g = new Map();
+    for (const r of rows) {
+      const k = nameOf(r);
+      if (!k) continue;
+      const m = g.get(k) || { all: 0, v: [], t: [] };
+      m.all++;
+      const v = callSpeed(r);
+      if (v != null) m.v.push(v);
+      if (+r.ttft > 0) m.t.push(+r.ttft);
+      g.set(k, m);
+    }
+    const r0 = (x) => (x == null ? null : Math.round(x));
+    const r1 = (x) => (x == null ? null : Math.round(x * 10) / 10);
+    const out = {};
+    for (const [k, m] of g) {
+      m.v.sort((a, b) => a - b);
+      m.t.sort((a, b) => a - b);
+      out[k] = [m.v.length, r0(quantile(m.v, 0.25)), r0(quantile(m.v, 0.5)), r0(quantile(m.v, 0.75)), r1(quantile(m.t, 0.5)), r1(quantile(m.t, 0.9)), m.all];
+    }
+    return out;
+  };
+  // 几天的摘要合成一个数：每天中位数的中位数（只算那天算进速度的调用不少于 SPEED_MIN_N 次的天）；i 是摘要数组里的位置（2 速度、4 首字）
+  const SPEED_MIN_N = 3;
+  const spanMedian = (sums, i) => {
+    const a = sums.filter((v) => v && v[0] >= SPEED_MIN_N && v[i] != null).map((v) => v[i]).sort((x, y) => x - y);
+    return a.length ? quantile(a, 0.5) : null;
+  };
+  // 调用的模型名：界面名（Gemini 4 Hydrogen (High)，思考档位不同的分开）；老的 CLI 记录没有界面名，用配置名或接口名
+  const callModel = (r) => r.disp || (r.key && S.enumModel.get(r.key)) || r.resp || String(r.key || '').replace(/^MODEL_/, '');
+  // 表格和图例里写短名（去掉 Gemini 4 / Claude 前缀）
+  const shortModel = (s) => String(s || '').replace(/^Gemini \d+(\.\d+)?\s+/, '').replace(/^Claude\s+/, '');
+  // 每天的摘要：S.spd = { 日子: { at 算的时间, m: speedSummary 的结果 } }。注入程序每 30 秒读回来存进使用历史（day.spd），
+  // 再随 S.history 推回来，所以刷新页面、重启 Antigravity 以后照样有。页面里最多留 60 天
+  S.spd = S.spd || {};
+  const noteSpeed = (nm, rows) => {
+    S.spd[nm] = { at: Date.now(), m: speedSummary(rows, callModel) };
+    const ks = Object.keys(S.spd).sort();
+    for (const k of ks.slice(0, Math.max(0, ks.length - 60))) delete S.spd[k];
+  };
+  const spdOf = (nm) => {
+    const a = S.spd[nm], h = histDay(nm), b = h && h.spd;
+    return a && (!b || a.at >= b.at) ? a : b || null;
+  };
+  // 一天内的速度（v2.0.15，插件面板和 speed 页的“24 小时 / 今天”）：最近 24 个整点小时（最右边是现在这个小时）每小时、每个模型一份
+  // [算进速度的调用数, 中位数]，加上最近 60 分钟每个模型的摘要（“现在”）。S.spdHours = { at, start 第一个小时的开始, m: { 模型名: 24 个 [n, 中位数] 或 null }, now }。
+  // 只在页面里，不存进历史（过一会儿就重算）；rows 要包含昨天的调用（凌晨时最近 24 小时大半在昨天）
+  const HOUR_MS = 3600e3;
+  const noteHours = (rows, now = Date.now()) => {
+    const cur = new Date(now);
+    cur.setMinutes(0, 0, 0);
+    const start = cur.getTime() - 23 * HOUR_MS;
+    const buckets = Array.from({ length: 24 }, () => []);
+    const recent = [];
+    for (const r of rows) {
+      if (!(r.at >= start) || r.at > now) continue;
+      buckets[Math.min(23, Math.floor((r.at - start) / HOUR_MS))].push(r);
+      if (r.at >= now - HOUR_MS) recent.push(r);
+    }
+    const per = buckets.map((b) => speedSummary(b, callModel));
+    const m = {};
+    for (const k of new Set(per.flatMap((x) => Object.keys(x)))) m[k] = per.map((x) => (x[k] ? [x[k][0], x[k][2]] : null));
+    S.spdHours = { at: now, start, m, now: speedSummary(recent, callModel) };
+  };
+  // 后台记录（定时器每秒调一次；窗口在前台、拿到后台令牌以后才做）：今天的每 5 分钟算一次（顺带取昨天的调用算最近 24 小时每小时的速度，
+  // 昨天动过的对话一般已经在缓存里）；最近 7 天里有调用、还没有摘要
+  // （或者摘要是那天还没过完时算的）的日子，每 2 分钟补算一天。补算要取那天动过的每个对话的调用和步骤（和打开那天的调用明细一样），
+  // 所以一次只算一天；一天取失败了 1 小时内不再试。agy CLI 的调用向注入程序要（不动 S.cliWant，免得和开着的调用明细抢），
+  // 要来之前算的那次不含 CLI，下次再算时补上。
+  const SPEED_TODAY_MS = 300e3, SPEED_GAP_MS = 120e3, SPEED_BACK_DAYS = 7;
+  S.spdJob = S.spdJob || { busy: false, at: 0, tried: {} };
+  const speedTick = () => {
+    const j = S.spdJob;
+    if (j.busy || Date.now() - j.at < SPEED_GAP_MS || !S.loadCalls) return;
+    const today = dayName();
+    const cur = spdOf(today);
+    let nm = !cur || Date.now() - cur.at >= SPEED_TODAY_MS ? today : null;
+    if (!nm) {
+      nm = lastDays(SPEED_BACK_DAYS + 1).slice(1).find((d) => {
+        const r = dayRecord(d);
+        if (!r || !(recTokens(r)[0] > 0) || Date.now() - (j.tried[d] || 0) < 3600e3) return false;
+        const s = spdOf(d);
+        return !s || s.at < dayBounds(d)[1];
+      }) || null;
+    }
+    if (!nm) return;
+    j.busy = true;
+    j.tried[nm] = Date.now();
+    const ask = (d) => { try { if (typeof window.__agyZhAsk === 'function') window.__agyZhAsk(JSON.stringify({ t: 'cli-calls', day: d })); } catch (e) {} };
+    const ok = (res) => !(res.failed && !res.rows.length); // 一个都没取到：多半是后台一时取不到，不记成“那天没有调用”
+    ask(nm);
+    let p;
+    if (nm === today) {
+      const yd = lastDays(2)[1];
+      ask(yd);
+      p = S.loadCalls(today).then((a) => {
+        if (ok(a)) {
+          noteSpeed(today, a.rows.concat(cliRows(today)));
+          if (S.missDay) Object.assign(S.missDay, { day: today, rows: a.rows, at: Date.now() }); // 插件面板的“缓存没命中”格子用（missOfDay）
+        }
+        return S.loadCalls(yd).catch(() => ({ rows: [], failed: 1 })).then((b) => noteHours(a.rows.concat(cliRows(today), b.rows, cliRows(yd))));
+      });
+    } else p = S.loadCalls(nm).then((res) => { if (ok(res)) noteSpeed(nm, res.rows.concat(cliRows(nm))); });
+    p.catch(() => {}).then(() => { j.busy = false; j.at = Date.now(); });
+  };
   // agy CLI 的调用（2026-11-24 加）：CLI 的对话不在桌面版后台里，取不到；打开某一天的明细时向注入程序要（S.cliAsk），
   // 注入程序读 CLI 对话库后调 S.setCliCalls 交回 { day, rows: [[时间, 对话 ID, 模型名, 输入, 缓存读, 缓存写, 输出, 首字秒, 生成秒, 界面名]], convs: { 对话 ID: 标题 } }。
   S.cliCalls = S.cliCalls || {};
@@ -2652,6 +2786,7 @@ function agyStatusBar(CFG) {
       lastRes = res;
       const all = res.rows.concat(cliMiss(cliRows(nm))).sort((a, b) => b.at - a.at); // 桌面版的 + agy CLI 的，最新的在上面
       const hasCli = all.some((r) => r.cli);
+      if (!res.failed || res.rows.length) noteSpeed(nm, all); // 速度统计：打开哪天就记下哪天（按全部调用算，不管筛选；见“生成速度统计”）
       if (!hasCli) src = 'all';
       // 每次调用的花费和价目名（模型筛选按价目名分：Carbon、Neon、Opus 5.5…，和每日面板的颜色一致）
       const costs = new Map();
@@ -2678,7 +2813,8 @@ function agyStatusBar(CFG) {
       if (nsig === sig) return;
       sig = nsig;
       // 第二行的按钮：每次重画时按当前数据重建（模型的种类会变）
-      tools.replaceChildren(segOf([['calls', 'calls', '每次调用一行'], ['convs', 'by conversation', '按对话汇总：每个对话一行，按花费从高到低；点一行回到明细，只看这个对话']], view,
+      tools.replaceChildren(segOf([['calls', 'calls', '每次调用一行'], ['convs', 'by conversation', '按对话汇总：每个对话一行，按花费从高到低；点一行回到明细，只看这个对话'],
+        ['models', 'by model', '按模型汇总：每个模型一行，有生成速度（tok/s）和首字时间的中位数']], view,
         (k) => { view = k; show = 600; redraw(); }));
       if (hasCli) tools.append(segOf([['all', 'all', '桌面版和 agy CLI 的调用'], ['desk', 'desktop', '只看桌面版的调用'], ['cli', 'CLI', '只看 agy CLI 的调用（别的工具直接调 CLI 也在这里）']], src,
         (k) => { src = k; show = 600; redraw(); }));
@@ -2746,6 +2882,36 @@ function agyStatusBar(CFG) {
         }
         sum.textContent = agg.size + ' conversations · ' + rows.length + ' calls · ' + fmtUsd(total) + (filtered ? ' (filtered)' : '') + (ms.usd >= 0.01 ? ' · miss +' + fmtUsd(ms.usd) : '');
         setTip(sum, missLine);
+      } else if (view === 'models') {
+        // 按模型汇总（v2.0.15）：每个模型（界面名，思考档位不同的分开）一行：调用数、花费、输出、生成速度和首字时间。点一行回到明细、只看这个价目的调用
+        const sm = speedSummary(rows, callModel);
+        const agg = new Map();
+        for (const r of rows) {
+          const k = callModel(r);
+          const a = agg.get(k) || { usd: 0, out: 0, pn: pname(r) };
+          a.usd += costs.get(r).usd || 0;
+          a.out += callOut(r.usage || {});
+          agg.set(k, a);
+        }
+        const heads = [['Model', '模型（界面名，思考档位不同的分开算）'], ['Calls', '调用次数'], ['Cost', '按 API 标准价折算（不是实际扣费）'], ['Out', '输出（含思考）'],
+          ['tok/s', '生成速度的中位数：每次调用的输出 token（含思考）÷（首字时间 + 生成用时）。输出不到 ' + SPEED_MIN_OUT + ' token 的调用（多半是工具调用）不算'],
+          ['Middle half', '中间一半调用的速度范围（P25～P75）。同一个模型的速度波动很大，这个范围比一个数更能说明情况'],
+          ['TTFT', '首字时间的中位数（从发出请求到第一个字，含排队和思考）'], ['TTFT p90', '九成调用的首字时间不超过这个数']];
+        for (const [h, t] of heads) { const th = el('th', '', h); setTip(th, t); hr.append(th); }
+        for (const [k, v] of Object.entries(sm).sort((p, q) => q[1][6] - p[1][6])) {
+          const a = agg.get(k);
+          const tr = el('tr', 'clk');
+          const td = el('td', 'md km k-' + (MODEL_COLOR[a.pn] || 'muted'), clip(shortModel(k), 28));
+          setTip(td, k + '\n算进速度的调用 ' + v[0] + ' 次（共 ' + v[6] + ' 次；输出不到 ' + SPEED_MIN_OUT + ' token 的不算）\n点一下看这个价目（' + a.pn + '）的每次调用');
+          const tdSpd = el('td', 'sp', v[2] == null ? '—' : String(v[2]));
+          if (v[0] && v[0] < SPEED_MIN_N) setTip(tdSpd, '只有 ' + v[0] + ' 次调用算进速度，这个数参考价值不大');
+          tr.append(td, el('td', '', String(v[6])), el('td', 'c', fmtUsdFine(a.usd)), el('td', '', fmtK(a.out)), tdSpd,
+            el('td', '', v[1] == null ? '—' : v[1] + '–' + v[3]), el('td', '', v[4] == null ? '—' : v[4].toFixed(1) + 's'), el('td', '', v[5] == null ? '—' : v[5].toFixed(1) + 's'));
+          tr.addEventListener('click', () => { mdl = a.pn; view = 'calls'; show = 600; redraw(); });
+          tbody.append(tr);
+        }
+        sum.textContent = Object.keys(sm).length + ' models · ' + rows.length + ' calls · ' + fmtUsd(total) + (filtered ? ' (filtered)' : '');
+        setTip(sum, '生成速度 = 输出 token（含思考）÷（首字时间 + 生成用时），取中位数；最近 30 天的走势在每日用量面板的 speed 页');
       } else {
         const heads = [['Time', '调用开始的时间'], ['Conversation', '哪个对话（↳ 是子代理，CLI · 开头的是 agy CLI 的对话）'], ['Model', '模型（界面名；悬停看接口名和配置名）'], ['Cost', '按 API 标准价折算（不是实际扣费）'],
           ['In', '新增输入（不含缓存）'], ['Out', '输出（含思考）'], ['Cache', '缓存读取'], ['Write', '缓存写入（只有 Claude 有）'], ['Hit', '命中率 = 缓存读 ÷（缓存读 + 输入）'],
@@ -2763,7 +2929,7 @@ function agyStatusBar(CFG) {
           const tdConv = el('td', 'cv', clip(label, 48)); // 实际宽度由 CSS 限制（放不下出省略号）
           setTip(tdConv, label + '\n' + (r.cli ? 'agy CLI 的对话 ' + r.conv.slice(0, 8) + '（别的工具直接调 CLI 也在这里）' : '对话 ' + r.conv.slice(0, 8) + ' · 第 ' + (r.step + 1) + ' 步'));
           // 表里写短名（去掉 Gemini 4 / Claude 前缀），完整的界面名、接口名、配置名在悬停说明里
-          const tdModel = el('td', 'md', clip(model.replace(/^Gemini \d+(\.\d+)?\s+/, '').replace(/^Claude\s+/, ''), 20));
+          const tdModel = el('td', 'md', clip(shortModel(model), 20));
           const price = cc.pr ? '\n单价按 ' + cc.pr.name + (cc.pr.note ? '（' + cc.pr.note + '）' : '') : '\n价格表里没有这个模型，没算钱';
           setTip(tdModel, r.cli ? '界面名：' + (r.disp || '?') + '\n模型：' + (r.resp || '?') + price + '\n（agy CLI 的调用，从 CLI 的对话库读的）'
             : '界面名：' + (r.disp || '?') + '\n接口返回的模型：' + (r.resp || '?') + '\n配置名：' + ((r.key && S.enumModel.get(r.key)) || '?') + '\n编号：' + (r.key || '?') +
@@ -2831,6 +2997,241 @@ function agyStatusBar(CFG) {
     };
     S.callsReload = () => load(false);
     load(true);
+  };
+  // speed 页（v2.0.15）：最近 30 天每个模型每天的生成速度中位数（折线），下面一张表（今天、最近 7 天、最近 30 天）。
+  // 图里只画 30 天里算进速度的调用最多的 5 个模型；一天算进速度的调用不到 SPEED_MIN_N 次的点不画（太少，中位数不可靠），表里照样写。
+  // 颜色按价目名（和每日面板一样）；同一个价目的第二个思考档位用虚线。没记录的日子不画点，线从前一个点直接连到后一个点。
+  const SPEED_TOP = 5;
+  const SPEED_DEF = '生成速度 = 每次调用的输出 token（含思考）÷（首字时间 + 生成用时），每个模型每天取中位数。\n' +
+    '输出不到 ' + SPEED_MIN_OUT + ' token 的调用（多半是工具调用）不算速度。首字时间从发出请求算到第一个字，含排队和思考。\n' +
+    '最近 7 天会自动补算；更早的日子打开那天的调用明细后补上。';
+  const niceMax = (v) => { const e = Math.pow(10, Math.floor(Math.log10(v))); for (const m of [1, 2, 2.5, 5, 10]) if (m * e >= v) return m * e; return 10 * e; };
+  const svgEl = (tag, attrs, cls) => {
+    const e = document.createElementNS('http://www.w3.org/2000/svg', tag);
+    for (const [k, v] of Object.entries(attrs || {})) e.setAttribute(k, v);
+    if (cls) e.setAttribute('class', cls);
+    return e;
+  };
+  const renderSpeed = (panel) => {
+    panel.replaceChildren();
+    const days = lastDays(30).slice().reverse(); // 左旧右新
+    const sums = days.map((d) => { const x = spdOf(d); return (x && x.m) || {}; });
+    const have = sums.filter((m) => Object.keys(m).length).length;
+    const head = el('div', 'p-head');
+    const back = setTip(el('button', 'p-btn', '← usage'), '回到每日用量');
+    back.addEventListener('click', () => { S.panelView = 'usage'; renderPanel(panel); });
+    const x = setTip(el('button', 'p-btn p-x', '×'), '关闭（Esc）');
+    x.addEventListener('click', closePanel);
+    head.append(back, setTip(el('span', 'p-title', 'Speed'), SPEED_DEF), el('span', 'p-fill'), x);
+    panel.append(head);
+    // 一天内的走势（v2.0.15）：最近 24 小时或今天，每小时每个模型一个点（S.spdHours，后台每 5 分钟算一次；speedNow 挑调用最多的 3 个模型）。
+    // 范围记在 S.spdRange（24h / today）。图例写“现在”（最近 60 分钟）和“平时”（前 7 天每天中位数的中位数），现在比平时慢四成以上标出来
+    const rng = S.spdRange === 'today' ? 'today' : '24h';
+    const sec1 = el('div', 'p-sec');
+    const rseg = el('span', 'p-seg');
+    for (const [k, t, tip] of [['24h', 'last 24 hours', '最近 24 个整点小时，最右边是现在这个小时'], ['today', 'today', '今天 0 点到 23 点，还没到的小时空着']]) {
+      const b = setTip(el('button', 'p-btn' + (k === rng ? ' on' : ''), t), tip);
+      b.addEventListener('click', () => { if (k !== rng) { S.spdRange = k; renderPanel(panel); } });
+      rseg.append(b);
+    }
+    sec1.append(setTip(el('span', 'p-sect', 'Hourly'), '每小时每个模型的生成速度中位数；一个小时里算进速度的调用不到 ' + SPEED_MIN_N + ' 次的不画点，空了 2 小时以上的地方不连线。后台每 5 分钟算一次'), rseg);
+    const hs = S.spdHours;
+    if (hs && hs.at) sec1.append(el('span', 'p-range', 'updated ' + pad(new Date(hs.at).getHours()) + ':' + pad(new Date(hs.at).getMinutes())));
+    panel.append(sec1);
+    const hn = speedNow(null);
+    const hser = hn ? hn.models.map((m) => {
+      const start = rng === 'today' ? hn.today0 : hn.start;
+      const pts = m.pts.map((v, j) => (v != null ? [Math.round((hn.start + j * HOUR_MS - start) / HOUR_MS), v, j] : null)).filter((p) => p && p[0] >= 0 && p[0] < 24);
+      return { m, pts, start };
+    }) : [];
+    const hvals = hser.flatMap((q) => q.pts.map((p) => p[1]));
+    if (!hvals.length) {
+      panel.append(setTip(el('div', 'p-empty', !hn || !hn.models.length ? 'no hourly data yet' : rng === 'today' ? 'no data today yet' : 'no data in the last 24 hours'),
+        '后台每 5 分钟算一次最近 24 小时（Antigravity 窗口要在前台）；一个小时里算进速度的调用不到 ' + SPEED_MIN_N + ' 次的不画'));
+    } else {
+      const start = hser[0].start;
+      const cNow = Math.round((hn.start + 23 * HOUR_MS - start) / HOUR_MS);
+      const hsvg = svgEl('svg', {}, 'p-spd');
+      panel.append(hsvg);
+      const W = Math.max(280, Math.round(hsvg.getBoundingClientRect().width) || 600), H = 120, L = 30, R = 8, T = 8, Bm = 18;
+      hsvg.setAttribute('viewBox', '0 0 ' + W + ' ' + H);
+      const mn = Math.min(...hvals), mx = Math.max(...hvals), span = Math.max(mx - mn, 20);
+      const lo = Math.max(0, Math.floor((mn - span / 4) / 10) * 10), hi = Math.ceil((mx + span / 4) / 10) * 10;
+      const cw = (W - L - R) / 24;
+      const xOf = (c) => L + cw * (c + 0.5);
+      const yOf = (v) => T + (H - T - Bm) * (1 - (v - lo) / (hi - lo));
+      if (cNow >= 0 && cNow < 24) hsvg.append(svgEl('rect', { x: L + cw * cNow, y: T - 3, width: cw, height: H - T - Bm + 6, rx: 3 }, 'cur'));
+      for (let q = 0; q <= 2; q++) {
+        const v = lo + (hi - lo) * q / 2, y = yOf(v);
+        hsvg.append(svgEl('line', { x1: L, x2: W - R, y1: y, y2: y }, 'g'));
+        const t = svgEl('text', { x: L - 5, y: y + 3.5, 'text-anchor': 'end' });
+        t.textContent = String(Math.round(v));
+        hsvg.append(t);
+      }
+      for (let c = 0; c < 24; c++) {
+        const hr = new Date(start + c * HOUR_MS).getHours();
+        const isNow = c === cNow;
+        if (!isNow && (hr % 3 !== 0 || Math.abs(c - cNow) <= 1)) continue;
+        const t = svgEl('text', { x: xOf(c), y: H - 4, 'text-anchor': 'middle' }, isNow ? 'today' : '');
+        t.textContent = isNow ? 'now' : pad(hr) + ':00';
+        hsvg.append(t);
+      }
+      const hlook = new Map(), hused = new Map();
+      for (const q of hser) {
+        const pn = Object.keys(MODEL_COLOR).filter((p) => q.m.name.includes(p)).sort((a, b) => b.length - a.length)[0];
+        const c = MODEL_COLOR[pn] || 'muted';
+        const i = hused.get(c) || 0;
+        hused.set(c, i + 1);
+        hlook.set(q.m.name, { c, dash: i > 0 });
+      }
+      for (const q of hser.slice().reverse()) { // 调用最多的最后画，在最上面
+        const st = hlook.get(q.m.name);
+        const g = svgEl('g', {}, 'sl k-' + st.c + (st.dash ? ' d2' : ''));
+        g.setAttribute('data-m', q.m.name);
+        let seg = [];
+        const flush = () => { if (seg.length > 1) g.append(svgEl('path', { d: 'M' + seg.map((p) => xOf(p[0]).toFixed(1) + ' ' + yOf(p[1]).toFixed(1)).join(' L') })); seg = []; };
+        for (const p of q.pts) { if (seg.length && p[0] - seg[seg.length - 1][0] > 3) flush(); seg.push(p); }
+        flush();
+        for (const p of q.pts) {
+          const cx = xOf(p[0]).toFixed(1), cy = yOf(p[1]).toFixed(1);
+          g.append(svgEl('circle', { cx, cy, r: 2.4 }, 'pt'));
+          g.append(setTip(svgEl('circle', { cx, cy, r: 7 }, 'hit'), pad(new Date(start + p[0] * HOUR_MS).getHours()) + ':00 起的一小时 · ' + shortModel(q.m.name) +
+            '\n中位数 ' + p[1] + ' tok/s · ' + (q.m.ns ? q.m.ns[p[2]] : '?') + ' 次调用'));
+        }
+        hsvg.append(g);
+      }
+      const lg = el('div', 'p-legend');
+      for (const q of hser) {
+        const m = q.m, st = hlook.get(m.name);
+        const slow = m.now != null && m.usual > 0 && m.now < m.usual * 0.6;
+        const it = el('span', 'k-' + st.c + (st.dash ? ' dash' : ''));
+        it.append(el('i'), el('span', '', shortModel(m.name)), el('span', 'v' + (slow ? ' slow' : ''), 'now ' + (m.now != null ? m.now : '—') + (m.usual != null ? ' · usual ' + Math.round(m.usual) : '')));
+        setTip(it, m.name + '\n现在（最近 60 分钟）：' + (m.now != null ? m.now + ' tok/s，' + m.nowN + ' 次调用' : '算进速度的调用不到 ' + SPEED_MIN_N + ' 次') +
+          '\n平时（前 7 天每天中位数的中位数）：' + (m.usual != null ? Math.round(m.usual) + ' tok/s' : '还没有记录') + (slow ? '\n现在比平时慢 ' + Math.round((1 - m.now / m.usual) * 100) + '%' : ''));
+        it.addEventListener('mouseenter', () => {
+          hsvg.classList.add('focus');
+          for (const g of hsvg.querySelectorAll('.sl')) g.classList.toggle('hl', g.getAttribute('data-m') === m.name);
+        });
+        it.addEventListener('mouseleave', () => hsvg.classList.remove('focus'));
+        lg.append(it);
+      }
+      panel.append(lg);
+    }
+    const sec2 = el('div', 'p-sec');
+    sec2.append(setTip(el('span', 'p-sect', 'Daily median · last 30 days'), SPEED_DEF), setTip(el('span', 'p-range', have + (have === 1 ? ' day' : ' days') + ' recorded'), '最近 30 天里有速度记录的天数'));
+    panel.append(sec2);
+    // 还在补算的日子：最近 7 天里有调用、还没有速度记录的
+    const pending = lastDays(SPEED_BACK_DAYS + 1).slice(1).filter((d) => { const r = dayRecord(d); return r && recTokens(r)[0] > 0 && !spdOf(d); }).length;
+    // 模型：30 天里算进速度的调用数从多到少
+    const tot = new Map();
+    for (const m of sums) for (const [k, v] of Object.entries(m)) { const t = tot.get(k) || [0, 0]; t[0] += v[0]; t[1] += v[6]; tot.set(k, t); }
+    const all = [...tot].filter(([, t]) => t[0] > 0).sort((a, b) => b[1][0] - a[1][0]).map(([k]) => k);
+    if (!all.length) {
+      panel.append(setTip(el('div', 'p-empty', 'no speed records yet'), '还没有速度记录：今天的几分钟内就会算出来，最近 7 天的随后每 2 分钟补算一天（Antigravity 窗口要在前台）'));
+      panel.append(el('div', 'p-note', SPEED_DEF));
+      return;
+    }
+    const models = all.slice(0, SPEED_TOP);
+    const look = new Map(), used = new Map();
+    for (const k of all) {
+      const pn = Object.keys(MODEL_COLOR).filter((p) => k.includes(p)).sort((a, b) => b.length - a.length)[0];
+      const c = MODEL_COLOR[pn] || 'muted';
+      const i = used.get(c) || 0;
+      used.set(c, i + 1);
+      look.set(k, { c, dash: i > 0 });
+    }
+    // 图的横轴：从第一天有记录的日子开始（至少 7 天），刚开始记录时点不会全挤在 30 天的最右边；表里的 30d 照旧按 30 天算
+    const first = sums.findIndex((m) => Object.keys(m).length);
+    const start = Math.max(0, Math.min(first < 0 ? 0 : first, days.length - 7));
+    const cdays = days.slice(start), csums = sums.slice(start);
+    const point = (i, k) => { const v = csums[i][k]; return v && v[0] >= SPEED_MIN_N && v[2] != null ? v : null; };
+    let vmax = 0;
+    for (let i = 0; i < cdays.length; i++) for (const k of models) { const v = point(i, k); if (v) vmax = Math.max(vmax, v[2]); }
+    if (vmax > 0) {
+      // 先放进面板量出实际宽度，再按 1 个单位 = 1 像素画（按固定宽度画会跟着面板放大，字比面板里的大、图也太高）
+      const svg = svgEl('svg', {}, 'p-spd');
+      panel.append(svg);
+      const W = Math.max(280, Math.round(svg.getBoundingClientRect().width) || 600), H = 150, L = 30, R = 8, T = 8, Bm = 18;
+      svg.setAttribute('viewBox', '0 0 ' + W + ' ' + H);
+      const ymax = niceMax(vmax * 1.08);
+      const xOf = (i) => L + (W - L - R) * (i / (cdays.length - 1));
+      const yOf = (v) => T + (H - T - Bm) * (1 - v / ymax);
+      for (let j = 0; j <= 4; j++) {
+        const v = ymax * j / 4, y = yOf(v);
+        svg.append(svgEl('line', { x1: L, x2: W - R, y1: y, y2: y }, 'g'));
+        const t = svgEl('text', { x: L - 5, y: y + 3.5, 'text-anchor': 'end' });
+        t.textContent = String(Math.round(v));
+        svg.append(t);
+      }
+      cdays.forEach((d, i) => {
+        const last = i === cdays.length - 1;
+        if (!last && cdays.length > 10 && new Date(d + 'T12:00:00').getDay() !== 1) return; // 10 天以内每天都写，再多只写周一和今天
+        const t = svgEl('text', { x: xOf(i), y: H - 4, 'text-anchor': last ? 'end' : i === 0 ? 'start' : 'middle' }, last ? 'today' : '');
+        t.textContent = last ? 'today' : dayLabel(d).md;
+        svg.append(t);
+      });
+      for (const k of models.slice().reverse()) { // 调用最多的最后画，在最上面
+        const st = look.get(k);
+        const g = svgEl('g', {}, 'sl k-' + st.c + (st.dash ? ' d2' : ''));
+        g.setAttribute('data-m', k);
+        const pts = [];
+        for (let i = 0; i < cdays.length; i++) { const v = point(i, k); if (v) pts.push([i, v]); }
+        if (pts.length > 1) g.append(svgEl('path', { d: 'M' + pts.map(([i, v]) => xOf(i).toFixed(1) + ' ' + yOf(v[2]).toFixed(1)).join(' L') }));
+        for (const [i, v] of pts) {
+          const cx = xOf(i).toFixed(1), cy = yOf(v[2]).toFixed(1);
+          g.append(svgEl('circle', { cx, cy, r: 2.4 }, 'pt'));
+          const lb = dayLabel(cdays[i]);
+          g.append(setTip(svgEl('circle', { cx, cy, r: 7 }, 'hit'), lb.md + ' ' + lb.wd + ' · ' + shortModel(k) + '\n中位数 ' + v[2] + ' tok/s（中间一半 ' + v[1] + '–' + v[3] + '）\n' +
+            (v[4] != null ? '首字 ' + v[4] + ' 秒（P90 ' + v[5] + ' 秒）\n' : '') + '算进速度的调用 ' + v[0] + ' 次（共 ' + v[6] + ' 次）'));
+        }
+        svg.append(g);
+      }
+      const legend = el('div', 'p-legend');
+      for (const k of models) {
+        const st = look.get(k);
+        const it = el('span', 'k-' + st.c + (st.dash ? ' dash' : ''));
+        it.append(el('i'), el('span', '', shortModel(k)));
+        setTip(it, k);
+        it.addEventListener('mouseenter', () => {
+          svg.classList.add('focus');
+          for (const g of svg.querySelectorAll('.sl')) g.classList.toggle('hl', g.getAttribute('data-m') === k);
+        });
+        it.addEventListener('mouseleave', () => svg.classList.remove('focus'));
+        legend.append(it);
+      }
+      panel.append(legend);
+    } else {
+      panel.append(setTip(el('div', 'p-empty', 'not enough calls to draw'), '每天算进速度的调用都不到 ' + SPEED_MIN_N + ' 次，图上不画；下面的表照样写'));
+    }
+    // 表：每个模型一行，按 30 天里算进速度的调用数从多到少
+    const table = el('table');
+    const thead = el('thead');
+    const hr = el('tr');
+    const heads = [['Model', '模型（界面名，思考档位不同的分开算）'], ['Today', '今天的生成速度中位数（tok/s）'],
+      ['7d', '最近 7 天：每天中位数的中位数（只算那天算进速度的调用不少于 ' + SPEED_MIN_N + ' 次的天）'], ['30d', '最近 30 天：每天中位数的中位数'],
+      ['TTFT 7d', '最近 7 天首字时间：每天中位数的中位数'], ['Calls 30d', '最近 30 天有速度记录的日子里的调用次数（含输出太短、没算进速度的）']];
+    for (const [h, t] of heads) { const th = el('th', '', h); setTip(th, t); hr.append(th); }
+    thead.append(hr);
+    const tbody = el('tbody');
+    const fmtV = (v) => (v == null ? '—' : String(Math.round(v)));
+    for (const k of all) {
+      const st = look.get(k);
+      const s7 = sums.slice(-7).map((m) => m[k]), s30 = sums.map((m) => m[k]);
+      const td = setTip(el('td', 'md km k-' + st.c, clip(shortModel(k), 28)), k);
+      const t0 = sums[sums.length - 1][k];
+      const tdT = el('td', 'sp', t0 && t0[2] != null ? String(t0[2]) : '—');
+      if (t0 && t0[2] != null) setTip(tdT, '今天：中间一半 ' + t0[1] + '–' + t0[3] + ' tok/s，算进速度的调用 ' + t0[0] + ' 次' + (t0[0] < SPEED_MIN_N ? '（太少，参考价值不大）' : ''));
+      const tt = spanMedian(s7, 4);
+      const tr = el('tr');
+      tr.append(td, tdT, el('td', 'sp', fmtV(spanMedian(s7, 2))), el('td', 'sp', fmtV(spanMedian(s30, 2))), el('td', '', tt == null ? '—' : tt.toFixed(1) + 's'), el('td', '', String(tot.get(k)[1])));
+      tbody.append(tr);
+    }
+    table.append(thead, tbody);
+    const wrap = el('div', 'p-table');
+    wrap.append(table);
+    panel.append(wrap);
+    panel.append(setTip(el('div', 'p-note', '生成速度 = 输出 token（含思考）÷（首字时间 + 生成用时），每天取中位数；输出不到 ' + SPEED_MIN_OUT + ' token 的调用不算。' +
+      (pending ? '最近 7 天还有 ' + pending + ' 天在补算。' : '') + '更早的日子打开那天的调用明细后补上。'), SPEED_DEF));
   };
   // Theme 页（2026-11-22 加）：上面是配色画廊，每张卡片是当前状态栏的实时副本（套上那套配色和当前外形），点一下就换；
   // 下面是外形、进度条、信息密度、图标。选了马上生效，注入程序 30 秒内存进 look.json 并推给其他窗口。
@@ -3434,6 +3835,8 @@ body.theme-dark ${T}, :root[style*="color-scheme: dark"] ${T}{
 }
 /* 其他配色（data-pal，见 PALETTES）：浅色、深色各一条，选择器比上面的基础色更具体 */
 ${PAL_CSS}
+/* 插件面板里关掉了状态栏（v2.0.15）：高度压成 0、看不见，但元素还在原位，每日用量面板照样按它定位、照样能从插件面板打开 */
+${B}[data-off]{height:0 !important; min-height:0 !important; padding:0 !important; margin:0 !important; overflow:hidden !important; visibility:hidden !important}
 /* 分隔符：每项左边留 1.6em，竖线画在这段空隙里；整行左移 1.6em 并把左边 1.6em 裁掉，
    这样窄窗口换行后，排在行首那一项的竖线正好被裁掉，不会出现“| 缓存 …”这种行首竖线 */
 ${B} .ln{display:flex; flex-wrap:wrap; align-items:center; row-gap:1px; margin-left:-1.6em; clip-path:inset(-6px -6px -6px 1.6em)}
@@ -3588,6 +3991,25 @@ ${P} .p-legend{display:flex; flex-wrap:wrap; gap:.15rem 1rem; margin-bottom:.45r
 ${P} .p-legend > span{color:var(--kc); display:inline-flex; align-items:center; cursor:default}
 ${P} .p-legend i{display:inline-block; width:8px; height:8px; border-radius:2px; background:var(--kc); margin-right:.35em}
 ${P} .p-legend .v{margin-left:.45em; opacity:.75}
+${P} .p-legend .dash i{background:none; width:12px; height:0; border-radius:0; border-top:2px dashed var(--kc)}
+/* speed 页（v2.0.15）：30 天速度折线图；表格里模型名按价目上色 */
+${P} td.km{color:var(--kc)}
+${P} .p-spd{display:block; width:100%; height:auto; margin:.1rem 0 .35rem; overflow:visible}
+${P} .p-spd .g{stroke:var(--sep); stroke-width:1}
+${P} .p-spd text{fill:var(--k-muted); font-size:10px}
+${P} .p-spd text.today{fill:var(--k-cost); font-weight:600}
+${P} .p-spd .sl{transition:opacity .12s}
+${P} .p-spd .sl path{fill:none; stroke:var(--kc); stroke-width:1.8; stroke-linejoin:round; stroke-linecap:round}
+${P} .p-spd .sl.d2 path{stroke-dasharray:5 3}
+${P} .p-spd .sl .pt{fill:var(--kc)}
+${P} .p-spd .sl .hit{fill:transparent}
+${P} .p-spd .sl:hover path{stroke-width:2.6}
+${P} .p-spd.focus .sl{opacity:.15}
+${P} .p-spd.focus .sl.hl{opacity:1}
+${P} .p-spd .cur{fill:color-mix(in srgb, var(--sep) 32%, transparent)}
+${P} .p-sec{display:flex; align-items:center; flex-wrap:wrap; gap:.3rem .6rem; margin:.45rem 0 .15rem}
+${P} .p-sect{color:var(--k-text); font-weight:600}
+${P} .p-legend .v.slow{color:var(--k-quota); opacity:1; font-weight:600}
 /* 今天的汇总卡片：四格，上面小字标签、下面数值（颜色跟状态栏里同类的项一样） */
 ${P} .p-kpi{display:grid; grid-template-columns:repeat(4, minmax(0, 1fr)); gap:.4rem; margin:.1rem 0 .55rem}
 ${P} .p-kpi .kc{display:flex; flex-direction:column; gap:.05rem; padding:.3rem .55rem; border:1px solid var(--sep); border-radius:8px; cursor:default; min-width:0}
@@ -3798,6 +4220,7 @@ ${T}{position:fixed; z-index:2147483600; pointer-events:none; box-sizing:border-
         fresh = true;
       }
       lookAttrs(bar);
+      if (bar.hasAttribute('data-off') !== !!S.barOff) bar.toggleAttribute('data-off', !!S.barOff);
       if (force || fresh) {
         S.actShown = false;
         bar.replaceChildren(...build(paneConvId(box)));
@@ -3836,6 +4259,132 @@ ${T}{position:fixed; z-index:2147483600; pointer-events:none; box-sizing:border-
     ensure(true);
     refreshPanel();
   };
+  // ---------- 给插件面板用的（v2.0.15） ----------
+  // 关掉状态栏：插件面板的开关存在 look.json 的 bar（见 inject.mjs 的 setBarOn），注入时经 CFG.barOff 带来，切换时注入程序调 S.setBarOff。
+  // 只是看不见（高度压成 0），数据照常收、每日用量面板照样能从插件面板打开。
+  S.barOff = !!(CFG && CFG.barOff);
+  S.setBarOff = (off) => { S.barOff = !!off; ensure(true); };
+  // 主窗格的状态栏（有子代理窗格时挑根对话那个输入框上面的）
+  const mainBar = () => {
+    const root = currentRoot();
+    let first = null;
+    for (const box of document.querySelectorAll('[data-testid="agent-input-box"]')) {
+      const bar = box.previousElementSibling;
+      if (!bar || !bar.classList.contains(BAR_CLASS)) continue;
+      if (!first) first = bar;
+      const id = paneConvId(box);
+      if (!id || id === root) return bar;
+    }
+    return first;
+  };
+  // 插件面板的按钮：在这个窗口里打开每日用量面板的某一页（usage 每日用量、calls 调用明细（day 哪一天）、look 外观）
+  S.openPanel = (view, day) => {
+    const miss = view === 'miss'; // 插件面板“缓存没命中”格子：打开今天的调用明细，只看没命中的
+    const v = miss ? 'calls' : ['calls', 'look', 'speed'].includes(view) ? view : 'usage';
+    let p = document.querySelector(P);
+    if (!p) {
+      const bar = mainBar();
+      if (!bar) return false;
+      togglePanel(bar, v);
+      p = document.querySelector(P);
+      if (!p) return false;
+    }
+    S.panelView = v;
+    if (v === 'calls') { S.callsDay = !miss && /^\d{4}-\d{2}-\d{2}$/.test(String(day || '')) ? day : dayName(); S.callsMiss = miss; }
+    try { renderPanel(p); } catch (e) { p.textContent = 'usage panel error: ' + e.message; }
+    return true;
+  };
+  // 插件面板要的数据，注入程序每隔几秒来取一次（inject.mjs 的 panelSnap）。都是这个窗口里已经算好的数，不另外发请求：
+  //   bar：主窗格状态栏的 HTML（去掉子代理行）和它用的样式表的指纹（样式表本身另外取，见 S.barCss）；
+  //   conv：当前对话的标题、是不是在跑；today：今天花费（含 agy CLI）、对话数、调用数；
+  //   quota：当前模型那一组的 5 小时和每周额度（已用、重置时间、时间进度、每周预估）；week：最近 7 天每天的花费（含 CLI）。
+  const cssHash = (s) => { let h = 5381; for (let i = 0; i < s.length; i++) h = (h * 33 + s.charCodeAt(i)) | 0; return s.length + '-' + (h >>> 0).toString(36); };
+  S.barCss = () => style.textContent;
+  // 插件面板“速度”页用（v2.0.15）：S.spdHours 里最近 24 小时算进速度的调用最多的 3 个模型，每小时的速度中位数（那小时算进速度的调用
+  // 不到 SPEED_MIN_N 次就是 null）、“现在”（最近 60 分钟，同样要够 SPEED_MIN_N 次）、“平时”（今天以前 7 天每天中位数的中位数）。
+  // 颜色用主窗口状态栏当前配色里这个价目的颜色，同一个价目的第二个思考档位标 dash（面板画虚线）。today0：今天 0 点（面板的“今天”从这里画）
+  const speedNow = (bar) => {
+    const h = S.spdHours;
+    if (!h || !h.m) return null;
+    const cs = bar ? getComputedStyle(bar) : null;
+    const base = lastDays(SPEED_BACK_DAYS + 1).slice(1).map((d) => { const x = spdOf(d); return (x && x.m) || {}; });
+    const used = new Map();
+    const top = Object.entries(h.m).map(([k, v]) => [k, v.reduce((t, x) => t + (x ? x[0] : 0), 0)]).filter(([, n]) => n > 0).sort((p, q) => q[1] - p[1]).slice(0, 3);
+    const models = top.map(([k]) => {
+      const pn = Object.keys(MODEL_COLOR).filter((p) => k.includes(p)).sort((p, q) => q.length - p.length)[0];
+      const key = MODEL_COLOR[pn] || 'muted';
+      const i = used.get(key) || 0;
+      used.set(key, i + 1);
+      const nw = h.now && h.now[k];
+      return { name: k, short: shortModel(k), color: cs ? cs.getPropertyValue('--k-' + key).trim() : '', dash: i > 0,
+        pts: h.m[k].map((x) => (x && x[0] >= SPEED_MIN_N && x[1] != null ? x[1] : null)), ns: h.m[k].map((x) => (x ? x[0] : 0)),
+        now: nw && nw[0] >= SPEED_MIN_N ? nw[2] : null, nowN: nw ? nw[0] : 0, usual: spanMedian(base.map((m) => m[k]), 2) };
+    });
+    return { at: h.at, start: h.start, today0: dayBounds(dayName())[0], models };
+  };
+  S.panelSnapshot = () => {
+    const out = { v: 1, at: Date.now(), visible: document.visibilityState !== 'hidden', barOff: !!S.barOff };
+    const bar = mainBar();
+    if (bar) {
+      const c = bar.cloneNode(true);
+      c.removeAttribute('data-off');
+      for (const x of [...c.children]) if (!x.classList.contains('ln') || x.classList.contains('sub')) x.remove();
+      // 悬停说明不带过去：插件面板不显示它，而且额度那一项的说明里有（打了星号的）账号邮箱
+      c.querySelectorAll('[data-agy-tip]').forEach((x) => x.removeAttribute('data-agy-tip'));
+      out.bar = { html: c.outerHTML, css: cssHash(style.textContent) };
+    }
+    const root = currentRoot();
+    if (root) {
+      // 当前对话的一行（v2.0.15 方案 A）：累计花费（含子代理，和状态栏第一项一样）、上下文、压缩次数、最近一次调用的缓存命中率
+      const rc = S.convs.get(root) || {};
+      const md = (S.agents.get(root) || {}).last;
+      const mu = md && md.modelUsage;
+      let tot = null;
+      try { tot = treeCost(treeIds(root)); } catch (e) { /* 算不出累计就不写这一项 */ }
+      const cache = mu ? Number(mu.cacheReadTokens) || 0 : 0, inp = mu ? Number(mu.inputTokens) || 0 : 0;
+      out.conv = { title: String((S.casMeta.get(root) || {}).title || '').slice(0, 120), running: isRunning(root),
+        usd: tot && tot.calls ? tot.usd : null, calls: tot ? tot.calls : 0,
+        ctx: rc.ctx && Number(rc.ctx.maxContextTokens) > 0 ? { used: Number(rc.ctx.estimatedTokensUsed) || 0, max: Number(rc.ctx.maxContextTokens) } : null,
+        comps: Array.isArray(rc.compactions) ? rc.compactions.length : 0, hit: cache > 0 ? cache / (cache + inp) : null };
+    }
+    const nm = dayName();
+    const rec = dayRecord(nm) || {};
+    const tc = todayCostCached();
+    out.today = { usd: +rec.usd || 0, convs: +rec.convs || 0, calls: (tc.calls || 0) + ((rec.cli && rec.cli.calls) || 0), cliUsd: (rec.cli && rec.cli.usd) || 0 };
+    const main = root ? S.agents.get(root) : null;
+    const key = modelKey(main && main.last) || selectedKey();
+    const m = S.models.get(key) || {};
+    const fam = !m.label || /^gemini/i.test(m.modelId || '') || /^gemini/i.test(m.label) ? 'gemini' : '3p';
+    out.quota = [];
+    for (const g of (S.quota && S.quota.groups) || []) {
+      for (const b of g.buckets || []) {
+        if (!String(b.bucketId || '').startsWith(fam + '-') || b.disabled || !(Number(b.remainingFraction) >= 0)) continue;
+        const weekly = b.window === 'weekly';
+        const reset = tms(b.resetTime);
+        const span = weekly ? WEEK_MS : 5 * 3600e3;
+        const est = weekly ? weekEst(b.bucketId) : null;
+        out.quota.push({ group: (GROUPS.find(([p]) => p === fam) || [, ''])[1], weekly, used: Math.max(0, Math.min(1, 1 - Number(b.remainingFraction))),
+          reset, timePct: reset > 0 ? Math.max(0, Math.min(1, 1 - (reset - Date.now()) / span)) : null, est: est ? { proj: est.proj, short: est.short } : null });
+      }
+    }
+    out.quota.sort((a, b) => a.weekly - b.weekly);
+    out.week = lastDays(7).reverse().map((d) => ({ day: d, usd: +((d === nm ? rec : dayRecord(d)) || {}).usd || 0 }));
+    out.look = { pal: (PAL_INFO[S.look.pal] || PAL_INFO.cometix)[0] };
+    out.speed = speedNow(mainBar());
+    // 今天缓存没命中（方案 A 的格子）：次数、多花的钱、今天合计（算占比）、按原因从多到少 [原因, 次数, 美元]
+    const mo = missOfDay(nm);
+    if (mo) out.miss = { n: mo.n, usd: mo.usd, total: mo.total, by: Object.entries(mo.by).map(([k, v]) => [k, v[0], v[1]]).sort((a, b) => b[2] - a[2]) };
+    // 速度格子：最近 60 分钟调用最多的模型（算进速度的不少于 SPEED_MIN_N 次）；没有就用今天调用最多的模型、写今天的中位数。
+    // usual：前 7 天每天中位数的中位数（不含今天）
+    const baseDays = lastDays(SPEED_BACK_DAYS + 1).slice(1).map((d) => { const x = spdOf(d); return (x && x.m) || {}; });
+    const pick = (m) => Object.entries(m || {}).filter(([, v]) => v[0] >= SPEED_MIN_N && v[2] != null).sort((a, b) => b[1][0] - a[1][0])[0];
+    const hNow = S.spdHours && pick(S.spdHours.now);
+    const tBest = hNow ? null : pick((spdOf(nm) || {}).m);
+    const best = hNow || tBest;
+    if (best) out.speedTop = { name: best[0], short: shortModel(best[0]), v: best[1][2], n: best[1][0], span: hNow ? 'hour' : 'today', usual: spanMedian(baseDays.map((m) => m[best[0]]), 2) };
+    return out;
+  };
+
   // 注入程序检查完在线更新后推过来（见 inject.mjs 的 pushRemote）：换价格表，重画状态栏和打开着的面板
   S.setRemote = (r) => {
     if (!r || typeof r !== 'object') return;
@@ -3873,6 +4422,7 @@ ${T}{position:fixed; z-index:2147483600; pointer-events:none; box-sizing:border-
       if (S.lsHeaders && document.visibilityState !== 'hidden' && Date.now() - (S.casAskAt || 0) >= casEvery) S.fetchCascades();
       if (S.lsHeaders && document.visibilityState !== 'hidden') { try { S.refreshCosts(); } catch (e) { /* 费用估算出错不影响其他显示 */ } }
       if (S.lsHeaders && document.visibilityState !== 'hidden') { try { S.pollSubs(); } catch (e) { /* 子代理步骤取不到不影响其他显示 */ } }
+      if (S.lsHeaders && document.visibilityState !== 'hidden') { try { speedTick(); } catch (e) { /* 速度统计出错不影响其他显示 */ } }
       if (S.lsHeaders && !S.account && Date.now() - (S.acctAskAt || 0) > 60000) {
         S.acctAskAt = Date.now();
         lsCall('GetUserStatus', {}).then((j) => { if (j) S.onMessage('GetUserStatus', j); });
