@@ -2664,9 +2664,24 @@ function agyStatusBar(CFG) {
   // 昨天动过的对话一般已经在缓存里）；最近 7 天里有调用、还没有摘要
   // （或者摘要是那天还没过完时算的）的日子，每 2 分钟补算一天。补算要取那天动过的每个对话的调用和步骤（和打开那天的调用明细一样），
   // 所以一次只算一天；一天取失败了 1 小时内不再试。agy CLI 的调用向注入程序要（不动 S.cliWant，免得和开着的调用明细抢），
-  // 要来之前算的那次不含 CLI，下次再算时补上。
-  const SPEED_TODAY_MS = 300e3, SPEED_GAP_MS = 120e3, SPEED_BACK_DAYS = 7;
+  // 等它交回来再算（askCli）。有用量、摘要却是空的日子也重算（v2.0.15 没等 CLI 的行就算，全是 CLI 调用的日子存成了空摘要）。
+  const SPEED_TODAY_MS = 300e3, SPEED_GAP_MS = 120e3, SPEED_BACK_DAYS = 7, SPEED_CLI_WAIT_MS = 15e3;
   S.spdJob = S.spdJob || { busy: false, at: 0, tried: {} };
+  // 向注入程序要某一天 CLI 的调用，等它交回来（S.setCliCalls 记下收到的时间 at）。注入程序要先读 CLI 对话库，回答是异步的；
+  // 桌面版那天没有对话时 S.loadCalls 几乎马上返回，不等就只算了桌面版的调用（11-26 Mac 实测：11-22 那天 309 次调用全是 CLI 的，摘要是空的）。
+  // 交回来了、或者这个页面要不到（没有 __agyZhAsk）→ true；等了 15 秒没交回来 → false
+  const askCli = (d) => new Promise((resolve) => {
+    const t0 = Date.now();
+    if (typeof window.__agyZhAsk !== 'function') return resolve(true);
+    try { window.__agyZhAsk(JSON.stringify({ t: 'cli-calls', day: d })); } catch (e) { return resolve(true); }
+    const check = () => {
+      const c = (S.cliCalls || {})[d];
+      if (c && c.at >= t0) resolve(true);
+      else if (Date.now() - t0 >= SPEED_CLI_WAIT_MS) resolve(false);
+      else setTimeout(check, 250);
+    };
+    check();
+  });
   const speedTick = () => {
     const j = S.spdJob;
     if (j.busy || Date.now() - j.at < SPEED_GAP_MS || !S.loadCalls) return;
@@ -2678,27 +2693,30 @@ function agyStatusBar(CFG) {
         const r = dayRecord(d);
         if (!r || !(recTokens(r)[0] > 0) || Date.now() - (j.tried[d] || 0) < 3600e3) return false;
         const s = spdOf(d);
-        return !s || s.at < dayBounds(d)[1];
+        return !s || s.at < dayBounds(d)[1] || !Object.keys(s.m || {}).length;
       }) || null;
     }
     if (!nm) return;
     j.busy = true;
     j.tried[nm] = Date.now();
-    const ask = (d) => { try { if (typeof window.__agyZhAsk === 'function') window.__agyZhAsk(JSON.stringify({ t: 'cli-calls', day: d })); } catch (e) {} };
     const ok = (res) => !(res.failed && !res.rows.length); // 一个都没取到：多半是后台一时取不到，不记成“那天没有调用”
-    ask(nm);
+    const cliNm = askCli(nm);
     let p;
     if (nm === today) {
       const yd = lastDays(2)[1];
-      ask(yd);
-      p = S.loadCalls(today).then((a) => {
+      const cliYd = askCli(yd);
+      // 今天的 CLI 没等到也照样记（5 分钟后还会再算）
+      p = Promise.all([S.loadCalls(today), cliNm]).then(([a]) => {
         if (ok(a)) {
           noteSpeed(today, a.rows.concat(cliRows(today)));
           if (S.missDay) Object.assign(S.missDay, { day: today, rows: a.rows, at: Date.now() }); // 插件面板的“缓存没命中”格子用（missOfDay）
         }
-        return S.loadCalls(yd).catch(() => ({ rows: [], failed: 1 })).then((b) => noteHours(a.rows.concat(cliRows(today), b.rows, cliRows(yd))));
+        return Promise.all([S.loadCalls(yd).catch(() => ({ rows: [], failed: 1 })), cliYd]).then(([b]) => noteHours(a.rows.concat(cliRows(today), b.rows, cliRows(yd))));
       });
-    } else p = S.loadCalls(nm).then((res) => { if (ok(res)) noteSpeed(nm, res.rows.concat(cliRows(nm))); });
+    } else {
+      // 以前的日子算完就不再算了：CLI 的没等到就不记，1 小时后再试
+      p = Promise.all([S.loadCalls(nm), cliNm]).then(([res, cliOk]) => { if (ok(res) && cliOk) noteSpeed(nm, res.rows.concat(cliRows(nm))); });
+    }
     p.catch(() => {}).then(() => { j.busy = false; j.at = Date.now(); });
   };
   // agy CLI 的调用（2026-11-24 加）：CLI 的对话不在桌面版后台里，取不到；打开某一天的明细时向注入程序要（S.cliAsk），
@@ -2706,7 +2724,7 @@ function agyStatusBar(CFG) {
   S.cliCalls = S.cliCalls || {};
   S.setCliCalls = (o) => {
     if (!o || !/^\d{4}-\d{2}-\d{2}$/.test(String(o.day)) || !Array.isArray(o.rows)) return;
-    S.cliCalls[o.day] = { rows: o.rows, convs: o.convs && typeof o.convs === 'object' ? o.convs : {} };
+    S.cliCalls[o.day] = { rows: o.rows, convs: o.convs && typeof o.convs === 'object' ? o.convs : {}, at: Date.now() }; // at：后台算速度时认这次要的交回来了没有（askCli）
     if (S.cliRedraw) S.cliRedraw(o.day);
     if (S.panelView === 'usage' && document.querySelector(P)) refreshPanel(); // 每日用量页的 cap 也用到 CLI 的明细
   };

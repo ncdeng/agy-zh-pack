@@ -7,8 +7,10 @@ const block = cut('statusbar.js', '  // ---------- 生成速度统计', '  // ag
 // env：页面里的依赖（S、历史、日子、后台取数）。speedTick 用到的都从这里给
 function make(env = {}) {
   const S = { enumModel: new Map(), loadCalls: env.loadCalls || null, ...(env.S || {}) };
+  // cliWait：把等 CLI 明细的 15 秒改短，测“等不到”的情况
+  const code = env.cliWait ? block.replace('SPEED_CLI_WAIT_MS = 15e3', 'SPEED_CLI_WAIT_MS = ' + env.cliWait) : block;
   const fns = new Function('S', 'histDay', 'lastDays', 'dayRecord', 'recTokens', 'dayBounds', 'dayName', 'cliRows', 'window',
-    block + '\nreturn { callSpeed, quantile, speedSummary, spanMedian, callModel, shortModel, noteSpeed, noteHours, spdOf, speedTick, SPEED_MIN_OUT, SPEED_MIN_N };')(
+    code + '\nreturn { callSpeed, quantile, speedSummary, spanMedian, callModel, shortModel, noteSpeed, noteHours, spdOf, speedTick, SPEED_MIN_OUT, SPEED_MIN_N };')(
     S, env.histDay || (() => null), env.lastDays || (() => []), env.dayRecord || (() => null), env.recTokens || ((r) => [r.calls || 0]),
     (nm) => { const a = new Date(nm + 'T00:00:00').getTime(); return [a, a + 86400e3]; }, env.dayName || (() => '2026-11-26'),
     env.cliRows || (() => []), env.window || {});
@@ -73,22 +75,28 @@ test('同一天页面里新算的和历史里存的，取算得晚的那份', ()
   assert.equal(spdOf('2026-11-24'), null);
 });
 
-// 后台挑哪一天：今天的摘要超过 10 分钟就先算今天；否则补最近 7 天里有调用、还没有摘要（或摘要是那天没过完时算的）的日子
+// 后台挑哪一天：今天的摘要超过 5 分钟就先算今天；否则补最近 7 天里有调用、还没有摘要（或摘要是那天没过完时算的、或是空的）的日子
+// CLI 的明细：__agyZhAsk 默认马上交回 opts.cli[那天]（模拟注入程序调 S.setCliCalls）；cliLate 时不交回，测试里用 reply() 晚点交
 function job(opts) {
-  const asked = [];
+  const asked = [], cliAsked = [];
   const days = ['2026-11-26', '2026-11-25', '2026-11-24', '2026-11-23'];
   const recs = { '2026-11-25': { calls: 10 }, '2026-11-24': { calls: 0 }, '2026-11-23': { calls: 5 } };
   const hist = opts.hist || {};
+  const cliCalls = {};
+  const reply = (d) => { cliCalls[d] = { rows: (opts.cli && opts.cli[d]) || [], at: Date.now() }; };
   const env = make({
+    S: { cliCalls }, cliWait: opts.cliWait,
     lastDays: () => days, dayRecord: (d) => recs[d] || null, histDay: (d) => hist[d] || null,
     loadCalls: (nm) => { asked.push(nm); return Promise.resolve(opts.res || { rows: [call(1000, 2, 8)], failed: 0 }); },
-    window: { __agyZhAsk: () => {} },
+    cliRows: (d) => (cliCalls[d] ? cliCalls[d].rows : []),
+    window: { __agyZhAsk: (p) => { const d = JSON.parse(p).day; cliAsked.push(d); if (!opts.cliLate) reply(d); } },
   });
   if (opts.spd) Object.assign(env.S.spd, opts.spd);
-  return { ...env, asked };
+  return { ...env, asked, cliAsked, reply };
 }
-const settle = () => new Promise((r) => setTimeout(r, 0));
+const settle = (ms = 0) => new Promise((r) => setTimeout(r, ms));
 const end = (d) => new Date(d + 'T00:00:00').getTime() + 86400e3;
+const done = { a: [5, 90, 100, 110, 3, 5, 5] }; // 一份正常的摘要
 
 test('后台记录：今天没有摘要先算今天，再取昨天的调用算最近 24 小时每小时的速度；算完 2 分钟内不再取', async () => {
   const j = job({});
@@ -103,9 +111,43 @@ test('后台记录：今天没有摘要先算今天，再取昨天的调用算�
 });
 
 test('后台记录：今天的还新，就补最近有调用、没有摘要的日子；没调用的日子跳过', () => {
-  const j = job({ spd: { '2026-11-26': { at: Date.now(), m: {} } }, hist: { '2026-11-25': { spd: { at: end('2026-11-25') + 1, m: {} } } } });
+  const j = job({ spd: { '2026-11-26': { at: Date.now(), m: {} } }, hist: { '2026-11-25': { spd: { at: end('2026-11-25') + 1, m: done } } } });
   j.speedTick();
   assert.deepEqual(j.asked, ['2026-11-23']); // 11-25 已经有那天过完以后算的摘要，11-24 没有调用
+});
+
+test('后台记录：有用量、摘要却是空的日子重算（v2.0.15 没等 CLI 的行，全是 CLI 调用的日子存成了空摘要）', () => {
+  const j = job({ spd: { '2026-11-26': { at: Date.now(), m: {} } }, hist: { '2026-11-25': { spd: { at: end('2026-11-25') + 1, m: {} } } } });
+  j.speedTick();
+  assert.deepEqual(j.asked, ['2026-11-25']);
+});
+
+test('后台记录：CLI 的行比桌面版的晚到，等交回来再算；全是 CLI 调用的日子也算得出', async () => {
+  const cli = { '2026-11-25': [call(1200, 2, 4, { disp: 'Gemini 4 Neon (High)' }), call(900, 1, 2, { disp: 'Gemini 4 Neon (High)' }), call(1500, 2, 3, { disp: 'Gemini 4 Neon (High)' })] };
+  const j = job({ spd: { '2026-11-26': { at: Date.now(), m: {} } }, res: { rows: [], failed: 0 }, cli, cliLate: true });
+  j.speedTick();
+  assert.deepEqual(j.asked, ['2026-11-25']);
+  assert.deepEqual(j.cliAsked, ['2026-11-25']);
+  await settle(50);
+  assert.equal(j.S.spd['2026-11-25'], undefined); // 桌面版的已经返回（0 次），CLI 的还没到：不算
+  j.reply('2026-11-25');
+  await settle(400);
+  assert.deepEqual(j.S.spd['2026-11-25'].m['Gemini 4 Neon (High)'].slice(0, 1), [3]);
+  assert.equal(j.S.spdJob.busy, false);
+});
+
+test('后台记录：以前的日子等不到 CLI 的行就不记，1 小时内不再试；今天的照样记', async () => {
+  const j = job({ spd: { '2026-11-26': { at: Date.now(), m: {} } }, cliLate: true, cliWait: 100 });
+  j.speedTick();
+  await settle(400);
+  assert.equal(j.S.spd['2026-11-25'], undefined);
+  assert.ok(j.S.spdJob.tried['2026-11-25'] > 0);
+  assert.equal(j.S.spdJob.busy, false);
+  const t = job({ cliLate: true, cliWait: 100 });
+  t.speedTick();
+  await settle(600);
+  assert.equal(t.S.spd['2026-11-26'].m['Gemini 4 Hydrogen (High)'][0], 1);
+  assert.ok(t.S.spdHours && t.S.spdHours.m);
 });
 
 test('后台记录：摘要是那天还没过完时算的，重算一次', () => {
@@ -115,7 +157,7 @@ test('后台记录：摘要是那天还没过完时算的，重算一次', () =>
 });
 
 test('后台记录：一个对话都没取到时不记成“那天没有调用”，1 小时内不再试这一天', async () => {
-  const j = job({ spd: { '2026-11-26': { at: Date.now(), m: {} } }, hist: { '2026-11-23': { spd: { at: end('2026-11-23') + 1, m: {} } } },
+  const j = job({ spd: { '2026-11-26': { at: Date.now(), m: {} } }, hist: { '2026-11-23': { spd: { at: end('2026-11-23') + 1, m: done } } },
     res: { rows: [], failed: 3 } });
   j.speedTick();
   assert.deepEqual(j.asked, ['2026-11-25']);

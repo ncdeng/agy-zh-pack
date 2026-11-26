@@ -5,7 +5,7 @@
 //
 // 命令：
 //   all                 发版前用：依次跑 status、plugin、bar、panel、calls（都是只读的），最后列出每项 OK / WARN / FAIL
-//   plugin              插件面板（agy-zh）本身：顶部状态、横幅、状态栏预览、今天和额度、最近 7 天、设置项的开关、“高级”的摘要（要先打开插件面板）
+//   plugin              插件面板（agy-zh）本身：顶部状态、横幅、“今天”四个格子和当前对话、状态栏预览（只在关掉状态栏时有）、最近 7 天、设置项的开关、“高级”的摘要（要先打开插件面板）
 //   status              插件面板接口：版本、最新版本、完整性、在线更新、没翻译的文字条数（要先打开插件面板：右上角插件菜单 → agy-zh）
 //   missing             插件面板接口：列出记下的没翻译的界面文字（补词典用）
 //   check               插件面板的“立即检查”，15 秒后再读一次 status
@@ -202,17 +202,18 @@ CMDS.plugin = async () => {
   try {
     const v = await until(c, `(() => { const n = document.getElementById('s-now'); if (!n || !n.textContent.trim()) return null;
       const q = (s) => [...document.querySelectorAll(s)], tx = (e) => (e ? e.textContent.trim() : '');
-      return { pill: tx(document.getElementById('pill')), banners: q('.banner .t b').map(tx), conv: tx(n.querySelector('.card-h')),
+      return { pill: tx(document.getElementById('pill')), banners: q('.banner .t b').map(tx), conv: [tx(n.querySelector('.conv .ttl')), tx(n.querySelector('.conv .run'))].filter(Boolean).join(' · '), nums: tx(n.querySelector('.conv .nums')),
         barRows: n.querySelectorAll('.sbwrap .ln').length, barCss: document.getElementById('barcss').textContent.length, noicons: !!n.querySelector('.sbwrap.noicons'),
-        tiles: q('#s-now .tile').map((e) => tx(e.querySelector('.k')) + ' ' + tx(e.querySelector('.v'))), empty: tx(n.querySelector('.empty')),
+        tiles: q('#s-now .tile').map((e) => (e.classList.contains('warn') ? '[黄] ' : '') + tx(e.querySelector('.k')) + ' ' +
+          (e.querySelector('.v') ? tx(e.querySelector('.v')) : [...e.querySelectorAll('.q2 > *')].map(tx).filter(Boolean).join(' '))), empty: tx(n.querySelector('.empty')),
         week: q('#s-week .week button').length, wsum: tx(document.querySelector('#s-week .wsum')),
         items: q('#s-set .item').map((e) => { const w = e.querySelector('.sw'), g = e.querySelector('.seg button.on');
           return tx(e.querySelector('.tx b')) + (w ? (w.classList.contains('on') ? ' [开]' : ' [关]') : g ? ' [' + tx(g) + ']' : ''); }),
         adv: tx(document.getElementById('adv-sum')), kv: q('#s-adv .kv').map((e) => tx(e.firstElementChild) + '：' + tx(e.lastElementChild)) }; })()`, 8000);
     if (!v) return { ok: 'FAIL', note: '面板页面没有 #s-now（还是 v2.0.15 以前的面板？）' };
     say('  顶部：' + v.pill + (v.banners.length ? '；横幅：' + v.banners.join(' / ') : ''));
-    say('  ' + (v.conv || '当前对话') + (v.empty ? '：' + v.empty : ''));
-    say(`  状态栏预览 ${v.barRows} 行（样式表 ${v.barCss} 字符${v.noicons ? '，图标字体没加载' : ''}）`);
+    say('  ' + (v.conv || '当前对话') + (v.empty ? '：' + v.empty : '') + (v.nums ? '：' + v.nums : ''));
+    if (v.barRows) say(`  状态栏预览 ${v.barRows} 行（样式表 ${v.barCss} 字符${v.noicons ? '，图标字体没加载' : ''}）`);
     if (v.tiles.length) say('  ' + v.tiles.join(' · '));
     say(`  最近 7 天：${v.week} 根柱子；${v.wsum}`);
     for (const it of v.items) say('  · ' + it);
@@ -227,8 +228,9 @@ CMDS.plugin = async () => {
         say('shot ' + file);
       }
     }
-    const bad = !v.barRows && !v.empty;
-    return { ok: bad ? 'WARN' : 'OK', note: bad ? '有对话但没有状态栏预览' : v.pill };
+    // 方案 A（v2.0.15）：状态栏开着时不放预览，有数据时“今天”是四个格子
+    const bad = !v.empty && v.tiles.length < 4;
+    return { ok: bad ? 'WARN' : 'OK', note: bad ? '“今天”只有 ' + v.tiles.length + ' 个格子' : v.pill };
   } finally { c.close(); }
 };
 CMDS.check = async () => {
