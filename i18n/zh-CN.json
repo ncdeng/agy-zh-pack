@@ -3555,5 +3555,15 @@
   "Could not load earlier posts": "无法加载更早的消息",
   "Retry loading earlier posts": "重新加载更早的消息",
   "Searching earlier posts…": "正在搜索更早的消息…",
-  "No loaded posts match": "已加载的消息里没有匹配的"
+  "No loaded posts match": "已加载的消息里没有匹配的",
+  "Applies to messages sent after this turn": "从这一轮之后发出的消息开始生效",
+  "Applies to /btw and messages sent after this turn": "对附带提问（/btw）和这一轮之后发出的消息生效",
+  "Copied to clipboard": "已复制到剪贴板",
+  "Started from": "发起自",
+  "Started during": "运行中发起自",
+  "Started from the main conversation": "发起自主对话",
+  "Started from the subagent conversation": "发起自子智能体对话",
+  "Started during the main conversation": "运行中发起自主对话",
+  "Started during the subagent conversation": "运行中发起自子智能体对话",
+  "Waiting on background work": "正在等待后台工作"
 }

@@ -80,7 +80,7 @@
     "显示前面 $1 个步骤"
   ],
   [
-    "^Show (\\d+) breakdowns$",
+    "^Show (\\d+) breakdowns?$",
     "显示 $1 项明细"
   ],
   [
@@ -134,6 +134,10 @@
   [
     "^Rules: ([\\d,]+) tokens$",
     "规则：$1 个 token"
+  ],
+  [
+    "^Skills: ([\\d,]+) tokens$",
+    "技能：$1 个 token"
   ],
   [
     "^Created automation \"(.+)\"\\.$",
@@ -452,6 +456,14 @@
     "正在等待 $1 个子智能体"
   ],
   [
+    "^Waiting on (\\d+) background tasks?: (.+)$",
+    "正在等待 $1 个后台任务：$2"
+  ],
+  [
+    "^Waiting on (\\d+) subagents? and (\\d+) background tasks?: (.+)$",
+    "正在等待 $1 个子智能体和 $2 个后台任务：$3"
+  ],
+  [
     "^(\\d+) active goals?$",
     "$1 个进行中的目标"
   ],
@@ -490,5 +502,13 @@
   [
     "^(\\d+) earlier posts? could not be loaded\\.$",
     "$1 条更早的消息没能加载。"
+  ],
+  [
+    "^Started from “(.+)”$",
+    "发起自“$1”"
+  ],
+  [
+    "^Started during “(.+)”$",
+    "运行中发起自“$1”"
   ]
 ]

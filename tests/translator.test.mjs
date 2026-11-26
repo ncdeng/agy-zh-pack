@@ -42,6 +42,19 @@ test('词典和规则：整段、日期规则、评论条数', () => {
   assert.deepEqual(out, ['即将下线', '11 月 30 日下线', '12 月 1 日下线', '1 条评论', '12 条评论', DICT.Comments]);
 });
 
+test('Antigravity 2.35.2 的新文字：换模型的提示、附带提问的来源、上下文用量条、排队消息里等后台任务', () => {
+  const { out } = run([
+    'Applies to messages sent after this turn', 'Copied to clipboard', 'Started from', 'Started during “Godot 4.7 Engineer”',
+    'Skills: 91 tokens', 'Show 1 breakdown', 'Waiting on 1 background task: Re-run tests',
+    'Waiting on 2 subagents and 3 background tasks: a, b, +1 more', 'Waiting on 2 subagents',
+  ]);
+  assert.deepEqual(out, [
+    '从这一轮之后发出的消息开始生效', '已复制到剪贴板', '发起自', '运行中发起自“Godot 4.7 Engineer”',
+    '技能：91 个 token', '显示 1 项明细', '正在等待 1 个后台任务：Re-run tests',
+    '正在等待 2 个子智能体和 3 个后台任务：a, b, +1 more', '正在等待 2 个子智能体',
+  ]);
+});
+
 test('按句翻译：每句都翻得出来才用，有一句翻不出来整段保持英文', () => {
   const { out } = run([
     'Use Hydrogen for better quality with lower quota usage. Leaving on Dec 15.',

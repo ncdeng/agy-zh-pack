@@ -1268,7 +1268,7 @@ function pageScript() {
 // - Theme 页的 updates 选 off（look.json 的 online = 'off'）：不再联网，也不用 remote/ 里存的，只用安装包自带的。
 // - 换了版本（安装了新的安装包）以后，remote/ 里存的词典和规则先不用，等下一次取到再用（新安装包里的可能更新）。
 // - 测试：环境变量 AGY_REMOTE_BASE 换成别的地址（例如本机起的 http://127.0.0.1:端口/），只试这一个地址。
-const PACK_VERSION = '2.0.13';
+const PACK_VERSION = '2.0.14';
 const REMOTE_DIR = path.join(DATA, 'remote');
 const REMOTE_STATE = path.join(REMOTE_DIR, 'state.json');
 const REMOTE_BASES = process.env.AGY_REMOTE_BASE ? [process.env.AGY_REMOTE_BASE] : [
@@ -1489,6 +1489,15 @@ async function pushRemote(i18nChanged) {
 // ---------- 与单个页面的 CDP 连接 ----------
 const sessions = new Map(); // targetId -> { ws, send, scriptId }
 const ASK_BINDING = '__agyZhAsk';
+// 页面刷新后要重新挂 __agyZhAsk（2026-11-26）：没开 Runtime 域时，Runtime.addBinding 只挂在当时已有的页面上，刷新后就没了
+// （无头 Edge 实测；Antigravity 2.35.2 里注入程序自动刷新刚打开的窗口以后，主窗口没有这个函数，CLI 调用明细、all 历史、
+// 检查点日志、切英文都要不到数据）。不开 Runtime 域：开了以后应用的每条 console 输出都会发过来。
+// 改成每次页面加载完（Page.domContentEventFired，Page 域本来就开着）再挂一次；已经挂着的再挂一次没有影响。
+const rebindOnLoad = (m, send) => {
+  if (m.method !== 'Page.domContentEventFired') return false;
+  send('Runtime.addBinding', { name: ASK_BINDING }).catch(() => {});
+  return true;
+};
 
 function connect(target) {
   const ws = new WebSocket(target.webSocketDebuggerUrl);
@@ -1506,6 +1515,7 @@ function connect(target) {
     let m;
     try { m = JSON.parse(ev.data); } catch { return; }
     if (m.method === 'Runtime.bindingCalled' && m.params && m.params.name === ASK_BINDING) { onPageAsk(sess, m.params.payload).catch(() => {}); return; }
+    if (rebindOnLoad(m, send)) return;
     const p = m.id && pending.get(m.id);
     if (!p) return;
     pending.delete(m.id);
@@ -1515,7 +1525,7 @@ function connect(target) {
     try {
       await send('Page.enable'); // 不开 Page 域，addScriptToEvaluateOnNewDocument 在刷新后不生效（测试过）
       // 页面向注入程序要数据的通道（2026-11-24 加，CLI 调用明细用）：页面调 window.__agyZhAsk(JSON) → 这里收到 Runtime.bindingCalled。
-      // 刷新后仍在。加不上也不要紧：syncCost 每 30 秒会看页面的 S.cliWant 补答一次
+      // 刷新后由 rebindOnLoad 重新挂。加不上时，调用明细的 CLI 部分靠 syncCost 每 30 秒看页面的 S.cliWant 补答
       try { await send('Runtime.addBinding', { name: ASK_BINDING }); } catch {}
       await apply(sess);
       log(`injected into ${target.id.slice(0, 8)} ${target.url.slice(0, 60)}`);
@@ -1618,6 +1628,7 @@ function connectFrame(target, cfg) {
     let m;
     try { m = JSON.parse(ev.data); } catch { return; }
     if (m.method === 'Runtime.bindingCalled' && m.params && m.params.name === ASK_BINDING) { onPageAsk(fr, m.params.payload).catch(() => {}); return; }
+    if (rebindOnLoad(m, send)) return; // 框架刷新后也重新挂
     const p = m.id && pending.get(m.id);
     if (!p) return;
     pending.delete(m.id);
