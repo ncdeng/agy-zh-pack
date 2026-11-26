@@ -2,7 +2,7 @@
 //
 //   node tools/publish.mjs <版本号> --title "<Release 标题>" --notes <发布说明.md> --message <提交说明.txt> [--check] [--from <步骤>]
 //
-// 发版前先把代码、README（中英文）改好，新文件先 git add。脚本按顺序做下面几步，任何一步失败就停下，并说明停在哪一步、怎么接着做：
+// 发版前先把代码、README 和 docs/testing*.md（中英文）改好，新文件先 git add。脚本按顺序做下面几步，任何一步失败就停下，并说明停在哪一步、怎么接着做：
 //   test     跑 tests/ 里的测试（node --test）
 //   bump     改版本号：inject.mjs 的 PACK_VERSION、plugin.json 的 version
 //   sign     node tools/release.mjs sign（生成并签名 plugin-manifest.json）
@@ -164,7 +164,7 @@ step('meta', () => {
   j.date = today();
   fs.writeFileSync(path.join(ROOT, rel), JSON.stringify(j, null, 2) + '\n');
   run('git', ['add', rel]);
-  run('git', ['commit', '-q', '-m', `data/meta.json：最新版本改成 ${version}（发布 ${tag} 后最后一步）`]);
+  run('git', ['commit', '-q', '-m', `${tag}：meta.json 指向新版本`, '-m', `data/meta.json 的 latest 改成 ${version}（发布 ${tag} 的最后一步，装着旧版本的用户这时才会看到新版本提示）`]);
   run('git', ['push', 'origin', 'main']);
 });
 

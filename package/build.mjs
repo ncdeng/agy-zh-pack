@@ -81,8 +81,8 @@ for (const [zh, action] of [['一键安装', 'install'], ['一键卸载', 'unins
   fs.writeFileSync(path.join(OUT, zh + '.command'), command(action), 'utf8');
 }
 
-// 测试过的 Antigravity 版本（改了要同步 README.md 的“测试情况”和 README.en.md 的“Tested versions”）
-const TESTED = 'Antigravity 桌面版 2.34.0，Windows 11 和 macOS 15';
+// 测试过的 Antigravity 版本（改了要同步 README.md 的“测试情况”、README.en.md 的“Tested versions”和 docs/testing*.md）
+const TESTED = 'Antigravity 桌面版 2.35.2，Windows 11 和 macOS 15';
 
 const readme = `agy-zh：Antigravity 中文插件（非官方）v${PACK_VERSION}
 
