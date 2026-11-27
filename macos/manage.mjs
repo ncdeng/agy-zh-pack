@@ -1,13 +1,12 @@
 #!/usr/bin/env node
-// macOS 管理脚本：用于 agy-zh-pack 的登录自启（LaunchAgent）、启停、作者配色开关，
-// 以及带 --remote-debugging-port=0 启动 Antigravity。
+// macOS 管理脚本：用于 agy-zh-pack 的登录自启（LaunchAgent）、启停，
+// 以及带 --remote-debugging-port=0 启动 Antigravity。（v2.0.16 以前还有 theme 命令切换作者配色，v2.0.17 去掉了）
 //
 // 用法：
 //   node macos/manage.mjs status
 //   node macos/manage.mjs install-agent
 //   node macos/manage.mjs uninstall-agent
 //   node macos/manage.mjs start | stop
-//   node macos/manage.mjs theme [on|off|toggle] [--force]
 //   node macos/manage.mjs launch-agy [--restart]
 //   node macos/manage.mjs uninstall
 
@@ -48,12 +47,6 @@ const AGENT_LABEL = 'com.ncdeng.agy-zh-pack';
 const LAUNCH_AGENTS_DIR = path.join(HOME, 'Library', 'LaunchAgents');
 const PLIST_PATH = path.join(LAUNCH_AGENTS_DIR, `${AGENT_LABEL}.plist`);
 const DEBUG_ARG = '--remote-debugging-port=0';
-
-const AUTHOR_THEME = {
-  customThemeSeedsLight: { background: '#FAF9F5', foregroundOverride: '#141413', primary: '#D97757' },
-  customThemeSeedsDark: { background: '#262624', foregroundOverride: '#FAF9F5', primary: '#D97757' },
-};
-const SEED_KEYS = ['background', 'foregroundOverride', 'primary'];
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const readJson = (f) => JSON.parse(fs.readFileSync(f, 'utf8').replace(/^\uFEFF/, ''));
@@ -158,17 +151,8 @@ function findAgyMainProcesses() {
   return procs;
 }
 
-function sameSeed(a, b) {
-  return !!a && SEED_KEYS.every((k) => String(a[k] || '').toLowerCase() === b[k].toLowerCase());
-}
-
 function readAgyConfig() {
   try { return readJson(AGY_CONFIG); } catch { return null; }
-}
-
-function themeActive() {
-  const u = (readAgyConfig() || {}).userSettings || {};
-  return Object.entries(AUTHOR_THEME).every(([k, v]) => sameSeed(u[k], v));
 }
 
 function readOriginals() {
@@ -184,7 +168,8 @@ function saveOriginals(o) {
   }
 }
 
-function applyTheme(on) {
+// 按 originals.json 恢复以前记下的原配色。v2.0.17 起不再提供“作者配色”（用户要求去掉）；以前用过的，卸载时用这个换回原来的颜色
+function restoreColors() {
   const cfg = readAgyConfig();
   if (!cfg) {
     console.error(`[错误] 未找到 Antigravity 配置文件：${AGY_CONFIG}`);
@@ -194,17 +179,11 @@ function applyTheme(on) {
   }
   cfg.userSettings = cfg.userSettings || {};
   const o = readOriginals();
-  for (const [k, v] of Object.entries(AUTHOR_THEME)) {
-    if (on) {
-      if (!(k in o.userSettings)) o.userSettings[k] = k in cfg.userSettings ? cfg.userSettings[k] : null;
-      cfg.userSettings[k] = v;
-    } else {
-      const orig = k in o.userSettings ? o.userSettings[k] : null;
-      if (orig === null) delete cfg.userSettings[k];
-      else cfg.userSettings[k] = orig;
-      delete o.userSettings[k];
-    }
+  for (const [k, v] of Object.entries(o.userSettings)) {
+    if (v === null) delete cfg.userSettings[k];
+    else cfg.userSettings[k] = v;
   }
+  o.userSettings = {};
   writeJson(AGY_CONFIG, cfg);
   saveOriginals(o);
   return true;
@@ -333,7 +312,6 @@ async function status() {
   console.log(`后台注入进程    : ${running ? '运行中' : '未运行'}`);
   console.log(`登录自启服务    : ${hasPlist ? (agentLoaded ? '已安装且已加载' : '已安装但未加载') : '未安装'} (${PLIST_PATH})`);
   console.log(`界面汉化        : ${fs.existsSync(DICT_PATH) ? '开启' : '关闭（缺少 i18n/zh-CN.json）'}`);
-  console.log(`作者配色        : ${themeActive() ? '已启用' : '未启用（默认）'}`);
   console.log(`Antigravity 进程: ${agyProcs.length ? agyProcs.map((p) => `pid=${p.pid} (${p.hasDebugPort ? '带调试端口' : '无调试端口'})`).join(', ') : '未运行'}`);
   console.log(`调试端口文件    : ${hasPortFile ? `存在（端口 ${portVal}）` : '不存在'} (${PORT_FILE})`);
   console.log(`日志文件        : ${LOG_FILE}`);
@@ -359,20 +337,6 @@ async function main() {
     case 'stop':
       await stopInjector();
       break;
-    case 'theme': {
-      const mode = arg1 && !arg1.startsWith('--') ? arg1 : 'toggle';
-      const next = mode === 'on' ? true : mode === 'off' ? false : !themeActive();
-      if (findAgyMainProcesses().length && !flags.has('--force')) {
-        console.error('[注意] Antigravity 正在运行，直接修改 ~/.gemini/config/config.json 会被应用写回覆盖。');
-        console.error('       请先按 Cmd+Q 退出 Antigravity，再运行本命令。');
-        process.exitCode = 1;
-        return;
-      }
-      if (applyTheme(next)) {
-        console.log(next ? '[完成] 已启用作者配色（原配色已备份至 originals.json）。' : '[完成] 已恢复原有配色。');
-      }
-      break;
-    }
     case 'launch-agy': {
       const procs = findAgyMainProcesses();
       if (procs.length) {
@@ -397,8 +361,8 @@ async function main() {
       uninstallAgent();
       if (fs.existsSync(ORIGINALS)) {
         if (findAgyMainProcesses().length) {
-          console.log('[注意] 检测到 originals.json（配色备份），但 Antigravity 正在运行；请退出 Antigravity 后运行 `node macos/manage.mjs theme off` 恢复原配色。');
-        } else if (applyTheme(false)) {
+          console.log('[注意] 检测到 originals.json（以前用作者配色时备份的原配色），但 Antigravity 正在运行；请按 Cmd+Q 退出 Antigravity 后再运行一次 `node macos/manage.mjs uninstall` 恢复原配色。');
+        } else if (restoreColors()) {
           console.log('[完成] 已恢复原有配色。');
         }
       }
@@ -412,7 +376,6 @@ async function main() {
         '  install-agent      安装并启动 macOS 登录自启（LaunchAgent）',
         '  uninstall-agent    卸载登录自启',
         '  start / stop       启动或停止后台注入程序',
-        '  theme [on|off]     启用/恢复/切换作者配色（默认关闭，需先退出 Antigravity）',
         '  launch-agy         带调试端口参数启动（或重启）Antigravity',
         '  uninstall          停止注入程序并卸载 LaunchAgent',
       ].join('\n'));

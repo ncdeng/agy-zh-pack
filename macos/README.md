@@ -1,7 +1,7 @@
 # macOS：从源码运行
 
 > [!IMPORTANT]
-> **平常使用请装插件**：解压安装包，在终端里用 `bash` 运行 `一键安装.command`，见 [README 的快速开始](../README.md#快速开始)。插件不用自己装 Node.js，也不用 LaunchAgent，Antigravity 会自己启动它。装插件时，这里的 LaunchAgent 会被自动删掉，数据会搬到插件的数据目录。
+> **平常使用请装插件**：解压安装包，在终端里用 `bash` 运行 `一键安装.command`，见 [README 的安装](../README.md#安装)。插件不用自己装 Node.js，也不用 LaunchAgent，Antigravity 会自己启动它。装插件时，这里的 LaunchAgent 会被自动删掉，数据会搬到插件的数据目录。
 >
 > 这一页是从源码运行的方式，给想改代码的人用。不要和插件同时用：已经有一个注入程序在跑时，新启动的会自动退出。原理、测试和发版见 [docs/development.md](../docs/development.md)。
 
@@ -35,18 +35,14 @@ Antigravity 打开后几秒内界面就换成中文，并自动刷新一次，�
 ## 常用命令
 
 ```zsh
-# 看注入程序、LaunchAgent、调试端口和配色的状态
+# 看注入程序、LaunchAgent、调试端口的状态
 node macos/manage.mjs status
 
 # 手动启动 / 停止注入程序
 node macos/manage.mjs start
 node macos/manage.mjs stop
 
-# 可选：用作者的配色 / 换回原来的（默认不用；先按 Cmd+Q 退出 Antigravity，原来的配色备份在 originals.json）
-node macos/manage.mjs theme on
-node macos/manage.mjs theme off
-
-# 删掉登录自启，并停止注入程序
+# 删掉登录自启，并停止注入程序（以前用过作者配色的，同时按 originals.json 恢复原来的颜色；要先按 Cmd+Q 退出 Antigravity）
 node macos/manage.mjs uninstall
 ```
 

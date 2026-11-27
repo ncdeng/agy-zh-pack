@@ -314,10 +314,10 @@ test('面板画速度页：24 小时从最近 24 个整点小时画起，今天�
   const td = speedBlock(sp, 'today');
   assert.equal((td.match(/class="pt"/g) || []).length, 4);
   assert.match(td, /class="cur" style="left:75\.00%/);
-  assert.match(speedBlock({ start, today0, models: [] }, '24h'), /还没有速度数据/);
-  assert.match(speedBlock(null, '24h'), /还没有速度数据/);
+  assert.match(speedBlock({ start, today0, models: [] }, '24h'), /没有速度数据/);
+  assert.match(speedBlock(null, '24h'), /没有速度数据/);
   const early = { start, today0, models: [{ ...sp.models[0], pts: Array(24).fill(null).map((v, i) => (i < 3 ? 100 : null)) }] };
-  assert.match(speedBlock(early, 'today'), /今天还没有速度数据/);
+  assert.match(speedBlock(early, 'today'), /今天没有速度数据/);
 });
 
 test('速度图悬停用的数据：24 小时的现在在第 24 格；今天的现在在 18 点那一格，偏移 5 个小时；没有数据时清空', () => {

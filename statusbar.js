@@ -1151,7 +1151,20 @@ function agyStatusBar(CFG) {
     event: '日历', date_range: '日期范围', account_tree: '树形分支', person: '人像' };
   // 不能单独换的几个：[Material 名, unicode 字符]
   const ICON_FIXED = { check: ['check', '✓'], ctx: ['data_usage', '◔'], quota1: ['timelapse', '◔'] };
-  const LOOK_DEFAULT = { pal: 'cometix', skin: 'plain', bar: 'thin', dense: 'compact', icons: 'material', iconMap: {}, online: 'auto' };
+  const LOOK_DEFAULT = { pal: 'cometix', skin: 'plain', bar: 'thin', dense: 'compact', icons: 'material', iconMap: {}, online: 'auto', colors: null };
+  // 自定义颜色（v2.0.18，用户要的“默认用我们的，自己想改也支持”）：盖在所选配色上的 4 个主色，浅色、深色各一份，
+  // { light: { cost, q5, qw, bad }, dark: {...} }，只收 #rrggbb；在插件面板“显示”一组的“配色”里改。对应的 CSS 变量见 colorCss
+  const COLOR_KEYS = { cost: '--k-cost', q5: '--k-quota', qw: '--k-quotaw', bad: '--k-crit' };
+  const cleanColors = (o) => {
+    if (!o || typeof o !== 'object') return null;
+    const out = {};
+    for (const m of ['light', 'dark']) {
+      const t = {};
+      for (const k of Object.keys(COLOR_KEYS)) { const v = String((o[m] && o[m][k]) || ''); if (/^#[0-9a-f]{6}$/i.test(v)) t[k] = v.toLowerCase(); }
+      if (Object.keys(t).length) out[m] = t;
+    }
+    return Object.keys(out).length ? out : null;
+  };
   const LOOK_CHOICES = {
     pal: ['cometix', 'catppuccin', 'tokyo-night', 'rose-pine', 'gruvbox', 'nord', 'dracula', 'mono'],
     skin: ['plain', 'pill', 'powerline'],
@@ -1169,6 +1182,7 @@ function agyStatusBar(CFG) {
         for (const [k, v] of Object.entries(o.iconMap)) if (ICON_ITEMS[k] && ICON_ITEMS[k][2].includes(v) && v !== ICON_ITEMS[k][2][0]) l.iconMap[k] = v;
       }
       if (+o.at > 0) l.at = +o.at;
+      l.colors = cleanColors(o.colors);
     }
     return l;
   };
@@ -1270,7 +1284,7 @@ function agyStatusBar(CFG) {
     if (!mu) return [];
     const out = [];
     const t0 = tms(md.createdAt), t1 = tms(md.viewableAt), t2 = tms(md.finishedGeneratingAt || md.completedAt);
-    if (t1 > t0) out.push(seg('timing', ICON('ttft'), [((t1 - t0) / 1000).toFixed(1) + 's'], '首字时间：从发出请求到第一个字出现（含思考）'));
+    if (t1 > t0) out.push(seg('timing', ICON('ttft'), [((t1 - t0) / 1000).toFixed(1) + 's'], '首字：发出请求 → 第一个字（含思考）'));
     // 速度 = 输出 token（含思考）÷ 生成用时。思考 token 是在首字出现之前生成的，所以有思考时起点取
     // “首字时刻 − 思考时长”（不早于发出请求），没有思考时从首字出现算起。
     // （11-09 之前只用“首字→结束”做分母，思考 token 却算在分子里，Flash 算出过 1637 tok/s 这种错数。）
@@ -1284,10 +1298,8 @@ function agyStatusBar(CFG) {
     if (outTok > 0 && span > 50) {
       const tps = outTok / (span / 1000);
       out.push(seg('timing', ICON('speed', { tps }), [Math.round(tps) + ' tok/s'],
-        '生成速度：' + SPEED_TIERS[speedTier(tps)][2] + '\n输出 ' + outTok.toLocaleString() + ' token' + (thinkTok > 0 ? '（含思考 ' + thinkTok.toLocaleString() + '）' : '') +
-        ' ÷ 生成用时 ' + (span / 1000).toFixed(2) + ' 秒\n' +
-        (thinkTok > 0 ? '有思考：从思考开始算（' + (thinkMs > 0 ? '思考 ' + (thinkMs / 1000).toFixed(1) + ' 秒' : '没有思考时长，从发出请求算') + '）'
-          : '没有思考：从首字出现算起')));
+        '速度：' + SPEED_TIERS[speedTier(tps)][2] + '\n输出 ' + outTok.toLocaleString() + ' token ÷ ' + (span / 1000).toFixed(2) + ' 秒' +
+        (thinkTok > 0 ? '\n含思考 ' + thinkTok.toLocaleString() + ' token，从' + (thinkMs > 0 ? '思考开始算（思考 ' + (thinkMs / 1000).toFixed(1) + ' 秒）' : '发出请求算') : '\n没有思考，从首字算')));
     }
     // 11-16 起不再单独显示“in · out · think”这一项（用处不大还占位置）；最近一次调用的 token 数在费用项的悬停说明里
     return out;
@@ -1310,9 +1322,9 @@ function agyStatusBar(CFG) {
   const ctxSeg = (ctx, mu, comps, id) => {
     const n = Array.isArray(comps) ? comps.length : 0;
     const compPiece = n ? compBadge(n, id) : null;
-    const compTip = n ? '\n已压缩 ' + n + ' 次：后台在第 ' + comps.join('、') + ' 步压缩过上下文' + (id ? '\n点 ↻ 看压缩后智能体手里还剩什么' : '') : '\n这个对话还没有被压缩过';
+    const compTip = n ? '\n压缩 ×' + n + '（第 ' + comps.join('、') + ' 步）' + (id ? '\n点 ↻ 看压缩后还剩什么' : '') : '\n还没压缩过';
     const sent = mu ? promptTokens(mu) : 0;
-    const sentTip = sent > 0 ? '\n最近一次调用实际发给模型：' + sent.toLocaleString() + ' token（输入 + 缓存读写）' : '';
+    const sentTip = sent > 0 ? '\n上次发给模型 ' + sent.toLocaleString() + ' token（输入 + 缓存读写）' : '';
     if (ctx && Number(ctx.maxContextTokens) > 0) {
       const used = Number(ctx.estimatedTokensUsed) || 0;
       const max = Number(ctx.maxContextTokens);
@@ -1330,7 +1342,7 @@ function agyStatusBar(CFG) {
       const usedText = S.look.dense === 'full' ? fmtK(used) + ' / ' + fmtK(max) : fmtK(used);
       return seg('context', ringEl(used / max, 'ic svg gauge'), [pct + '%', usedText, compPiece], detail, level(pct, 70, 90, 'context'));
     }
-    if (sent > 0) return seg('context', ICON('ctx'), [fmtK(sent), compPiece], '上下文：最近一次调用发给模型的 token（输入 + 缓存读写）' + compTip);
+    if (sent > 0) return seg('context', ICON('ctx'), [fmtK(sent), compPiece], '上下文：上次发给模型的 token（输入 + 缓存读写）' + compTip);
     return null;
   };
   const cacheSeg = (mu) => {
@@ -1339,8 +1351,7 @@ function agyStatusBar(CFG) {
     const hit = Math.round((cache / (cache + input)) * 100);
     // 紧凑模式（默认）只写命中率：读到的 token 数和上下文用量差不多，重复了，放进悬停说明
     const pieces = S.look.dense === 'full' ? [fmtK(cache), hit + '% hit'] : [hit + '% hit'];
-    return seg('cache', ICON('cache'), pieces, '最近一次调用：从缓存读取 ' + cache.toLocaleString() + ' token，另有 ' + input.toLocaleString() +
-      ' token 没命中缓存，命中率 ' + hit + '%');
+    return seg('cache', ICON('cache'), pieces, '上次调用 · 命中 ' + hit + '%\n缓存读 ' + cache.toLocaleString() + ' token\n没命中 ' + input.toLocaleString() + ' token');
   };
   // idle：不在生成，只占位置不显示（见 CSS 的 .seg.k-run.idle）
   const runSeg = (text, idle) => {
@@ -1380,7 +1391,8 @@ function agyStatusBar(CFG) {
       const pct = Math.round(used * 100);
       const reset = tms(b.resetTime);
       const weekly = b.window === 'weekly';
-      const k = pct >= 90 ? 'crit' : pct >= 70 ? 'warn' : 'quota';
+      // 每周额度用自己的颜色变量 --k-quotaw（v2.0.18，自定义颜色里的“每周额度”），没自定义时等于 --k-quota，看起来和以前一样
+      const k = pct >= 90 ? 'crit' : pct >= 70 ? 'warn' : weekly ? 'quotaw' : 'quota';
       const pieces = [meter(used, k), pct + '%', reset > 0 ? fmtWhen(reset) : ''];
       let paceText = '';
       if (weekly && reset > 0) {
@@ -1388,14 +1400,21 @@ function agyStatusBar(CFG) {
         const d = Math.round((used - elapsed) * 100);
         if (d !== 0) {
           pieces.push(el('span', 'tx ' + (d < 0 ? 'pace-ok' : 'pace-hi'), (d < 0 ? '↓' : '↑') + Math.abs(d) + '%'));
-          paceText = '\n这周已过去 ' + Math.round(elapsed * 100) + '%，用量比匀速' + (d < 0 ? '慢 ' : '快 ') + Math.abs(d) + ' 个百分点';
+          paceText = '本周过去 ' + Math.round(elapsed * 100) + '% · 比匀速' + (d < 0 ? '慢 ' : '快 ') + Math.abs(d) + ' 个点';
         }
       }
-      const est = weekly ? weekEst(b.bucketId) : null;
-      const who = S.account ? '\n账号 ' + S.account.m + (S.account.t ? '（' + S.account.t + '）' : '') : '';
-      const tip = (g.displayName || '') + '：' + (weekly ? '每周' : '5 小时') + '额度已用 ' + pct + '%' +
-        (reset > 0 ? '，' + new Date(reset).toLocaleString() + ' 重置' : '') + paceText +
-        (est ? '\n\n预估：' + est.long + '\n' + SHARE_NOTE : '') + who;
+      // 悬停（v2.0.18 精简）：一行一件事。5h 也写预估（est5h）和推出的 5h 限额（cap5），每周的写推出的周限额（weekCap）
+      const grp = fam.slice(0, -1);
+      const est = weekly ? weekEst(b.bucketId) : reset > 0 ? est5h(used, reset, 5 * 3600e3) : null;
+      const cap = weekly ? (reset > 0 ? weekCap(grp, { used, reset }) : null) : cap5(grp, used, reset);
+      const lines = [(g.displayName || '') + ' ' + (weekly ? '周额度' : '5h 额度') + ' · 已用 ' + (used > 0 && used < 0.005 ? '<1' : pct) + '%'];
+      if (reset > 0) lines.push(mdhm(reset) + ' 重置 · 还有 ' + leftTx(reset - Date.now()));
+      if (paceText) lines.push(paceText);
+      if (est) lines.push((est.fullAt ? '≈' + mdhm(est.fullAt) + ' 用完' : '预计 → ' + Math.round(Math.min(est.proj, 9.99) * 100) + '%') + '（' + est.basis + (est.rough ? '，很粗' : '') + '）');
+      if (cap && cap.usd > 0) lines.push('花了 ' + fmtUsd(cap.usd) + (cap.cap ? ' · 用满 ≈ ' + fmtUsd(cap.cap) + (cap.rough ? '（很粗）' : '') : ''));
+      if (est && weekly) lines.push(SHARE_NOTE);
+      if (S.account) lines.push('账号 ' + S.account.m + (S.account.t ? '（' + S.account.t + '）' : ''));
+      const tip = lines.join('\n');
       return seg('quota', ICON(weekly ? 'weekly' : 'h5'), pieces, tip, k);
     });
   };
@@ -1707,34 +1726,34 @@ function agyStatusBar(CFG) {
     const shown = tot && tot.calls ? tot.usd : last && last.usd != null ? last.usd : null;
     const day = todayCostCached();
     const out = [];
-    let tip = shown == null ? '' : (tot && tot.calls ? '这个对话累计 ' : '最近一次调用 ') + fmtUsd(shown) + '（按 API 标准价）';
+    let tip = shown == null ? '' : (tot && tot.calls ? '对话累计 ' : '上次调用 ') + fmtUsd(shown) + '（API 价）';
     if (last && last.usd != null) {
       const p = last.pr.p;
-      tip += '\n\n最近一次调用 ' + fmtUsdFine(last.usd) + '（按 ' + last.pr.name + ' 价）' +
+      tip += '\n\n上次调用 ' + fmtUsdFine(last.usd) + '（' + last.pr.name + ' 价）' +
         '\n  输入 ' + tokUsd(last.inp, p.in, last.parts.in) +
         (last.cr ? '\n  缓存读取 ' + tokUsd(last.cr, p.cache, last.parts.cache) : '') +
         (last.cw ? '\n  缓存写入 ' + tokUsd(last.cw, p.cw != null ? p.cw : p.in, last.parts.cw) : '') +
         '\n  输出（含思考）' + tokUsd(last.out, p.out, last.parts.out);
-    } else if (last) tip += '\n\n最近一次调用的模型没有单价，没有算钱';
+    } else if (last) tip += '\n\n上次调用的模型没有单价，没算钱';
     if (tot && tot.calls) {
-      tip += '\n\n这个对话' + (tot.cascades > 1 ? '（含 ' + (tot.cascades - 1) + ' 个子代理）' : '') + '：' + fmtUsd(tot.usd) +
-        '，共 ' + tot.calls + ' 次调用' +
+      tip += '\n\n本对话' + (tot.cascades > 1 ? '（含 ' + (tot.cascades - 1) + ' 个子代理）' : '') + ' ' + fmtUsd(tot.usd) +
+        ' · ' + tot.calls + ' 次' +
         [...tot.by].sort((a, b) => b[1].usd - a[1].usd).map(([n, b]) => '\n  ' + n + '：' + fmtUsd(b.usd) + '（' + b.n + ' 次）').join('') +
-        (tot.unpriced ? '\n  另有 ' + tot.unpriced + ' 次调用没有单价，没有算进去' : '');
+        (tot.unpriced ? '\n  另有 ' + tot.unpriced + ' 次没有单价，没算' : '');
     }
     const costly = costlyNote(last);
-    if (costly) tip += '\n\n⚠ 最近一次调用很贵\n' + costly;
+    if (costly) tip += '\n\n⚠ 上次调用很贵\n' + costly;
     if (shown != null) out.push(seg('cost', ICON('cost'), [fmtUsd(shown), costly ? costlyBadge(last, (md.executionId || '') + ':' + (md.createdAt || '')) : null], tip));
     // 今天没花钱、但有历史记录时也显示（$0 today），好点开看前几天
     // 2026-11-24 起今天花费含 agy CLI 的（注入程序按 CLI 对话库汇总，见 cliDay），悬停说明里分开写
     const cli = cliDay(dayName());
     const dayAll = day.usd + (cli ? cli.usd : 0);
     if (dayAll > 0 || hasHistory()) {
-      const dtip = '今天累计 ' + fmtUsd(dayAll) + '（按 API 标准价，本地 0 点起）' +
+      const dtip = '今天 ' + fmtUsd(dayAll) + '（API 价，0 点起）' +
         (cli ? '\n  桌面版 ' + fmtUsd(day.usd) + ' · ' + day.convs + ' 个对话（含子代理）\n  ' + cliNote(cli) : '\n  ' + day.convs + ' 个对话（含子代理）') +
-        (day.undated ? '\n  还有 ' + day.undated + ' 次调用正在查时间，暂时没算进今天' : '') +
-        (day.loading ? '\n  还有 ' + day.loading + ' 个对话正在读取' : '') +
-        '\n' + priceSrcText() + '\n\n点击查看每天的用量和额度';
+        (day.undated ? '\n  另有 ' + day.undated + ' 次在查时间，暂未计入' : '') +
+        (day.loading ? '\n  ' + day.loading + ' 个对话读取中' : '') +
+        '\n' + priceSrcText() + '\n\n点击看每日用量';
       const ts = seg('cost', ICON('today'), [fmtUsd(dayAll) + ' today'], dtip);
       ts.classList.add('p-open');
       ts.addEventListener('click', () => togglePanel(ts));
@@ -1954,7 +1973,7 @@ function agyStatusBar(CFG) {
   // 每周额度预估（2026-11-22 加，v1.6）。注入程序按细粒度读数算好两种速度：这周到现在的平均、最近 24 小时（至少隔 6 小时）。
   // 有最近 24 小时的就用它（更接近现在的用法），没有就用这周平均；这周过去不到 1 天时这周平均很不准，标 rough。
   // 只有这个号的额度只被这台电脑用时才准：和家人共享额度、或者别的电脑也在用这个号，别人用掉的也会算进速度。
-  const SHARE_NOTE = '只有这个号的额度只被这台电脑用时才准：如果和家人共享额度，或者别的电脑也在用这个号，别人用掉的也会算进速度里，预估会偏高。';
+  const SHARE_NOTE = '共享额度或别的电脑也在用这个号时，预估偏高';
   const weekEst = (bucketId) => {
     const e = S.history && S.history.est && S.history.est[bucketId];
     if (!e || !(e.used > 0)) return null; // 没用过的桶：重置时间跟着现在走，没法估
@@ -1978,7 +1997,16 @@ function agyStatusBar(CFG) {
     const elapsed = span - (reset - now);
     if (elapsed < span * 0.1) return null;
     const proj = used * span / elapsed;
-    return { proj: Math.round(proj * 1e4) / 1e4, fullAt: proj > 1 ? Math.round(now + (1 - used) * elapsed / used) : 0, rough: false, basis: '按这 5 小时的平均速度' };
+    return { proj: Math.round(proj * 1e4) / 1e4, fullAt: proj > 1 ? Math.round(now + (1 - used) * elapsed / used) : 0, rough: false, basis: '按这 5h 平均' };
+  };
+  // 这一组的 5h 额度桶（v2.0.18，每日面板底部的 5h 那一行用）：{ id, used, reset }
+  const h5Bucket = (grp) => {
+    for (const g of (S.quota && S.quota.groups) || []) for (const b of g.buckets || []) {
+      if (String(b.bucketId || '').startsWith(grp + '-') && b.window !== 'weekly' && !b.disabled && Number(b.remainingFraction) >= 0) {
+        return { id: b.bucketId, used: Math.max(0, Math.min(1, 1 - Number(b.remainingFraction))), reset: tms(b.resetTime) };
+      }
+    }
+    return null;
   };
   const weeklyBucket = (grp) => { // 这一组的每周额度桶：{ id（例如 gemini-weekly）, used 已用比例, reset 重置时间毫秒 }
     for (const g of (S.quota && S.quota.groups) || []) for (const b of g.buckets || []) {
@@ -2096,6 +2124,15 @@ function agyStatusBar(CFG) {
     const c = cycleCost(grp, wb.reset - WEEK_MS, Infinity);
     const ok = wb.used >= 0.01 && c.usd > 0;
     return { usd: c.usd, tok: c.tok, exact: c.exact, failed: c.failed, cap: ok ? c.usd / wb.used : 0, capTok: ok ? c.tok / wb.used : 0, rough: wb.used < 0.05 };
+  };
+  // 5 小时额度大约值多少钱（v2.0.18，用户要的“5h 的预估额度”）：这 5 小时（重置时间往前 5 小时到现在）这一组模型的花费 ÷ 已用比例。
+  // 要按每次调用的时间算好才给：cycleCost 在那天的调用还没取到时会先按整天算，5 小时用整天的花费会错得离谱。已用不到 1% 不推，不到 5% 标 rough
+  const cap5 = (grp, used, reset) => {
+    if (!(used > 0) || !(reset > Date.now())) return null;
+    const c = cycleCost(grp, reset - 5 * 3600e3, Infinity);
+    if (!c.exact) return null;
+    const ok = used >= 0.01 && c.usd > 0;
+    return { usd: c.usd, tok: c.tok, failed: c.failed, cap: ok ? c.usd / used : 0, capTok: ok ? c.tok / used : 0, rough: used < 0.05 };
   };
   // 离某个时刻还有多久（悬停里用）：不到 1 小时写分钟，不到 2 天写小时，再长写天
   const leftTx = (ms) => (ms < 3600e3 ? Math.max(1, Math.round(ms / 60e3)) + ' 分钟' : ms < 48 * 3600e3 ? Math.round(ms / 3600e3) + ' 小时' : Math.round(ms / 86400e3) + ' 天');
@@ -2456,36 +2493,51 @@ function agyStatusBar(CFG) {
     //   已用不到 5% 时误差很大，标 rough；额度按模型和 token 种类怎么折算 Google 没公布，这里按花费和 token 同比例推，只是参考。
     //   v2.0.17 精简（用户嫌小字太多）：底部一行只留“已用 → 预估”、重置时间、cap；悬停只写数，一类提醒只写一次，不再写账号（面板标题行有），
     //   原理和注意事项（家庭组共享、别的电脑也在用这个号时不准等）写在 README 的“每周额度预估”一节。
+    const projTx = (e) => (e.fullAt ? 'full ' + fmtWhen(e.fullAt) : Math.round(Math.min(e.proj, 9.99) * 100) + '%');
+    const usedPct = (f) => (f > 0 && f < 0.005 ? '<1%' : Math.round(f * 100) + '%'); // 刚开始用（不到 0.5%）写 <1%，不写 0%
+    // 花了多少、用满大约多少（v2.0.18 悬停精简：一行一件事，钱和 token 写在同一行）
+    const capLines = (c, used) => (c && c.usd > 0 ? '\n花了 ' + fmtUsd(c.usd) + ' · ' + fmtTok(c.tok) + ' token' +
+      (c.cap ? '\n用满 ≈ ' + fmtUsd(c.cap) + ' · ' + fmtTok(c.capTok) + ' token' + (c.rough ? '（才用 ' + pctTx(used) + '，很粗）' : '') : '') : '');
     for (const [grp, label] of GROUPS) {
+      // 5h 额度一行（v2.0.18，用户要的“5h 的预估额度”）：用过才写；预估按这 5h 的平均速度（est5h），限额 = 这 5h 的花费 ÷ 已用（cap5）
+      const hb = h5Bucket(grp);
+      if (hb && hb.used > 0 && hb.reset > Date.now()) {
+        const e5 = est5h(hb.used, hb.reset, 5 * 3600e3);
+        const c5 = cap5(grp, hb.used, hb.reset);
+        const p5 = [label + ' 5h', usedPct(hb.used) + (e5 ? ' → est ' + projTx(e5) : ' used'), 'resets ' + fmtWhen(hb.reset)];
+        if (c5 && c5.cap) p5.push('cap ≈ ' + fmtUsd(c5.cap) + (c5.rough ? ' (rough)' : ''));
+        let t5 = label + ' 5h 额度\n已用 ' + pctTx(hb.used) + ' · ' + hmOf(hb.reset) + ' 重置 · 还有 ' + leftTx(hb.reset - Date.now());
+        if (e5) t5 += '\n' + (e5.fullAt ? '≈' + hmOf(e5.fullAt) + ' 用完' : '预计 → ' + Math.round(Math.min(e5.proj, 9.99) * 100) + '%') + '（' + e5.basis + '）';
+        t5 += capLines(c5, hb.used);
+        const l5 = el('div', 'k-quota', p5.join(' · '));
+        setTip(l5, t5);
+        foot.append(l5);
+      }
       const wb = weeklyBucket(grp);
       if (!wb) continue;
       const started = wb.used > 0 && wb.reset > 0;
       const est = started ? weekEst(wb.id) : null;
       const cap = started ? weekCap(grp, wb) : null;
       const er = started ? resetBefore(grp, wb.reset) : null; // 这个周期是不是一次提前重置之后开始的
-      const projTx = (e) => (e.fullAt ? 'full ' + fmtWhen(e.fullAt) : Math.round(Math.min(e.proj, 9.99) * 100) + '%');
       const parts = [label + ' weekly'];
-      let tip = label + ' 每周额度';
+      let tip = label + ' 周额度';
       if (started) {
-        parts.push(Math.round(wb.used * 100) + '%' + (est ? ' → est ' + projTx(est) + (est.rough ? ' (rough)' : '') : ' used'));
+        parts.push(usedPct(wb.used) + (est ? ' → est ' + projTx(est) + (est.rough ? ' (rough)' : '') : ' used'));
         parts.push('resets ' + fmtWhen(wb.reset));
         if (cap && cap.cap) parts.push('cap ≈ ' + fmtUsd(cap.cap) + (cap.rough ? ' (rough)' : ''));
         if (er) parts[parts.length - 1] += ' ' + RESET_MARK;
-        tip += '\n已用 ' + pctTx(wb.used) + '，' + mdhm(wb.reset) + ' 重置（还有 ' + leftTx(wb.reset - Date.now()) + '）';
-        if (est) tip += '\n' + (est.fullAt ? '按现在的速度 ' + mdhm(est.fullAt) + ' 左右用完' : '预计到重置用到 ' + Math.round(Math.min(est.proj, 9.99) * 100) + '%') +
-          '（' + est.basis + (est.alt != null ? '；按这周平均是 ' + Math.round(Math.min(est.alt, 9.99) * 100) + '%' : '') + (est.rough ? '；这周才过去不到 1 天，很粗' : '') + '）';
+        tip += '\n已用 ' + pctTx(wb.used) + ' · ' + mdhm(wb.reset) + ' 重置 · 还有 ' + leftTx(wb.reset - Date.now());
+        if (est) tip += '\n' + (est.fullAt ? '≈' + mdhm(est.fullAt) + ' 用完' : '预计 → ' + Math.round(Math.min(est.proj, 9.99) * 100) + '%') +
+          '（' + est.basis + (est.alt != null ? '；按这周平均 ' + Math.round(Math.min(est.alt, 9.99) * 100) + '%' : '') + (est.rough ? '；不到 1 天，很粗' : '') + '）';
         // 花费：周期开始那天按每次调用的时间只算周期开始以后的（cycleCost / callsPart，后台取好之前先按整天算）
         // token（11-27 用户要的）：输入 + 缓存读 + 缓存写 + 输出，和 cap 同比例推
-        if (cap && cap.usd > 0) {
-          tip += '\n这个周期花了 ' + fmtUsd(cap.usd) + '（' + fmtTok(cap.tok) + ' token）' +
-            (cap.cap ? '\n用满约 ' + fmtUsd(cap.cap) + '（' + fmtTok(cap.capTok) + ' token），还剩约 ' + fmtUsd(Math.max(0, cap.cap - cap.usd)) + '（' + fmtTok(Math.max(0, cap.capTok - cap.tok)) + '）' : '') +
-            (cap.cap && cap.rough ? '\n才用了 ' + pctTx(wb.used) + '，很粗' : '');
-          if (cap.failed) tip += '\n（周期开始那天有 ' + cap.failed + ' 个对话没取到，可能少算）';
-        }
-        if (er) tip += '\n' + RESET_MARK + ' ' + mdhm(er.at) + ' 提前重置过，重置前用了 ' + pctTx(+er.from || 0);
+        tip += capLines(cap, wb.used);
+        if (cap && cap.cap && cap.usd > 0) tip += '\n还剩 ≈ ' + fmtUsd(Math.max(0, cap.cap - cap.usd)) + ' · ' + fmtTok(Math.max(0, cap.capTok - cap.tok)) + ' token';
+        if (cap && cap.failed) tip += '\n首日 ' + cap.failed + ' 个对话没取到，可能少算';
+        if (er) tip += '\n' + RESET_MARK + ' ' + mdhm(er.at) + ' 提前重置（之前用了 ' + pctTx(+er.from || 0) + '）';
       } else {
         parts.push('not started');
-        tip += '\n还没开始用，第一次用时才开始算这个周期';
+        tip += '\n还没用过，第一次用时开始算';
       }
       // 以前的周期（2026-11-24 加）：每个周期这台电脑的花费 ÷ 结束前用掉的比例 = 那个周期的 cap，攒几个周期就能看出额度有没有变。
       // 用掉不到 1% 的周期不推 cap（误差太大）。最近 4 个；一个周期一行，日期和数字对齐，中文的说明放行末
@@ -2496,14 +2548,14 @@ function agyStatusBar(CFG) {
           const c = cycleCost(grp, e.start, e.end);
           const capOk = e.used >= 0.01 && c.usd > 0;
           return [md(e.start) + ' → ' + md(e.end), pctTx(e.used), fmtUsd(c.usd), fmtTok(c.tok), capOk ? fmtUsd(c.usd / e.used) : '—',
-            (e.early ? ' ' + RESET_MARK : '') + (capOk && e.used < 0.05 ? ' 用得少，很粗' : '')];
+            (e.early ? ' ' + RESET_MARK : '') + (capOk && e.used < 0.05 ? ' 很粗' : '')];
         });
         const w = [0, 1, 2, 3, 4].map((i) => Math.max(...rows.map((r) => r[i].length)));
-        tip += '\n\n以前的周期（用了 · 花了 · token · cap；' + RESET_MARK + ' 是提前重置）：' +
+        tip += '\n\n以前的周期（用了 · 花了 · token · cap）：' +
           rows.map((r) => '\n  ' + r[0].padEnd(w[0]) + '  ' + r.slice(1, 5).map((x, i) => x.padStart(w[i + 1])).join('  ') + r[5]).join('');
       }
-      if (est || (cap && cap.cap)) tip += '\n\n按 API 标准价折算，只是参考；别的电脑也用这个号时不准。';
-      const line = el('div', 'k-quota', parts.join(' · '));
+      if (est || (cap && cap.cap)) tip += '\n\nAPI 价折算；共享额度或别的电脑也用这个号时不准';
+      const line = el('div', 'k-quotaw', parts.join(' · '));
       setTip(line, tip);
       foot.append(line);
     }
@@ -3333,7 +3385,7 @@ function agyStatusBar(CFG) {
         }
       } else prev.append(el('div', 'lk-empty', 'open a conversation to see a live preview'));
       card.append(name, prev);
-      card.addEventListener('click', () => S.setLook({ pal }));
+      card.addEventListener('click', () => S.setLook({ pal, colors: null })); // 选一套配色 = 用这套，清掉自定义颜色
       grid.append(card);
     }
     panel.append(grid);
@@ -3855,6 +3907,47 @@ function agyStatusBar(CFG) {
     const vars = (vals) => PAL_VARS.map((v, i) => `${v}:${vals[i]}`).join('; ');
     return `${sels.join(', ')}{${vars(light)}}\n${sels.map(DARK).join(', ')}{${vars(dark)}}`;
   }).join('\n');
+  // 本项目默认 Cometix 的颜色，按 PAL_VARS 的顺序（和下面 CSS 里 ${B}, ${P}, ${T} 的基础色、深色那一段一致；改了要两边一起改）。插件面板要每套配色的具体颜色
+  const COMETIX = [
+    ['#5c64d6', '#8839ef', '#1b8fbf', '#c4566a', '#158a90', '#e0620d', '#c9800f', '#d20f39', '#40a02b', '#8c8fa1', '#df8e1d', '#c03d8e', '#1e66f5', '#c9c6bc', '#e6e2d8', '#4c4f69', '#fffefb', '#ffffff'],
+    ['#b4befe', '#cba6f7', '#89dceb', '#f2cdcd', '#94e2d5', '#fab387', '#f9e2af', '#f38ba8', '#a6e3a1', '#7f849c', '#f9e2af', '#f5c2e7', '#89b4fa', '#585b70', '#45475a', '#cdd6f4', '#1e1e2e', '#1e1e2e'],
+  ];
+  // 自定义颜色（look.colors，见 cleanColors）变成 CSS：盖在所选配色上（!important），浅色那段只在浅色主题时生效、深色那段只在深色时，
+  // 只自定义了一种主题时另一种还是配色原来的颜色
+  const LIGHT = (sel) => `:root:not([style*="color-scheme: dark"]) body:not(.theme-dark) ${sel}`;
+  const colorCss = (c) => {
+    if (!c) return '';
+    const decl = (t) => Object.entries(t).map(([k, v]) => `${COLOR_KEYS[k]}:${v} !important`).join('; ');
+    const sels = [B, P, T];
+    return (c.light ? `${sels.map(LIGHT).join(', ')}{${decl(c.light)}}\n` : '') + (c.dark ? `${sels.map(DARK).join(', ')}{${decl(c.dark)}}\n` : '');
+  };
+  // 插件面板用的每套配色（v2.0.18）：{ key: [名字, { light: { cost, q5, qw, bad, ok, warn }, dark: {...} }] }，颜色都换成 #rrggbb
+  // （Nord 浅色里有 color-mix，取色器只认 #rrggbb）。面板的每周额度默认用配色的 --k-warn（和以前一样），5 小时用 --k-quota
+  let panelPals = null;
+  const toHex = (css) => {
+    const m = /^#([0-9a-f]{6})$/i.exec(css);
+    if (m) return '#' + m[1].toLowerCase();
+    try {
+      const cv = document.createElement('canvas'); cv.width = cv.height = 1;
+      const g = cv.getContext('2d');
+      g.fillStyle = '#000'; g.fillStyle = css; g.fillRect(0, 0, 1, 1);
+      const d = g.getImageData(0, 0, 1, 1).data;
+      return '#' + [d[0], d[1], d[2]].map((x) => x.toString(16).padStart(2, '0')).join('');
+    } catch (e) { return '#888888'; }
+  };
+  const palsForPanel = () => {
+    if (panelPals) return panelPals;
+    const at = (vals, name) => toHex(vals[PAL_VARS.indexOf(name)]);
+    const one = (vals) => ({ cost: at(vals, '--k-cost'), q5: at(vals, '--k-quota'), qw: at(vals, '--k-warn'), bad: at(vals, '--k-crit'), ok: at(vals, '--k-run'), warn: at(vals, '--k-warn') });
+    panelPals = {};
+    for (const k of LOOK_CHOICES.pal) {
+      const [light, dark] = PALETTES[k] ? [PALETTES[k][2], PALETTES[k][3]] : COMETIX;
+      panelPals[k] = [(PAL_INFO[k] || [k])[0], { light: one(light), dark: one(dark) }];
+    }
+    return panelPals;
+  };
+  const colorStyle = document.createElement('style'); // 自定义颜色，单独一个，换颜色时只改它
+  colorStyle.textContent = colorCss(S.look.colors);
   const style = document.createElement('style');
   style.textContent = `
 @import url("https://fonts.googleapis.com/css2?family=Material+Symbols+Rounded:opsz,wght,FILL,GRAD@20..24,400..500,0..1,0&icon_names=account_tree,auto_awesome,calendar_month,check,data_usage,database,date_range,event,history,hourglass_top,offline_bolt,paid,palette,person,schedule,speed,timelapse,timer,today&display=block");
@@ -3967,7 +4060,7 @@ ${B}[data-skin="powerline"] .ring .arc, ${B}[data-skin="powerline"] .gauge .arc{
 ${B}[data-skin="powerline"] .comp{color:inherit; background:color-mix(in srgb, var(--pl-ink) 22%, transparent)}
 ${B}[data-skin="powerline"] .costly{color:inherit; background:color-mix(in srgb, var(--pl-ink) 30%, transparent)}
 ${B} .k-model{--kc:var(--k-model)} ${B} .k-context{--kc:var(--k-context)} ${B} .k-cache{--kc:var(--k-cache)}
-${B} .k-timing{--kc:var(--k-timing)} ${B} .k-tokens{--kc:var(--k-tokens)} ${B} .k-quota{--kc:var(--k-quota)}
+${B} .k-timing{--kc:var(--k-timing)} ${B} .k-tokens{--kc:var(--k-tokens)} ${B} .k-quota{--kc:var(--k-quota)} ${B} .k-quotaw{--kc:var(--k-quotaw, var(--k-quota))}
 ${B} .k-agent{--kc:var(--k-agent)} ${B} .k-cost{--kc:var(--k-cost)} ${B} .k-warn{--kc:var(--k-warn)} ${B} .k-crit{--kc:var(--k-crit)} ${B} .k-run{--kc:var(--k-run)} ${B} .k-muted{--kc:var(--k-muted)}
 ${B} .seg.p-open{cursor:pointer}
 ${B} .seg.p-open:hover .tx{text-decoration:underline dotted; text-underline-offset:3px}
@@ -4073,7 +4166,7 @@ ${P} tr.clk{cursor:pointer}
 ${P} td.h.miss{color:var(--k-warn); font-weight:600}
 ${P} .p-tools .k-miss{--kc:var(--k-warn)} ${P} .p-foot .k-miss.clk{cursor:pointer} ${P} .p-foot .k-miss.clk:hover{text-decoration:underline}
 /* 调用明细页：表格更高；对话、模型两列左对齐 */
-${P} .p-table.calls{max-height:max(14em, calc(var(--p-avail, 40em) - 6.5rem))} /* 撑满面板能用的高度（标题行和底部说明留 6.5rem） */
+${P} .p-table.calls{max-height:max(14em, min(36em, calc(var(--p-avail, 40em) - 6.5rem)))} /* 最多约 25 行，其余在表格里滚动（v2.0.18：原来撑满状态栏以上的全部高度，竖屏上几乎占满整个窗口，用户嫌太大）；窗口矮时照样按能用的高度缩 */
 ${P} .p-table.calls th, ${P} .p-table.calls td{padding:.05rem .32rem; font-size:11px}
 ${P} .p-table.calls td.cv, ${P} .p-table.calls td.md{text-align:left; overflow:hidden; text-overflow:ellipsis}
 ${P} .p-table.calls td.cv{max-width:clamp(10em, 24vw, 26em)} ${P} .p-table.calls td.md{max-width:12em}
@@ -4117,7 +4210,7 @@ ${P} .p-card .row .dim{min-width:2.8em; text-align:right}
 ${P} .p-card .dim{color:var(--k-muted)}
 ${P} .p-card .q{color:var(--k-quota)}
 ${P} .k-model{--kc:var(--k-model)} ${P} .k-context{--kc:var(--k-context)} ${P} .k-cache{--kc:var(--k-cache)} ${P} .k-tokens{--kc:var(--k-tokens)}
-${P} .k-quota{--kc:var(--k-quota)} ${P} .k-cost{--kc:var(--k-cost)} ${P} .k-run{--kc:var(--k-run)} ${P} .k-argon{--kc:var(--k-argon)} ${P} .k-muted{--kc:var(--k-muted)}
+${P} .k-quota{--kc:var(--k-quota)} ${P} .k-quotaw{--kc:var(--k-quotaw, var(--k-quota))} ${P} .k-cost{--kc:var(--k-cost)} ${P} .k-run{--kc:var(--k-run)} ${P} .k-argon{--kc:var(--k-argon)} ${P} .k-muted{--kc:var(--k-muted)}
 /* 悬停提示（代替系统 title，见 setTip 一节）：挂在 body 上，不挡鼠标；背景色由脚本取元素一带的实际底色。
    pre-wrap（v2.0.17 改，原来是 pre-line）：保留连续空格，悬停里的缩进和按列对齐的小表格（以前的周期、没命中的原因）才对得齐 */
 ${T}{position:fixed; z-index:2147483600; pointer-events:none; box-sizing:border-box; max-width:min(440px, calc(100vw - 16px));
@@ -4252,6 +4345,7 @@ ${T}{position:fixed; z-index:2147483600; pointer-events:none; box-sizing:border-
   const ensure = (force) => {
     if (!document.body) return;
     if (!style.isConnected) (document.head || document.documentElement).appendChild(style);
+    if (!colorStyle.isConnected || colorStyle.previousElementSibling !== style) style.after(colorStyle); // 自定义颜色紧跟在后面
     const prevAct = S.actShown;
     let act = false;
     for (const box of document.querySelectorAll('[data-testid="agent-input-box"]')) {
@@ -4293,7 +4387,9 @@ ${T}{position:fixed; z-index:2147483600; pointer-events:none; box-sizing:border-
   // 换外观：fromFile = 注入程序推过来的 look.json（比页面里记着的新才用）；否则是在 Theme 页里点的，
   // 记在 S.lookPick 等注入程序读走（见 inject.mjs 的 syncCost）。换完马上重画状态栏和面板（进度条样式、详略会改内容）。
   S.setLook = (o, fromFile) => {
-    const l = cleanLook({ ...S.look, ...o });
+    // 从文件来的（注入程序推过来的 look.json）是完整的一份：里面没有 colors 就是没有自定义颜色，不能沿用页面里旧的
+    // （v2.0.18 修：插件面板点“还原”清掉了文件里的颜色，页面合并时把旧颜色留了下来，点了没反应）
+    const l = cleanLook(fromFile ? { ...S.look, ...o, colors: o.colors } : { ...S.look, ...o });
     if (fromFile) {
       if (!((l.at || 0) > (S.look.at || 0))) return;
     } else {
@@ -4301,6 +4397,8 @@ ${T}{position:fixed; z-index:2147483600; pointer-events:none; box-sizing:border-
       S.lookPick = l;
     }
     S.look = l;
+    const cc = colorCss(l.colors);
+    if (colorStyle.textContent !== cc) colorStyle.textContent = cc;
     ensure(true);
     refreshPanel();
   };
@@ -4344,7 +4442,7 @@ ${T}{position:fixed; z-index:2147483600; pointer-events:none; box-sizing:border-
   //   conv：当前对话的标题、是不是在跑；today：今天花费（含 agy CLI）、对话数、调用数；
   //   quota：当前模型那一组的 5 小时和每周额度（已用、重置时间、时间进度、每周预估）；week：最近 7 天每天的花费（含 CLI）。
   const cssHash = (s) => { let h = 5381; for (let i = 0; i < s.length; i++) h = (h * 33 + s.charCodeAt(i)) | 0; return s.length + '-' + (h >>> 0).toString(36); };
-  S.barCss = () => style.textContent;
+  S.barCss = () => style.textContent + '\n' + colorStyle.textContent; // 插件面板的状态栏预览也带上自定义颜色
   // 插件面板“速度”页用（v2.0.15）：S.spdHours 里最近 24 小时算进速度的调用最多的 3 个模型，每小时的速度中位数（那小时算进速度的调用
   // 不到 SPEED_MIN_N 次就是 null）、“现在”（最近 60 分钟，同样要够 SPEED_MIN_N 次）、“平时”（今天以前 7 天每天中位数的中位数）。
   // 颜色用主窗口状态栏当前配色里这个价目的颜色，同一个价目的第二个思考档位标 dash（面板画虚线）。today0：今天 0 点（面板的“今天”从这里画）
@@ -4376,7 +4474,7 @@ ${T}{position:fixed; z-index:2147483600; pointer-events:none; box-sizing:border-
       for (const x of [...c.children]) if (!x.classList.contains('ln') || x.classList.contains('sub')) x.remove();
       // 悬停说明不带过去：插件面板不显示它，而且额度那一项的说明里有（打了星号的）账号邮箱
       c.querySelectorAll('[data-agy-tip]').forEach((x) => x.removeAttribute('data-agy-tip'));
-      out.bar = { html: c.outerHTML, css: cssHash(style.textContent) };
+      out.bar = { html: c.outerHTML, css: cssHash(S.barCss()) }; // 指纹含自定义颜色：换了颜色面板重取样式表
     }
     const root = currentRoot();
     if (root) {
@@ -4417,14 +4515,19 @@ ${T}{position:fixed; z-index:2147483600; pointer-events:none; box-sizing:border-
           if (e) est = { proj: e.proj, fullAt: e.fullAt, rough: !!e.rough, basis: e.basis };
           const c = weekCap(fam, { used, reset });
           if (c && c.usd > 0) cost = { usd: c.usd, cap: c.cap, tok: c.tok, capTok: c.capTok, rough: c.rough };
-        } else est = est5h(used, reset, span);
+        } else {
+          est = est5h(used, reset, span);
+          const c = cap5(fam, used, reset); // 5h 的花费和推出的 5h 限额（v2.0.18）
+          if (c && c.usd > 0) cost = { usd: c.usd, cap: c.cap, tok: c.tok, capTok: c.capTok, rough: c.rough };
+        }
         out.quota.push({ group: (GROUPS.find(([p]) => p === fam) || [, ''])[1], weekly, used,
           reset, timePct: reset > 0 ? Math.max(0, Math.min(1, 1 - (reset - Date.now()) / span)) : null, est, cost });
       }
     }
     out.quota.sort((a, b) => a.weekly - b.weekly);
     out.week = lastDays(7).reverse().map((d) => ({ day: d, usd: +((d === nm ? rec : dayRecord(d)) || {}).usd || 0 }));
-    out.look = { pal: (PAL_INFO[S.look.pal] || PAL_INFO.cometix)[0] };
+    // 配色（v2.0.18）：插件面板和状态栏共用一个配色；pals 是每套配色给面板用的颜色，custom 是自定义的 4 个主色（look.colors）
+    out.look = { pal: S.look.pal, name: (PAL_INFO[S.look.pal] || PAL_INFO.cometix)[0], pals: palsForPanel(), custom: S.look.colors || null };
     out.speed = speedNow(mainBar());
     // 今天缓存没命中（方案 A 的格子）：次数、多花的钱、今天合计（算占比）、按原因从多到少 [原因, 次数, 美元]
     const mo = missOfDay(nm);
@@ -4456,6 +4559,8 @@ ${T}{position:fixed; z-index:2147483600; pointer-events:none; box-sizing:border-
     if (S.timer) clearInterval(S.timer);
     if (S.styleEl && S.styleEl !== style) S.styleEl.remove();
     S.styleEl = style;
+    if (S.colorStyleEl && S.colorStyleEl !== colorStyle) S.colorStyleEl.remove(); // 自定义颜色的样式（v2.0.18）
+    S.colorStyleEl = colorStyle;
     document.querySelectorAll('.' + BAR_CLASS).forEach((b) => b.remove());
     closePanel(); // 旧版本开着的面板和它的监听也一起去掉
     if (S.tipOff) S.tipOff(); // 旧版本的悬停提示监听和提示框

@@ -13,8 +13,8 @@
 - 状态栏在页面里旁听应用和本机后台之间的数据，不改应用发出的请求：Antigravity 2.35 起应用默认经一条 WebSocket（同源的 `/connect-websocket`，状态栏只认本机后台这一条）访问本机后台，状态栏包一层 `WebSocket` 的 `send`，从应用发出的帧里取 CSRF 令牌，只解析状态流、账号和额度这几种回复；WebSocket 连不上、应用退回 HTTP 时（2.34 及以前也是这样），状态栏包一层 `fetch` 旁听 grpc-web+json 数据。另外，它向本机后台查几个只读接口：额度、当前登录的账号（邮箱和订阅档次；邮箱只在页面里用来算账号编号和打码显示，不写进文件）、实际模型名、子代理运行状态和步骤、每次调用的 token 用量和调用时间（算费用和调用明细）。
 - 注入程序每 30 秒把页面里今天的花费存进 `cost-day.json`，并从 `~/.gemini/antigravity/brain/` 找出今天动过的对话，再把对话库文件夹（`conversations`）里最近 32 天的对话 ID、创建时间和修改时间交给状态栏（后台的对话列表只列一部分对话），所以 Antigravity 重启后今天的金额不会丢。只存对话 ID、金额和按模型的调用数、token 数。同时把当天的汇总和额度变化写进 `usage-history.json`，再把最近 31 天交给状态栏的每日用量面板。
 - 注入程序每 30 秒看一次 agy CLI 的对话库文件夹（`~/.gemini/antigravity-cli/conversations`），只读打开改过的库，读出每次调用的时间、模型、token 数、首字时间和生成用时，按天写进 `usage-history.json` 的 `cli`；同时记下每个库在哪几天有调用（`cli-index.json`），看 32 天以前的明细时只读那天涉及的库。调用明细页要某一天的 CLI 调用、每日面板选 `all` 要全部历史时，经 DevTools Protocol 的 `Runtime.addBinding` 加的 `window.__agyZhAsk` 向注入程序要；注入程序只回答只读的用量数字和 CLI 对话标题。
-- 默认不写 Antigravity 的设置文件。只有两种情况会写：你选择作者的配色（或换回），会改 `~/.gemini/config/config.json` 的两组主题颜色；卸载时选择恢复，会按记下的原值改回这个文件（装过旧版 v1.0.0 的还有 `%APPDATA%\Antigravity\app_storage.json`）。卸载时还会删掉 Antigravity 给本插件记的条目。
-- 联网只有三处：从 Google Fonts 加载状态栏的图标；[在线更新](../README.md#在线更新) 向 api.github.com 问本项目最新的提交，再从 jsDelivr（或 raw.githubusercontent.com）下载本项目仓库里的数据文件（可以关掉）；在插件面板里点“更新”时下载新版本。
+- 不写 Antigravity 的外观设置。只有卸载时选择恢复，才会按记下的原值改回 `~/.gemini/config/config.json` 的主题颜色（以前用过作者配色的才有；装过旧版 v1.0.0 的还有 `%APPDATA%\Antigravity\app_storage.json`）。卸载时还会删掉 Antigravity 给本插件记的条目。
+- 联网只有三处：从 Google Fonts 加载状态栏的图标；[在线更新](../README.md#更新) 向 api.github.com 问本项目最新的提交，再从 jsDelivr（或 raw.githubusercontent.com）下载本项目仓库里的数据文件（可以关掉）；在插件面板里点“更新”时下载新版本。
 
 ## 从源码运行、打包和发版
 
@@ -87,10 +87,10 @@ node tools/publish.mjs <版本> --title "<Release 标题>" --notes <发布说明
 | `.github/workflows/purge-cdn.yml` | 推送了词典或 `data/` 以后，清掉 jsDelivr 上的缓存 |
 | `.github/workflows/test.yml` | 每次推送都跑一遍 `tests/` 里的测试 |
 | `tests/` | 测试：额度算法、读写数据文件、读 CLI 库、翻译器、数据文件、语法和版本号 |
-| `package/app/setup.mjs` | 一键安装、卸载、配色开关 |
+| `package/app/setup.mjs` | 一键安装、卸载 |
 | `package/build.mjs` | 生成安装包 |
 | `macos/` | 从源码运行时的 macOS 脚本（v1.x 的方式）；装插件请用安装包 |
 | `docs/images/statusbar.png`、`docs/images/panel.png` | README 里的截图 |
 | `docs/testing.md`、`docs/development.md` | 测试记录；原理和开发说明（本页）。各有英文版 `*.en.md` |
 
-数据目录里的文件见 [安装程序做了什么](../README.md#安装程序做了什么)。
+数据目录里的文件见 [数据](../README.md#数据)。

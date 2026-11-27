@@ -229,6 +229,17 @@ function saveLook(pick) {
     keep.iconMap = {};
     for (const [k, v] of Object.entries(pick.iconMap).slice(0, 16)) if (typeof v === 'string') keep.iconMap[String(k).slice(0, 24)] = v.slice(0, 32);
   }
+  // v2.0.18：自定义颜色 { light: { cost, q5, qw, bad }, dark: {...} }，只收 #rrggbb；页面交来的外观里没有这一项（undefined）时沿用文件里的，null = 清掉
+  const colors = pick.colors === undefined ? prev.colors : pick.colors;
+  if (colors && typeof colors === 'object') {
+    const c = {};
+    for (const m of ['light', 'dark']) {
+      const t = {};
+      for (const k of ['cost', 'q5', 'qw', 'bad']) { const v = String((colors[m] && colors[m][k]) || ''); if (/^#[0-9a-f]{6}$/i.test(v)) t[k] = v.toLowerCase(); }
+      if (Object.keys(t).length) c[m] = t;
+    }
+    if (Object.keys(c).length) keep.colors = c;
+  }
   keep.at = +pick.at || Date.now();
   lookCache = keep;
   try { writeFileSafe(LOOK_FILE, JSON.stringify(keep)); log(`look saved: ${keep.pal} / ${keep.skin} / ${keep.bar} / ${keep.dense}`); }
@@ -390,13 +401,7 @@ async function syncCost() {
       applyFrames();
       return;
     }
-    const js = JSON.stringify(readLook());
-    for (const s of sessions.values()) {
-      try {
-        await s.send('Runtime.evaluate', { expression: `window.__agyStats && window.__agyStats.setLook && window.__agyStats.setLook(${js}, true)` });
-        await reRegister(s);
-      } catch {}
-    }
+    await pushLook();
   }
 }
 
@@ -1307,7 +1312,7 @@ function pageScript() {
 // - Theme 页的 updates 选 off（look.json 的 online = 'off'）：不再联网，也不用 remote/ 里存的，只用安装包自带的。
 // - 换了版本（安装了新的安装包）以后，remote/ 里存的词典和规则先不用，等下一次取到再用（新安装包里的可能更新）。
 // - 测试：环境变量 AGY_REMOTE_BASE 换成别的地址（例如本机起的 http://127.0.0.1:端口/），只试这一个地址。
-const PACK_VERSION = '2.0.17';
+const PACK_VERSION = '2.0.18';
 const REMOTE_DIR = path.join(DATA, 'remote');
 const REMOTE_STATE = path.join(REMOTE_DIR, 'state.json');
 const REMOTE_BASES = process.env.AGY_REMOTE_BASE ? [process.env.AGY_REMOTE_BASE] : [
@@ -1961,6 +1966,36 @@ function setLookFlag(key, on, what) {
   for (const s of sessions.values()) apply(s).catch(() => {});
   if (key === 'zh') applyFrames();
 }
+// 把 look.json 推给所有窗口（S.setLook(look, true)），并更新登记给刷新后页面的脚本（见 reRegister）
+async function pushLook() {
+  const js = JSON.stringify(readLook());
+  for (const s of sessions.values()) {
+    try {
+      await s.send('Runtime.evaluate', { expression: `window.__agyStats && window.__agyStats.setLook && window.__agyStats.setLook(${js}, true)` });
+      await reRegister(s);
+    } catch {}
+  }
+  panelSnap.at = 0; // 插件面板下次取数时重新读快照（配色、样式表指纹变了）
+}
+// 插件面板的“配色”（v2.0.18）：和状态栏、每日用量面板共用 look.json 的 pal；取值由页面的 cleanLook 校验，这里只限长度。
+// 选一套配色 = 用这套：自定义颜色（浅色、深色两份）一起清掉。点的就是自定义所基于的那套时，也是清掉自定义
+function setPal(pal) {
+  const l = readLook() || {};
+  const v = String(pal || '').slice(0, 24);
+  if (!v || (l.pal === v && !l.colors)) return;
+  saveLook({ ...l, pal: v, colors: null, at: Date.now() });
+  pushLook().catch(() => {});
+}
+// 自定义颜色：只改一种主题（light / dark）的那一份；colors = null 时清掉这一份（恢复所选配色原来的颜色）
+function setColors(mode, colors) {
+  if (mode !== 'light' && mode !== 'dark') return;
+  const l = readLook() || {};
+  const all = { ...(l.colors || {}) };
+  if (colors && typeof colors === 'object') all[mode] = colors; else delete all[mode];
+  saveLook({ ...l, colors: Object.keys(all).length ? all : null, at: Date.now() });
+  log(`custom colors ${mode}: ${colors ? JSON.stringify(colors) : 'cleared'}`);
+  pushLook().catch(() => {});
+}
 
 // ---------- 交给插件 sidecar 的状态和操作（v2.0） ----------
 // sidecar（sidecars/core/main.mjs）和本脚本在同一个进程里；侧边栏面板、在线更新、代码更新都通过这里拿状态、做操作。
@@ -1980,6 +2015,8 @@ globalThis.__agyZh = {
   openView,
   setZh: (on) => setLookFlag('zh', on, 'chinese ui'),
   setBar: (on) => setLookFlag('statusbar', on, 'status bar'),
+  setPal,
+  setColors,
   // 在线更新：马上查一次
   checkRemoteNow: () => { remoteNextAt = 0; },
   // 在线更新开关（和 Theme 页的 updates 一样，存在 look.json）

@@ -15,11 +15,12 @@ function tileFn() {
   return new Function(helpers + '\n' + body + '\nreturn quotaTile;')();
 }
 
-test('额度格子：实色是已用、浅色画到预计用到的位置，右边写“已用 → 预计”；下面一行写这个周期花了多少和推出的周限额', () => {
+test('额度格子：实色是已用、浅色画到预计用到的位置，右边写“已用 → 预计”；下面按 5h / 周各一行写这个周期花了多少和推出的整个额度', () => {
   const quotaTile = tileFn();
   const now = Date.now();
   const html = quotaTile([
-    { group: 'Gemini', weekly: false, used: 0.063, reset: now + 1.4 * H, timePct: 0.73, est: { proj: 0.087, fullAt: 0, rough: false, basis: '按这 5 小时的平均速度' }, cost: null },
+    { group: 'Gemini', weekly: false, used: 0.063, reset: now + 1.4 * H, timePct: 0.73, est: { proj: 0.087, fullAt: 0, rough: false, basis: '按这 5 小时的平均速度' },
+      cost: { usd: 10.71, cap: 170, tok: 30.3e6, capTok: 481e6, rough: false } },
     { group: 'Gemini', weekly: true, used: 0.07, reset: now + 6 * 24 * H, timePct: 0.14, est: { proj: 0.4951, fullAt: 0, rough: false, basis: '按最近 24 小时' },
       cost: { usd: 142.3, cap: 2039.4, tok: 498e6, capTok: 7.17e9, rough: false } },
   ]);
@@ -30,14 +31,17 @@ test('额度格子：实色是已用、浅色画到预计用到的位置，右�
   assert.match(html, /6% <em>→ 9%<\/em>/);
   assert.match(html, /7% <em>→ 50%<\/em>/);
   assert.match(html, /<b style="left:73%">/); // 时间进度的竖线还在
-  assert.match(html, /已用 <b>\$142<\/b> \/ 周限额约 <b>\$2,039<\/b><\/div>/);
-  assert.doesNotMatch(html, /粗估|class="s bad"|每周预计用掉/);
-  // 悬停提示一行一件事（11-27 用户嫌连成一段太密）：5 小时、每周、费用（带 token），不写解释
+  assert.match(html, /<span>5h<\/span><div class="qbar">/); // 标签写短：5h / 周
+  assert.match(html, /<span>周<\/span><div class="qbar">/);
+  assert.match(html, /<div class="qcost"><span class="ql">5h<\/span> <b>\$10\.71<\/b> \/ ≈<b>\$170<\/b><\/div><div class="qcost"><span class="ql">周<\/span> <b>\$142<\/b> \/ ≈<b>\$2,039<\/b><\/div>/);
+  assert.doesNotMatch(html, /粗估|class="s bad"|每周|5 小时|已用|周限额约/);
+  // 悬停提示一行一件事，只写格子上没有的（11-27 用户嫌连成一段太密、又嫌和格子重复）：两个重置时间、token
   const title = html.match(/title="([^"]*)"/)[1].split('&#10;');
-  assert.equal(title.length, 3);
-  assert.match(title[0], /^5 小时：已用 6%，预计 9%，\d\d:\d\d 重置（1 小时 \d+ 分后）$/);
-  assert.match(title[1], /^每周：已用 7%，预计 50%（按最近 24 小时），周. \d\d:\d\d 重置$/);
-  assert.equal(title[2], '这个周期花了 $142（498M token），周限额约 $2,039（7.17B token）');
+  assert.deepEqual(title.length, 4);
+  assert.match(title[0], /^5h \d\d:\d\d 重置 · 1h\d+m 后$/);
+  assert.match(title[1], /^周 周. \d\d:\d\d 重置$/);
+  assert.equal(title[2], '5h 30.3M / ≈481M token');
+  assert.equal(title[3], '周 498M / ≈7.17B token');
 });
 
 test('悬停卡片保留连续空格（pre-wrap），悬停里按列对齐的小表格才对得齐', () => {
@@ -58,7 +62,7 @@ test('额度格子：预计会用超时浅色那段换成斜纹、写“→ 超�
   assert.match(html, /<i class="proj over" style="width:100%;/);
   assert.match(html, /46% <em class="over">→ 超<\/em>/);
   const md = (full.getMonth() + 1) + '-' + full.getDate() + ' ' + String(full.getHours()).padStart(2, '0') + ':' + String(full.getMinutes()).padStart(2, '0');
-  assert.match(html, new RegExp('<div class="s bad">每周额度按现在的速度 ' + md + ' 左右用完</div>'));
+  assert.match(html, new RegExp('<div class="s bad">周 ≈' + md + ' 用完</div>'));
 });
 
 test('额度格子：没有预估时只画已用；已用不到 5% 的周限额标粗估；没花钱不写费用；没查到额度写“还没查到”', () => {
@@ -69,7 +73,8 @@ test('额度格子：没有预估时只画已用；已用不到 5% 的周限额�
     { group: 'Claude', weekly: true, used: 0.02, reset: now + 6 * 24 * H, timePct: 0.1, est: null, cost: { usd: 1.2, cap: 60, rough: true } },
   ]);
   assert.doesNotMatch(html, /class="proj|<em/);
-  assert.match(html, /已用 <b>\$1\.20<\/b> \/ 周限额约 <b>\$60\.00<\/b> <span>（粗估）<\/span>/);
+  assert.match(html, /<span class="ql">周<\/span> <b>\$1\.20<\/b> \/ ≈<b>\$60\.00<\/b> <span>粗估<\/span><\/div>/);
+  assert.doesNotMatch(html, /<span class="ql">5h/); // 5h 没花钱就不写那一行
   assert.doesNotMatch(quotaTile([{ group: 'Gemini', weekly: true, used: 0.1, reset: now + H, timePct: 0.5, est: null, cost: { usd: 0, cap: 0 } }]), /qcost/);
   assert.match(quotaTile([]), /还没查到/);
   assert.match(quotaTile(null), /还没查到/);
@@ -79,7 +84,7 @@ test('5 小时额度的预估：已用 ÷ 时间进度；时间过了不到 10% 
   const est5h = new Function(cut('statusbar.js', '  const est5h = ', '  const weeklyBucket = ') + '\nreturn est5h;')();
   const span = 5 * H, now = 1_800_000_000_000;
   // 过了 2 小时（40%），用了 6% → 到重置 15%
-  assert.deepEqual(est5h(0.06, now + 3 * H, span, now), { proj: 0.15, fullAt: 0, rough: false, basis: '按这 5 小时的平均速度' });
+  assert.deepEqual(est5h(0.06, now + 3 * H, span, now), { proj: 0.15, fullAt: 0, rough: false, basis: '按这 5h 平均' });
   // 过了 2 小时，用了 50% → 125%；剩下 50% 按每小时 25% 用，2 小时后用完
   const e = est5h(0.5, now + 3 * H, span, now);
   assert.equal(e.proj, 1.25);

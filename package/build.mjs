@@ -76,12 +76,12 @@ const command = (action) => [
   `ELECTRON_RUN_AS_NODE=1 "$NODE" "$(pwd)/app/setup.mjs" ${action}`,
   '',
 ].join('\n');
-for (const [zh, action] of [['一键安装', 'install'], ['一键卸载', 'uninstall'], ['配色开关', 'theme']]) {
+for (const [zh, action] of [['一键安装', 'install'], ['一键卸载', 'uninstall']]) { // v2.0.16 以前还有“配色开关”（作者的配色），v2.0.17 去掉了
   fs.writeFileSync(path.join(OUT, zh + '.cmd'), cmd(action), 'ascii');
   fs.writeFileSync(path.join(OUT, zh + '.command'), command(action), 'utf8');
 }
 
-// 测试过的 Antigravity 版本（改了要同步 README.md 的“测试情况”、README.en.md 的“Tested versions”和 docs/testing*.md）
+// 测试过的 Antigravity 版本（改了要同步 README.md 的“环境要求”、README.en.md 的“Requirements”和 docs/testing*.md）
 const TESTED = 'Antigravity 桌面版 2.35.2，Windows 11 和 macOS 15';
 
 const readme = `agy-zh：Antigravity 中文插件（非官方）v${PACK_VERSION}
@@ -94,7 +94,7 @@ const readme = `agy-zh：Antigravity 中文插件（非官方）v${PACK_VERSION}
   “using the Service in connection with products not provided by us”（和非 Google 提供的产品一起使用服务）。
   违反条款可能导致 Antigravity 和 Gemini CLI 账号被暂停或终止。作者不能保证使用本工具不违反条款。
 - 本工具只在本机界面上加汉化和用量状态栏，不改发给 Google 的内容，默认也不改 Antigravity 的设置
-  （缩放、配色、字体都保持你自己的）。作者的配色是可选项，见下面“配色开关”。
+  （缩放、配色、字体都保持你自己的）。
 - 本工具依赖 Antigravity 内部的页面结构。Antigravity 更新后，部分功能可能失效或显示英文。
   测试过的版本：${TESTED}。
 - 汉化要靠 Antigravity 的调试端口（本机 127.0.0.1）。本机上的其他程序可以通过它控制 Antigravity 窗口。介意的话不要使用本工具。
@@ -132,22 +132,16 @@ const readme = `agy-zh：Antigravity 中文插件（非官方）v${PACK_VERSION}
   安装程序会给开始菜单、桌面、任务栏上的 Antigravity 快捷方式加上这个参数，卸载时去掉。
 - Antigravity 自动更新后可能重写快捷方式或自己重启：插件会把参数补回去；这次启动没带参数时会弹框问你要不要重开。
 
-【配色开关（可选，默认不用）】
-- 作者的配色是 Claude 风格的暖白配色：
-  浅色主题 背景 #FAF9F5、文字 #141413、强调色 #D97757；深色主题 背景 #262624、文字 #FAF9F5、强调色 #D97757。
-- 只改主题颜色，不改缩放、字体和对比度。换上前会记下你原来的颜色，换回或卸载时恢复。
-- 想换上或换回：运行“配色开关”，按提示输入。换颜色时要先关闭 Antigravity，改完会自动重新打开。
-
 【卸载】
-运行“一键卸载”。会删掉插件、去掉快捷方式上的参数；用过作者配色的会问要不要恢复；最后问要不要连每天的用量记录一起删。
-请保留这个文件夹，卸载、切换配色时都要用。
+运行“一键卸载”。会删掉插件、去掉快捷方式上的参数；以前版本里用过作者配色的会问要不要恢复原来的颜色；最后问要不要连每天的用量记录一起删。
+请保留这个文件夹，卸载时要用。
 
 【说明】
 - 不修改 Antigravity 本身的文件，Antigravity 自动更新后仍然有效。
 - 插件装在 ~/.gemini/config/plugins/agy-zh-pack（Windows 是 %USERPROFILE%\\.gemini\\config\\plugins\\agy-zh-pack）。
 - 数据在 ~/.gemini/antigravity/plugin_data/agy-zh-pack：今天的花费（cost-day.json）、每天用量的历史（usage-history.json，
   只存数字和打码的邮箱）、额度读数（quota-samples.json）、状态栏外观和在线更新开关（look.json）、插件设置（settings.json）、
-  配色原值（originals.json）、在线更新下载到的文件（remote）、日志（inject.log）。
+  外观原值（originals.json，只有以前用过作者配色的才有）、在线更新下载到的文件（remote）、日志（inject.log）。
 - 联网只有三处：从 Google Fonts 加载状态栏的图标；在线更新从 jsDelivr（或 raw.githubusercontent.com）下载词典和价格；
   在插件面板里点“更新”时下载新版本。用量和额度是向本机的 Antigravity 后台查的。
 - 安装脚本用 Antigravity 自带的 Node 运行，不用另装 Node.js。

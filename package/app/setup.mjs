@@ -1,9 +1,9 @@
-// agy-zh：Antigravity 中文插件（v2.0 起是 Antigravity 插件）：安装 / 卸载 / 配色开关。
-// Windows 由“一键安装.cmd / 一键卸载.cmd / 配色开关.cmd”调用，macOS 由同名的 .command 调用；都用 Antigravity 自带的 Node 运行
+// agy-zh：Antigravity 中文插件（v2.0 起是 Antigravity 插件）：安装 / 卸载。
+// Windows 由“一键安装.cmd / 一键卸载.cmd”调用，macOS 由同名的 .command 调用；都用 Antigravity 自带的 Node 运行
 // （Antigravity.exe / Antigravity 设 ELECTRON_RUN_AS_NODE=1），不用另装 Node.js：
-//   setup.mjs install | uninstall | theme
+//   setup.mjs install | uninstall
 //
-// 安装做的事（缩放、字体、对比度一律不改；配色只在用户选择时才改）：
+// 安装做的事（缩放、字体、对比度、配色一律不改）：
 //   1. 核对安装包：按 plugin-manifest.json 校验作者签名和每个文件的 sha256。
 //   2. Antigravity 开着但这次没带调试端口参数：问过用户后先关掉，装完再带参数打开。
 //   3. 从 v1.x 迁移：停掉旧的注入程序，删掉开机自启（Windows 计划任务 AgyZhPack / “启动”文件夹，macOS LaunchAgent），
@@ -11,9 +11,10 @@
 //   4. 把插件文件复制到 ~/.gemini/config/plugins/agy-zh-pack/。Antigravity 几秒内会自动发现并启动它（不用重启）。
 //   5. Windows：给 Antigravity 的快捷方式加上 --remote-debugging-port=0（debug-port.ps1）。
 //      macOS：问要不要在 Antigravity 没带参数启动时自动重开（从程序坞打开时总是不带）。
-//   6. 问要不要用作者的配色（默认不用）。改配色时要先关 Antigravity，原值记进数据目录的 originals.json。
+//   v2.0.16 以前还有第 6 步“问要不要用作者的配色”和单独的“配色开关”脚本，v2.0.17 按用户要求去掉了。
 // 数据目录：~/.gemini/antigravity/plugin_data/agy-zh-pack（插件更新时插件目录会被换掉，数据放在外面）。
-// 卸载：删插件目录（Antigravity 一秒内停掉插件）、去掉快捷方式参数、按需恢复配色、问要不要删数据目录。
+// 卸载：删插件目录（Antigravity 一秒内停掉插件）、去掉快捷方式参数、问要不要删数据目录。
+//   以前用过作者的配色（或 v1.0.0 改过缩放等）的，原来的样子记在 originals.json 里，卸载时会问要不要恢复。
 //
 // 测试用：AGY_SETUP_TEST=1 跳过所有进程操作（不关、不开 Antigravity，不停注入程序，不动计划任务和 LaunchAgent）；
 // 再设 AGY_SETUP_TEST_RUNNING=1 就假装 Antigravity 正开着。配合临时的 USERPROFILE / HOME / LOCALAPPDATA / APPDATA 在隔离目录里测。
@@ -208,52 +209,10 @@ const shortcuts = (mode, dir = PLUGIN_DIR) => {
   } catch { return null; }
 };
 
-// ---------- 作者的配色（可选，默认不用；和 v1.x 一样） ----------
-const AUTHOR_THEME = {
-  customThemeSeedsLight: { background: '#FAF9F5', foregroundOverride: '#141413', primary: '#D97757' },
-  customThemeSeedsDark: { background: '#262624', foregroundOverride: '#FAF9F5', primary: '#D97757' },
-};
-const SEED_KEYS = ['background', 'foregroundOverride', 'primary'];
-const sameSeed = (a, b) => !!a && SEED_KEYS.every((k) => String(a[k] || '').toLowerCase() === b[k].toLowerCase());
+// ---------- Antigravity 的设置文件、记下的外观原值 ----------
+// v2.0.17 起不再提供“作者的配色”（用户要求去掉）。以前选过的人，原来的颜色还记在 originals.json 里，卸载时可以恢复（见 uninstall）
 const readAgyConfig = () => { try { return readJson(CONFIG); } catch { return null; } };
-const themeActive = () => { const u = (readAgyConfig() || {}).userSettings || {}; return Object.entries(AUTHOR_THEME).every(([k, v]) => sameSeed(u[k], v)); };
 const readOriginals = () => { const o = fs.existsSync(ORIGINALS) ? readJson(ORIGINALS) : {}; return { appStorage: o.appStorage || {}, userSettings: o.userSettings || {} }; };
-const saveOriginals = (o) => { if (!Object.keys(o.appStorage).length && !Object.keys(o.userSettings).length) fs.rmSync(ORIGINALS, { force: true }); else writeJson(ORIGINALS, o); };
-const applyTheme = (on) => {
-  const cfg = readAgyConfig();
-  if (!cfg) return false;
-  cfg.userSettings = cfg.userSettings || {};
-  const o = readOriginals();
-  for (const [k, v] of Object.entries(AUTHOR_THEME)) {
-    if (on) {
-      if (!(k in o.userSettings)) o.userSettings[k] = k in cfg.userSettings ? cfg.userSettings[k] : null;
-      cfg.userSettings[k] = v;
-    } else {
-      const orig = k in o.userSettings ? o.userSettings[k] : null;
-      if (orig === null) delete cfg.userSettings[k]; else cfg.userSettings[k] = orig;
-      delete o.userSettings[k];
-    }
-  }
-  writeJson(CONFIG, cfg);
-  saveOriginals(o);
-  return true;
-};
-const sayThemeInfo = () => {
-  say('  【可选】使用作者的配色（Claude 风格的暖白配色）');
-  say('  浅色主题：背景 #FAF9F5、文字 #141413、强调色 #D97757；深色主题：背景 #262624、文字 #FAF9F5、强调色 #D97757。');
-  say('  只改主题颜色，不改缩放、字体和对比度。原来的颜色会记下来，换回或卸载时恢复。换颜色时需要先关闭 Antigravity。');
-};
-const askTheme = async (current) => {
-  const a = await ask(current ? '  现在用的是作者的配色。输入 n 回车=换回原来的颜色，直接回车=保持：' : '  现在用的是你自己的配色（默认）。输入 y 回车=换成作者的配色，直接回车=保持：');
-  return current ? !/^n/i.test(a) : /^y/i.test(a);
-};
-const switchTheme = async (after) => {
-  if (after === themeActive()) return { changed: false, reopen: false };
-  if (!readAgyConfig()) { warn('没找到 Antigravity 的设置文件 ' + CONFIG + '，配色这次没改。请先打开 Antigravity 登录一次。'); return { changed: false, reopen: false }; }
-  const reopen = await ensureAgyClosed('改配色');
-  applyTheme(after);
-  return { changed: true, reopen };
-};
 
 // 插件在 Antigravity 设置里被关掉了：Antigravity 关着时打开它（运行中改设置文件会被它写回）
 function pluginDisabled() { const c = readAgyConfig(); return !!(c && c.plugins && c.plugins['agy-zh-pack'] && c.plugins['agy-zh-pack'].enabled === false); }
@@ -335,14 +294,7 @@ async function install() {
     ok(s.relaunch === 'auto' ? '已设为自动重开（侧边栏面板里可以改）' : '已设为每次先问（侧边栏面板里可以改）');
   }
 
-  // 5. 配色
-  say('');
-  sayThemeInfo();
-  const th = await switchTheme(await askTheme(themeActive()));
-  ok(th.changed ? (themeActive() ? '已换成作者的配色' : '已换回原来的配色') : (themeActive() ? '配色保持不变（作者的配色）' : '配色保持不变（你自己的）'));
-  reopen = reopen || th.reopen;
-
-  // 6. 打开 Antigravity
+  // 5. 打开 Antigravity
   const running = agyRunning();
   if (!running) { startAgy(); ok('正在打开 Antigravity（带调试端口参数）'); }
   say('');
@@ -356,7 +308,7 @@ async function install() {
   }
   say('  插件的面板：Antigravity 右上角的“插件”菜单 → agy-zh（运行状态、在线更新、版本更新）。');
   say('  以后有新版本，在面板里点“更新”就行（装之前校验作者签名），不用再下载安装包。');
-  say('  请保留这个文件夹：以后卸载、切换配色要用里面的脚本。');
+  say('  请保留这个文件夹：以后卸载要用里面的脚本。');
   say('');
 }
 
@@ -424,22 +376,8 @@ async function uninstall() {
   say('');
 }
 
-// ---------- 配色开关 ----------
-async function theme() {
-  say('');
-  say('  ===== agy-zh（Antigravity 中文插件）：配色开关 =====');
-  say('');
-  sayThemeInfo();
-  say('');
-  const want = await askTheme(themeActive());
-  const th = await switchTheme(want);
-  ok(th.changed ? (want ? '已换成作者的配色' : '已换回原来的配色') : '没有改动：' + (themeActive() ? '仍然是作者的配色' : '仍然是你自己的配色'));
-  if (th.reopen) { startAgy(); ok('正在重新打开 Antigravity'); }
-  say('');
-}
-
 const cmd = process.argv[2];
-const actions = { install, uninstall, theme };
-(actions[cmd] ? actions[cmd]() : Promise.reject(new Error('用法：setup.mjs install|uninstall|theme')))
+const actions = { install, uninstall };
+(actions[cmd] ? actions[cmd]() : Promise.reject(new Error('用法：setup.mjs install|uninstall')))
   .catch((e) => { say(''); warn('出错了：' + (e && e.message)); say('  请截图保存这个窗口，反馈问题时附上。'); process.exitCode = 1; })
   .finally(closeInput);
