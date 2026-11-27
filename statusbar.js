@@ -1492,17 +1492,16 @@ function agyStatusBar(CFG) {
     return out;
   };
   // 原因：面板上的短名（英文，和状态栏一致）+ 悬停说明里的中文
+  // [底部一行的英文, 单次调用悬停里的说明, 合计悬停里的短说明]。原因的判断方法和实测数据写在 README 的“缓存没命中”一节（v2.0.17 起悬停里不再写）
   const MISS_CAUSE = {
-    user: ['your pause', '你隔了 1 分钟以上才发下一条消息'],
-    turn: ['agent pause', '一轮中间停了 1 分钟以上（长命令、等你批准、等子代理）'],
-    wait: ['pause', '隔了 1 分钟以上才发下一次请求（agy CLI）'],
-    compact: ['compaction', '上下文刚被压缩或截短'],
-    model: ['model switch', '换了模型（新模型的缓存是空的）'],
-    other: ['other', '间隔不到 1 分钟也没命中（服务端的缓存没接上，或者前面的内容变了；你控制不了）'],
+    user: ['your pause', '你隔了 1 分钟以上才发下一条消息', '你隔了 1 分钟以上才回'],
+    turn: ['agent pause', '一轮中间停了 1 分钟以上（长命令、等你批准、等子代理）', '一轮中间停了 1 分钟以上'],
+    wait: ['pause', '隔了 1 分钟以上才发下一次请求（agy CLI）', 'agy CLI 隔了 1 分钟以上'],
+    compact: ['compaction', '上下文刚被压缩或截短', '刚压缩过'],
+    model: ['model switch', '换了模型（新模型的缓存是空的）', '换了模型'],
+    other: ['other', '间隔不到 1 分钟也没命中（服务端的缓存没接上，或者前面的内容变了；你控制不了）', '不到 1 分钟也没命中'],
   };
   const MISS_ORDER = ['user', 'turn', 'wait', 'compact', 'model', 'other'];
-  const MISS_FACT = '实测（作者电脑 7 天）：同一对话两次调用隔不到 30 秒时，Gemini 的缓存命中 90%～95%；隔 2～5 分钟，Hydrogen 有 59%、Carbon 有 41% 的调用完全没命中；' +
-    'Claude 约 5 分钟后失效。上下文越长，没命中越贵：40 多万 token 的 Carbon 对话没命中一次多花约 $1.6。';
   const fmtIdle = (ms) => (ms < 60e3 ? Math.round(ms / 1000) + ' 秒' : ms < 3600e3 ? Math.round(ms / 60e3) + ' 分钟' : (ms / 3600e3).toFixed(1) + ' 小时');
   // 一次调用没命中的说明（明细里花费、命中率两格的悬停）
   const missNote = (m) => {
@@ -1529,7 +1528,14 @@ function agyStatusBar(CFG) {
     }
     return s;
   };
-  const missTip = (s) => MISS_ORDER.filter((k) => s.by[k]).map((k) => '\n  ' + MISS_CAUSE[k][1] + '：' + s.by[k][0] + ' 次，' + fmtUsd(s.by[k][1])).join('');
+  // 没命中的合计按原因分行（v2.0.17 精简）：按多花的钱从多到少；次数和金额放前面、右对齐，说明放最后
+  // （中文字在等宽字体里不一定正好两格宽，放在前面后面的列就对不齐）
+  const missTip = (s) => {
+    const ks = MISS_ORDER.filter((k) => s.by[k]).sort((a, b) => s.by[b][1] - s.by[a][1]);
+    const n = ks.map((k) => s.by[k][0] + ' 次'), u = ks.map((k) => fmtUsd(s.by[k][1]));
+    const wn = Math.max(0, ...n.map((x) => x.length)), wu = Math.max(0, ...u.map((x) => x.length));
+    return ks.map((k, i) => '\n  ' + n[i].padStart(wn) + '  ' + u[i].padStart(wu) + '  ' + MISS_CAUSE[k][2]).join('');
+  };
   // agy CLI 的调用：按对话分组、按时间排好再找（只有当天的调用，也没有步骤信息）。给每行加上 miss，返回原数组
   const cliMiss = (rows) => {
     const by = new Map();
@@ -1961,7 +1967,18 @@ function agyStatusBar(CFG) {
     const long = basis + '，' + (proj > 1 && fullAt ? '会在 ' + new Date(fullAt).toLocaleString() + ' 左右用完' : '到重置时大约用到 ' + Math.round(proj * 100) + '%') +
       (rough ? '（这周才过去不到 1 天，估得很粗）' : '') +
       (use24 && e.projWeek != null ? '\n按这周平均速度算是 ' + Math.round(Math.min(e.projWeek, 9.99) * 100) + '%' : '');
-    return { proj, short, long, rough };
+    // fullAt：会提前用完时大约什么时候用完；basis：按什么速度算的（短）；alt：用了最近 24 小时时，按这周平均算的预估（对照）
+    const basisShort = use24 ? '按最近 ' + Math.round(e.spanH) + ' 小时' : '按这周平均';
+    return { proj, short, long, rough, fullAt: proj > 1 && fullAt ? fullAt : 0, basis: basisShort, alt: use24 && e.projWeek != null ? e.projWeek : null };
+  };
+  // 5 小时额度的预估（v2.0.17，插件面板额度格子用）：按这个窗口到现在的平均速度推到重置，= 已用 ÷ 时间进度。
+  // 时间过了不到 10%（30 分钟）不估：刚开始时一两次调用就能推出很大的数。会提前用完的，算出大约什么时候用完
+  const est5h = (used, reset, span, now = Date.now()) => {
+    if (!(used > 0) || !(reset > now)) return null;
+    const elapsed = span - (reset - now);
+    if (elapsed < span * 0.1) return null;
+    const proj = used * span / elapsed;
+    return { proj: Math.round(proj * 1e4) / 1e4, fullAt: proj > 1 ? Math.round(now + (1 - used) * elapsed / used) : 0, rough: false, basis: '按这 5 小时的平均速度' };
   };
   const weeklyBucket = (grp) => { // 这一组的每周额度桶：{ id（例如 gemini-weekly）, used 已用比例, reset 重置时间毫秒 }
     for (const g of (S.quota && S.quota.groups) || []) for (const b of g.buckets || []) {
@@ -2071,6 +2088,17 @@ function agyStatusBar(CFG) {
     return [S.history, S.historyAll].flatMap((h) => (h && Array.isArray(h.cycles) ? h.cycles : []))
       .filter((e) => e && e.id === bucketId && e.end > e.start && !seen.has(e.start) && seen.add(e.start)).sort((a, b) => b.start - a.start);
   };
+  // 整周额度（cap，11-22 用户要的“预计周限额”）：这个周期开始到现在，这一组模型的花费和 token ÷ 已用比例，推出用满 100% 大约多少钱。
+  // 每日面板底部、悬停和插件面板的额度格子共用（v2.0.17 抽出来）。没用过的桶返回 null；已用不到 1% 或没花钱时 cap = 0（不推）；
+  // 不到 5% 标 rough。钱按 API 标准价折算；额度按模型和 token 种类怎么折算 Google 没公布，这里按同比例推，只是参考
+  const weekCap = (grp, wb) => {
+    if (!wb || !(wb.used > 0) || !(wb.reset > 0)) return null;
+    const c = cycleCost(grp, wb.reset - WEEK_MS, Infinity);
+    const ok = wb.used >= 0.01 && c.usd > 0;
+    return { usd: c.usd, tok: c.tok, exact: c.exact, failed: c.failed, cap: ok ? c.usd / wb.used : 0, capTok: ok ? c.tok / wb.used : 0, rough: wb.used < 0.05 };
+  };
+  // 离某个时刻还有多久（悬停里用）：不到 1 小时写分钟，不到 2 天写小时，再长写天
+  const leftTx = (ms) => (ms < 3600e3 ? Math.max(1, Math.round(ms / 60e3)) + ' 分钟' : ms < 48 * 3600e3 ? Math.round(ms / 3600e3) + ' 小时' : Math.round(ms / 86400e3) + ' 天');
   const recTokens = (r) => {
     const t = [0, 0, 0, 0, 0]; // 调用数、输入、缓存读、缓存写、输出
     for (const m of Object.values((r && r.models) || {})) for (let i = 0; i < 5; i++) t[i] += +m[i + 1] || 0;
@@ -2410,73 +2438,71 @@ function agyStatusBar(CFG) {
     // 今天缓存没命中多花的钱（2026-11-24 加），按原因分开；点一下打开今天的明细、只看没命中的
     const mt = missToday();
     if (mt && mt.n) {
-      const parts = ['cache miss today +' + fmtUsd(mt.usd) + (mt.total > 0 ? ' (' + Math.round(mt.usd / mt.total * 100) + '%)' : '')];
-      for (const k of MISS_ORDER) if (mt.by[k] && mt.by[k][1] >= 0.05) parts.push(MISS_CAUSE[k][0] + ' ' + fmtUsd(mt.by[k][1])); // 不到 5 美分的原因只写在悬停说明里
-      const l2 = el('div', 'k-cost k-miss clk', parts.join(' · ')); // 颜色和上面花费那一行一样
-      setTip(l2, '今天缓存没命中 ' + mt.n + ' 次，多花约 ' + fmtUsd(mt.usd) + '（按 API 标准价；今天每次调用的合计是 ' + fmtUsd(mt.total) + '）：' + missTip(mt) +
-        '\n\n' + MISS_FACT + '\n\n点一下打开今天的明细，只看没命中的调用。');
+      // v2.0.17 精简：底部一行只写多花的钱、占比和最多的两个原因（不到 5 美分的不算），其余在悬停说明里
+      const share = mt.total > 0 ? Math.round(mt.usd / mt.total * 100) : null;
+      const top = MISS_ORDER.filter((k) => mt.by[k] && mt.by[k][1] >= 0.05).sort((a, b) => mt.by[b][1] - mt.by[a][1]).slice(0, 2);
+      const l2 = el('div', 'k-cost k-miss clk', 'cache miss today +' + fmtUsd(mt.usd) + (share != null ? ' (' + share + '%)' : '') +
+        (top.length ? ' · most: ' + top.map((k) => MISS_CAUSE[k][0] + ' ' + fmtUsd(mt.by[k][1])).join(', ') : '')); // 颜色和上面花费那一行一样
+      setTip(l2, '今天缓存没命中 ' + mt.n + ' 次，多花约 ' + fmtUsd(mt.usd) + (share != null ? '（占今天 ' + share + '%）' : '') + missTip(mt) + '\n\n点一下只看没命中的调用');
       l2.addEventListener('click', () => { S.panelView = 'calls'; S.callsDay = dayName(); S.callsMiss = true; renderPanel(panel); });
       foot.append(l2);
     }
     // 每组每周额度一行（11-22 改：按重置周期算）。周期 = 重置时间往前推 7 天 → 重置时间，例如 11-22 09:41 → 11-29 09:41。
     // 原来写的是“最近 n 个自然日里用掉多少”和按这些天算的“每 1% 折合多少钱”，和额度的周期对不上（用户指出）。
-    //   已用：状态栏查到的这个周期的已用比例；没用过的桶（已用 0）重置时间跟着现在走，周期还没开始，只写 0% used。
+    //   已用：状态栏查到的这个周期的已用比例；没用过的桶（已用 0）重置时间跟着现在走，周期还没开始，只写 not started（v2.0.16 以前是 0% used）。
     //   整周额度大约值多少（cap，11-22 用户要的“预计周限额 800 刀、900M 用量”）：这个周期开始那天起，每天这一组模型的
     //   花费和 token 合计 ÷ 已用比例，推出用满 100% 大约对应多少钱、多少 token。
     //   2026-11-24 起周期开始那天只算周期开始以后的调用（见 cycleCost / callsPart），原来那天整天都算在内。
     //   已用不到 5% 时误差很大，标 rough；额度按模型和 token 种类怎么折算 Google 没公布，这里按花费和 token 同比例推，只是参考。
+    //   v2.0.17 精简（用户嫌小字太多）：底部一行只留“已用 → 预估”、重置时间、cap；悬停只写数，一类提醒只写一次，不再写账号（面板标题行有），
+    //   原理和注意事项（家庭组共享、别的电脑也在用这个号时不准等）写在 README 的“每周额度预估”一节。
     for (const [grp, label] of GROUPS) {
       const wb = weeklyBucket(grp);
       if (!wb) continue;
-      const parts = [label + ' weekly', Math.round(wb.used * 100) + '% used'];
-      let tip = label + ' 组每周额度（周期按重置时间算）：';
-      let est = null;
-      if (wb.used > 0 && wb.reset > 0) {
-        const start = wb.reset - WEEK_MS;
+      const started = wb.used > 0 && wb.reset > 0;
+      const est = started ? weekEst(wb.id) : null;
+      const cap = started ? weekCap(grp, wb) : null;
+      const er = started ? resetBefore(grp, wb.reset) : null; // 这个周期是不是一次提前重置之后开始的
+      const projTx = (e) => (e.fullAt ? 'full ' + fmtWhen(e.fullAt) : Math.round(Math.min(e.proj, 9.99) * 100) + '%');
+      const parts = [label + ' weekly'];
+      let tip = label + ' 每周额度';
+      if (started) {
+        parts.push(Math.round(wb.used * 100) + '%' + (est ? ' → est ' + projTx(est) + (est.rough ? ' (rough)' : '') : ' used'));
         parts.push('resets ' + fmtWhen(wb.reset));
-        est = weekEst(wb.id);
-        if (est) parts.push('est ' + est.short);
-        // 这个周期开始到现在，这一组模型的花费和 token（输入 + 缓存读 + 缓存写 + 输出）。
-        // 开始那天按每次调用的时间只算周期开始以后的（cycleCost / callsPart，后台取好之前先按整天算）；之后的天按整天算
-        const cost = cycleCost(grp, start, Infinity);
-        const usd = cost.usd, tok = cost.tok;
-        const part = cost.exact ? cost : null;
-        const capOk = wb.used >= 0.01 && usd > 0;
-        const capUsd = capOk ? usd / wb.used : 0, capTok = capOk ? tok / wb.used : 0;
-        const capRough = wb.used < 0.05;
-        if (capOk) parts.splice(2, 0, 'cap ≈ ' + fmtUsd(capUsd) + ' / ' + fmtTok(capTok) + ' tok' + (capRough ? ' (rough)' : ''));
-        const sd = new Date(start), rd = new Date(wb.reset);
-        const md = (x) => (x.getMonth() + 1) + '-' + x.getDate() + ' ' + pad(x.getHours()) + ':' + pad(x.getMinutes());
-        tip += '\n这个周期 ' + md(sd) + ' 开始，' + md(rd) + ' 重置；现在已用 ' + pctTx(wb.used) + '。' +
-          (usd > 0 ? '\n这个周期里' + label + '模型用了 ' + fmtUsd(usd) + '、' + fmtTok(tok) + ' token' +
-            (part ? '（从 ' + md(sd) + ' 周期开始起，按每次调用的时间合计' + (part.failed ? '；那天有 ' + part.failed + ' 个对话没取到，可能少算' : '') + '）。'
-              : '（从 ' + (sd.getMonth() + 1) + '-' + sd.getDate() + ' 起按天合计，周期开始那天暂时整天都算在内，正在按每次调用的时间重算）。') : '') +
-          (capOk ? '\n\n整周额度（cap）：按这个比例，用满 100% 大约相当于 ' + fmtUsd(capUsd) + '、' + fmtTok(capTok) + ' token；' +
-            '还剩约 ' + fmtUsd(capUsd - usd) + '、' + fmtTok(Math.max(0, capTok - tok)) + ' token。' +
-            (capRough ? '\n现在才用了 ' + pctTx(wb.used) + '，推算误差很大，用得越多越准。' : '') +
-            '\n钱按 API 标准价折算，不是实际扣费；Google 没公布额度按模型和 token 种类怎么折算，这里按同比例推，只是参考。' +
-            '\n这台电脑上 agy CLI 的花费已经算在里面；和家人共享额度、或者别的电脑也在用这个号时，别人用掉的算进了已用比例、却不在这台电脑的花费里，推出来的总量会偏小。' : '');
-      } else tip += '\n已用 0%：这个号这一组还没开始用，周期从第一次用的时候开始算，重置时间跟着现在走。';
-      // 这个周期是提前重置之后开始的：行末加 “↺ early reset 11-24”，悬停写明重置前用了多少、原定什么时候重置
-      const er = wb.used > 0 && wb.reset > 0 ? resetBefore(grp, wb.reset) : null;
-      if (er) {
-        parts.push(RESET_MARK + ' early reset ' + (new Date(er.at).getMonth() + 1) + '-' + new Date(er.at).getDate());
-        tip += '\n\n' + RESET_MARK + ' 这个周期是在一次提前重置之后开始的。' + resetText(er) + '。';
+        if (cap && cap.cap) parts.push('cap ≈ ' + fmtUsd(cap.cap) + (cap.rough ? ' (rough)' : ''));
+        if (er) parts[parts.length - 1] += ' ' + RESET_MARK;
+        tip += '\n已用 ' + pctTx(wb.used) + '，' + mdhm(wb.reset) + ' 重置（还有 ' + leftTx(wb.reset - Date.now()) + '）';
+        if (est) tip += '\n' + (est.fullAt ? '按现在的速度 ' + mdhm(est.fullAt) + ' 左右用完' : '预计到重置用到 ' + Math.round(Math.min(est.proj, 9.99) * 100) + '%') +
+          '（' + est.basis + (est.alt != null ? '；按这周平均是 ' + Math.round(Math.min(est.alt, 9.99) * 100) + '%' : '') + (est.rough ? '；这周才过去不到 1 天，很粗' : '') + '）';
+        // 花费：周期开始那天按每次调用的时间只算周期开始以后的（cycleCost / callsPart，后台取好之前先按整天算）
+        // token（11-27 用户要的）：输入 + 缓存读 + 缓存写 + 输出，和 cap 同比例推
+        if (cap && cap.usd > 0) {
+          tip += '\n这个周期花了 ' + fmtUsd(cap.usd) + '（' + fmtTok(cap.tok) + ' token）' +
+            (cap.cap ? '\n用满约 ' + fmtUsd(cap.cap) + '（' + fmtTok(cap.capTok) + ' token），还剩约 ' + fmtUsd(Math.max(0, cap.cap - cap.usd)) + '（' + fmtTok(Math.max(0, cap.capTok - cap.tok)) + '）' : '') +
+            (cap.cap && cap.rough ? '\n才用了 ' + pctTx(wb.used) + '，很粗' : '');
+          if (cap.failed) tip += '\n（周期开始那天有 ' + cap.failed + ' 个对话没取到，可能少算）';
+        }
+        if (er) tip += '\n' + RESET_MARK + ' ' + mdhm(er.at) + ' 提前重置过，重置前用了 ' + pctTx(+er.from || 0);
+      } else {
+        parts.push('not started');
+        tip += '\n还没开始用，第一次用时才开始算这个周期';
       }
-      if (est) tip += '\n\n预估（est）：' + est.long + '\n' + SHARE_NOTE;
       // 以前的周期（2026-11-24 加）：每个周期这台电脑的花费 ÷ 结束前用掉的比例 = 那个周期的 cap，攒几个周期就能看出额度有没有变。
-      // 用掉不到 1% 的周期不推 cap（误差太大）。最近 4 个
-      const pcs = wb ? pastCycles(wb.id).slice(0, 4) : [];
+      // 用掉不到 1% 的周期不推 cap（误差太大）。最近 4 个；一个周期一行，日期和数字对齐，中文的说明放行末
+      const pcs = pastCycles(wb.id).slice(0, 4);
       if (pcs.length) {
-        const mdhmOf = (ms) => { const x = new Date(ms); return (x.getMonth() + 1) + '-' + x.getDate() + ' ' + pad(x.getHours()) + ':' + pad(x.getMinutes()); };
-        tip += '\n\n以前的周期（cap = 这台电脑在那个周期里的花费 ÷ 结束前用掉的比例）：' + pcs.map((e) => {
+        const md = (ms) => { const x = new Date(ms); return (x.getMonth() + 1) + '-' + x.getDate(); };
+        const rows = pcs.map((e) => {
           const c = cycleCost(grp, e.start, e.end);
-          const capTx = e.used >= 0.01 && c.usd > 0 ? ' → cap ≈ ' + fmtUsd(c.usd / e.used) + (e.used < 0.05 ? '（用得少，很粗）' : '') : '';
-          return '\n  ' + mdhmOf(e.start) + ' – ' + mdhmOf(e.end) + (e.early ? ' ' + RESET_MARK + ' 提前重置' : '') + '：用了 ' + pctTx(e.used) + '，花了 ' + fmtUsd(c.usd) + capTx +
-            (c.exact ? '' : '（两头那两天正在按调用时间算）');
-        }).join('') + '\n（从 2026-11-24 起每次换周期都会记一笔；更早的只有提前重置的那几次）';
+          const capOk = e.used >= 0.01 && c.usd > 0;
+          return [md(e.start) + ' → ' + md(e.end), pctTx(e.used), fmtUsd(c.usd), fmtTok(c.tok), capOk ? fmtUsd(c.usd / e.used) : '—',
+            (e.early ? ' ' + RESET_MARK : '') + (capOk && e.used < 0.05 ? ' 用得少，很粗' : '')];
+        });
+        const w = [0, 1, 2, 3, 4].map((i) => Math.max(...rows.map((r) => r[i].length)));
+        tip += '\n\n以前的周期（用了 · 花了 · token · cap；' + RESET_MARK + ' 是提前重置）：' +
+          rows.map((r) => '\n  ' + r[0].padEnd(w[0]) + '  ' + r.slice(1, 5).map((x, i) => x.padStart(w[i + 1])).join('  ') + r[5]).join('');
       }
-      if (S.account) tip += '\n\n账号 ' + S.account.m;
+      if (est || (cap && cap.cap)) tip += '\n\n按 API 标准价折算，只是参考；别的电脑也用这个号时不准。';
       const line = el('div', 'k-quota', parts.join(' · '));
       setTip(line, tip);
       foot.append(line);
@@ -2858,7 +2884,7 @@ function agyStatusBar(CFG) {
       const ms = missSum(rows);
       let total0 = 0; // 比例的分母：没按“只看没命中”筛选时的合计
       for (const r of rows0) total0 += costs.get(r).usd || 0;
-      const missLine = ms.n ? '缓存没命中 ' + ms.n + ' 次，多花约 ' + fmtUsd(ms.usd) + (total0 > 0 ? '（占这些调用花费的 ' + Math.round(ms.usd / total0 * 100) + '%）' : '') + '：' + missTip(ms) + '\n\n' + MISS_FACT : '';
+      const missLine = ms.n ? '缓存没命中 ' + ms.n + ' 次，多花约 ' + fmtUsd(ms.usd) + (total0 > 0 ? '（占这些调用花费的 ' + Math.round(ms.usd / total0 * 100) + '%）' : '') + missTip(ms) : '';
       const old = wrap.querySelector('table');
       const keep = old && view === 'calls' && wrap.dataset.view === 'calls' ? { top: wrap.scrollTop, h: wrap.scrollHeight } : null;
       const table = el('table');
@@ -4092,11 +4118,12 @@ ${P} .p-card .dim{color:var(--k-muted)}
 ${P} .p-card .q{color:var(--k-quota)}
 ${P} .k-model{--kc:var(--k-model)} ${P} .k-context{--kc:var(--k-context)} ${P} .k-cache{--kc:var(--k-cache)} ${P} .k-tokens{--kc:var(--k-tokens)}
 ${P} .k-quota{--kc:var(--k-quota)} ${P} .k-cost{--kc:var(--k-cost)} ${P} .k-run{--kc:var(--k-run)} ${P} .k-argon{--kc:var(--k-argon)} ${P} .k-muted{--kc:var(--k-muted)}
-/* 悬停提示（代替系统 title，见 setTip 一节）：挂在 body 上，不挡鼠标；背景色由脚本取元素一带的实际底色 */
+/* 悬停提示（代替系统 title，见 setTip 一节）：挂在 body 上，不挡鼠标；背景色由脚本取元素一带的实际底色。
+   pre-wrap（v2.0.17 改，原来是 pre-line）：保留连续空格，悬停里的缩进和按列对齐的小表格（以前的周期、没命中的原因）才对得齐 */
 ${T}{position:fixed; z-index:2147483600; pointer-events:none; box-sizing:border-box; max-width:min(440px, calc(100vw - 16px));
   padding:.35rem .6rem .4rem; border:1px solid var(--sep); border-radius:8px; background:var(--p-bg); box-shadow:0 6px 20px rgba(0,0,0,.18);
   font-family:"Google Sans Code","Cascadia Mono",Consolas,ui-monospace,"Microsoft YaHei UI",monospace;
-  font-size:11.5px; line-height:1.55; font-weight:500; color:var(--k-text); white-space:pre-line; overflow-wrap:anywhere}
+  font-size:11.5px; line-height:1.55; font-weight:500; color:var(--k-text); white-space:pre-wrap; overflow-wrap:anywhere}
 `;
 
   // ---------- 悬停提示（2026-11-22 加，issue #2）----------
@@ -4380,9 +4407,19 @@ ${T}{position:fixed; z-index:2147483600; pointer-events:none; box-sizing:border-
         const weekly = b.window === 'weekly';
         const reset = tms(b.resetTime);
         const span = weekly ? WEEK_MS : 5 * 3600e3;
-        const est = weekly ? weekEst(b.bucketId) : null;
-        out.quota.push({ group: (GROUPS.find(([p]) => p === fam) || [, ''])[1], weekly, used: Math.max(0, Math.min(1, 1 - Number(b.remainingFraction))),
-          reset, timePct: reset > 0 ? Math.max(0, Math.min(1, 1 - (reset - Date.now()) / span)) : null, est: est ? { proj: est.proj, short: est.short } : null });
+        const used = Math.max(0, Math.min(1, 1 - Number(b.remainingFraction)));
+        // 预估（v2.0.17 方案 A：额度格子的进度条上画出到重置时预计用到哪里）：proj 预计用到的比例，fullAt 会提前用完时大约什么时候用完。
+        // 每周的用注入程序算的（weekEst），5 小时的按这个窗口到现在的平均速度（est5h）。
+        // cost（用户要的“预估周限额多少、已用多少”）：这个周期花了多少、推出的整周限额（weekCap，只有每周额度有）
+        let est = null, cost = null;
+        if (weekly) {
+          const e = weekEst(b.bucketId);
+          if (e) est = { proj: e.proj, fullAt: e.fullAt, rough: !!e.rough, basis: e.basis };
+          const c = weekCap(fam, { used, reset });
+          if (c && c.usd > 0) cost = { usd: c.usd, cap: c.cap, tok: c.tok, capTok: c.capTok, rough: c.rough };
+        } else est = est5h(used, reset, span);
+        out.quota.push({ group: (GROUPS.find(([p]) => p === fam) || [, ''])[1], weekly, used,
+          reset, timePct: reset > 0 ? Math.max(0, Math.min(1, 1 - (reset - Date.now()) / span)) : null, est, cost });
       }
     }
     out.quota.sort((a, b) => a.weekly - b.weekly);
