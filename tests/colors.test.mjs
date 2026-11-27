@@ -108,8 +108,8 @@ test('选配色 = 用这套：自定义颜色两份都清掉；点的就是所�
   assert.deepEqual(L.env.writes.at(-1).colors, { dark: { cost: '#444444' } });
 });
 
-test('页面收到 look.json：文件里没有 colors 就是没有自定义，不沿用页面里旧的（11-27 用户点“还原”没反应）', () => {
+test('页面收到 look.json：文件里没有 colors 就是没有自定义，不沿用页面里旧的（11-27 用户点“还原”没反应）；关掉的项（hide）同理', () => {
   const src = read('statusbar.js');
-  assert.match(src, /cleanLook\(fromFile \? \{ \.\.\.S\.look, \.\.\.o, colors: o\.colors \} : \{ \.\.\.S\.look, \.\.\.o \}\)/);
+  assert.match(src, /cleanLook\(fromFile \? \{ \.\.\.S\.look, \.\.\.o, colors: o\.colors, hide: o\.hide \} : \{ \.\.\.S\.look, \.\.\.o \}\)/);
   assert.match(src, /S\.setLook\(\{ pal, colors: null \}\)/); // Theme 页选配色也清掉自定义
 });

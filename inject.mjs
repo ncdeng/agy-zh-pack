@@ -240,6 +240,13 @@ function saveLook(pick) {
     }
     if (Object.keys(c).length) keep.colors = c;
   }
+  // 状态栏上关掉的项（2026-11-27，插件面板“状态栏显示哪些项”）：项目名的列表，取值由页面的 cleanLook 校验，这里只限个数和长度；
+  // 页面交来的外观里没有这一项（undefined，旧版本的页面）时沿用文件里的，空列表 = 全部显示（不写进文件）
+  const hide = pick.hide === undefined ? prev.hide : pick.hide;
+  if (Array.isArray(hide)) {
+    const h = [...new Set(hide.filter((x) => typeof x === 'string').map((x) => x.slice(0, 24)))].slice(0, 24);
+    if (h.length) keep.hide = h;
+  }
   keep.at = +pick.at || Date.now();
   lookCache = keep;
   try { writeFileSafe(LOOK_FILE, JSON.stringify(keep)); log(`look saved: ${keep.pal} / ${keep.skin} / ${keep.bar} / ${keep.dense}`); }
@@ -1312,7 +1319,7 @@ function pageScript() {
 // - Theme 页的 updates 选 off（look.json 的 online = 'off'）：不再联网，也不用 remote/ 里存的，只用安装包自带的。
 // - 换了版本（安装了新的安装包）以后，remote/ 里存的词典和规则先不用，等下一次取到再用（新安装包里的可能更新）。
 // - 测试：环境变量 AGY_REMOTE_BASE 换成别的地址（例如本机起的 http://127.0.0.1:端口/），只试这一个地址。
-const PACK_VERSION = '2.0.21';
+const PACK_VERSION = '2.0.22';
 const REMOTE_DIR = path.join(DATA, 'remote');
 const REMOTE_STATE = path.join(REMOTE_DIR, 'state.json');
 const REMOTE_BASES = process.env.AGY_REMOTE_BASE ? [process.env.AGY_REMOTE_BASE] : [
@@ -1996,6 +2003,14 @@ function setColors(mode, colors) {
   log(`custom colors ${mode}: ${colors ? JSON.stringify(colors) : 'cleared'}`);
   pushLook().catch(() => {});
 }
+// 插件面板的“状态栏显示哪些项”（2026-11-27）：hide = 关掉的项目名（见 statusbar.js 的 BAR_ITEMS），空列表 = 全部显示
+function setHide(hide) {
+  const l = readLook() || {};
+  const v = Array.isArray(hide) ? hide.map(String) : [];
+  saveLook({ ...l, hide: v, at: Date.now() });
+  log(`status bar items hidden: ${v.join(',') || 'none'}`);
+  pushLook().catch(() => {});
+}
 
 // ---------- 交给插件 sidecar 的状态和操作（v2.0） ----------
 // sidecar（sidecars/core/main.mjs）和本脚本在同一个进程里；侧边栏面板、在线更新、代码更新都通过这里拿状态、做操作。
@@ -2017,6 +2032,7 @@ globalThis.__agyZh = {
   setBar: (on) => setLookFlag('statusbar', on, 'status bar'),
   setPal,
   setColors,
+  setHide,
   // 在线更新：马上查一次
   checkRemoteNow: () => { remoteNextAt = 0; },
   // 在线更新开关（和 Theme 页的 updates 一样，存在 look.json）

@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import { cut } from './_helpers.mjs';
 
 const block = cut('statusbar.js', '  // ---------- 模型 ----------', '  // ---------- 一次模型调用');
-// 页面里的依赖换成最小的替身：el 返回 { cls, text }，seg 返回 { pieces, tip }
+// 页面里的依赖换成最小的替身：el 返回 { cls, text }，seg 返回 { pieces, tip }，tag 记下项目名（插件面板按它开关这一项）
 function make({ models = {}, resp = {}, lastResp = {}, cfg = {} } = {}) {
   const S = {
     models: new Map(Object.entries(models).map(([k, label]) => [k, { label }])),
@@ -16,7 +16,8 @@ function make({ models = {}, resp = {}, lastResp = {}, cfg = {} } = {}) {
   };
   const el = (tag, cls, text) => ({ cls, text });
   const seg = (k, ic, pieces, tip) => ({ pieces, tip });
-  return new Function('S', 'el', 'seg', 'ICON', block + '\nreturn { sameModel, modelSeg };')(S, el, seg, () => '');
+  const tag = (k, g) => { g.item = k; return g; };
+  return new Function('S', 'el', 'seg', 'ICON', 'tag', block + '\nreturn { sameModel, modelSeg };')(S, el, seg, () => '', tag);
 }
 const md = (key, exec = 'e1') => ({ executionId: exec, modelUsage: { model: key } });
 const texts = (s) => s.pieces.map((p) => (typeof p === 'string' ? p : p.text));
@@ -45,6 +46,7 @@ test('接口名和界面名比较：点号按连字符，Claude 后面带推理�
 test('对得上：状态栏只写界面名和档位，接口名在悬停说明里', () => {
   const { modelSeg } = make({ models: { M532: 'Gemini 4 Neon (High)' }, resp: { e1: { name: 'gemini-4-neon', full: '' } } });
   const s = modelSeg(md('M532'));
+  assert.equal(s.item, 'model');
   assert.deepEqual(texts(s), ['Gemini 4 Neon', 'High']);
   assert.match(s.tip, /接口返回的模型：gemini-4-neon/);
   assert.doesNotMatch(s.tip, /灰测/);

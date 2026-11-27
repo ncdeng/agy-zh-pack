@@ -86,6 +86,8 @@ Download the new package and run `一键安装` once. Your daily records and loo
 | | `1% · 11-29 09:41 · ↓3%` | Weekly quota: used share, reset time, and how far ahead (↑) or behind (↓) an even pace |
 | Subagent | `├ research · Paper Reviewer … ● 1m05s` | One line per subagent: type and task, model, context, hit rate, cost, and state (run time, `waiting` or `✓ done`) |
 
+You can turn off each item under "显示 → 状态栏显示哪些项" (Display → Status bar items) in the plugin panel. All items are shown by default. An item that is turned off is also hidden in the subagent rows.
+
 ## Plugin panel
 
 <img src="docs/images/panel.png" alt="Plugin panel" width="420">
@@ -96,7 +98,7 @@ Download the new package and run `一键安装` once. Your daily records and loo
 | Today | Four tiles: cost; 5h and weekly quota for the current model group (solid = used, light = projected use at reset, with spent money and the estimated full quota below); output speed in the last hour against usual; extra cost from cache misses. A tile turns yellow when something is off |
 | Current conversation | Total cost, context, compactions, cache hit rate |
 | Last 7 days | Switch between cost per day (click a bar for that day's calls) and output speed per hour |
-| Display | Chinese UI and status bar switches; palette |
+| Display | Chinese UI and status bar switches; status bar items; palette |
 | Updates and startup | Plugin version and "检查" (Check); online dictionary and prices; what to do without the debugging port |
 | Advanced | Running state, file and signature check, memory, untranslated UI text |
 

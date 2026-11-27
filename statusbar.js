@@ -1098,6 +1098,8 @@ function agyStatusBar(CFG) {
     return e;
   };
   // 一项：kind 决定颜色（见 CSS 里的 --k-*），icon 是 Material Symbols 图标名
+  // 给状态栏的一项标上它是哪一项（BAR_ITEMS 里的名字），插件面板里关掉的不画（见 shownItem）
+  const tag = (k, g) => { if (g) g.dataset.item = k; return g; };
   const seg = (kind, icon, pieces, title, colorKind) => {
     const s = el('span', 'seg k-' + (colorKind || kind));
     if (title) s.setAttribute('data-agy-tip', title); // 悬停提示（自己画的，见 setTip 一节；不用系统 title）
@@ -1151,7 +1153,12 @@ function agyStatusBar(CFG) {
     event: '日历', date_range: '日期范围', account_tree: '树形分支', person: '人像' };
   // 不能单独换的几个：[Material 名, unicode 字符]
   const ICON_FIXED = { check: ['check', '✓'], ctx: ['data_usage', '◔'], quota1: ['timelapse', '◔'] };
-  const LOOK_DEFAULT = { pal: 'cometix', skin: 'plain', bar: 'thin', dense: 'compact', icons: 'material', iconMap: {}, online: 'auto', colors: null };
+  const LOOK_DEFAULT = { pal: 'cometix', skin: 'plain', bar: 'thin', dense: 'compact', icons: 'material', iconMap: {}, online: 'auto', colors: null, hide: [] };
+  // 状态栏上可以单独关掉的项（2026-11-27，用户要的“每一项都能自己选显示不显示，默认全显示”），look.hide 是关掉的那些。
+  // 在插件面板“显示 → 状态栏显示哪些项”里切换（lib/panel.mjs 的 BAR_ITEMS 和这里一一对应）。各项生成时标上 data-item（见 tag），
+  // build 里把关掉的去掉（见 shownItem）。run = 主窗格的 running（子代理窗格里是它自己的状态）；subs = 子代理行整行，
+  // 子代理行里的模型、上下文、缓存、花费也跟着各自的开关
+  const BAR_ITEMS = ['model', 'context', 'cache', 'cost', 'today', 'run', 'ttft', 'speed', 'q5', 'qw', 'subs'];
   // 自定义颜色（v2.0.18，用户要的“默认用我们的，自己想改也支持”）：盖在所选配色上的 4 个主色，浅色、深色各一份，
   // { light: { cost, q5, qw, bad }, dark: {...} }，只收 #rrggbb；在插件面板“显示”一组的“配色”里改。对应的 CSS 变量见 colorCss
   const COLOR_KEYS = { cost: '--k-cost', q5: '--k-quota', qw: '--k-quotaw', bad: '--k-crit' };
@@ -1174,7 +1181,7 @@ function agyStatusBar(CFG) {
     online: ['auto', 'off'], // v1.7：在线更新词典和价格（不是外观，但跟外观一起存、一起同步到各窗口）
   };
   const cleanLook = (o) => {
-    const l = { ...LOOK_DEFAULT, iconMap: {} };
+    const l = { ...LOOK_DEFAULT, iconMap: {}, hide: [] };
     if (o && typeof o === 'object') {
       for (const k of Object.keys(LOOK_CHOICES)) if (LOOK_CHOICES[k].includes(o[k])) l[k] = o[k];
       if (typeof o.icons === 'boolean') l.icons = o.icons ? 'material' : 'off'; // v1.5 存的是 true / false
@@ -1183,6 +1190,7 @@ function agyStatusBar(CFG) {
       }
       if (+o.at > 0) l.at = +o.at;
       l.colors = cleanColors(o.colors);
+      if (Array.isArray(o.hide)) l.hide = BAR_ITEMS.filter((k) => o.hide.includes(k));
     }
     return l;
   };
@@ -1285,7 +1293,7 @@ function agyStatusBar(CFG) {
       '\n接口返回的模型：' + (resp ? resp.name + (resp.full ? '（' + resp.full + '）' : '') : lastResp ? lastResp + '（这个模型上次的结果，本次还没查到）' : '（还没查到）') +
       '\n配置名：' + (cfg || '?') + '\n编号：' + (key || '?') +
       (odd ? '\n接口返回的模型名和界面名对不上，可能是灰测版本' + (resp ? '' : '（这是这个模型上次的结果）') : '');
-    return pieces.length ? seg('model', ICON('model'), pieces, tip) : null;
+    return pieces.length ? tag('model', seg('model', ICON('model'), pieces, tip)) : null;
   };
 
   // ---------- 一次模型调用：首字、速度、token ----------
@@ -1294,7 +1302,7 @@ function agyStatusBar(CFG) {
     if (!mu) return [];
     const out = [];
     const t0 = tms(md.createdAt), t1 = tms(md.viewableAt), t2 = tms(md.finishedGeneratingAt || md.completedAt);
-    if (t1 > t0) out.push(seg('timing', ICON('ttft'), [((t1 - t0) / 1000).toFixed(1) + 's'], '首字：发出请求 → 第一个字（含思考）'));
+    if (t1 > t0) out.push(tag('ttft', seg('timing', ICON('ttft'), [((t1 - t0) / 1000).toFixed(1) + 's'], '首字：发出请求 → 第一个字（含思考）')));
     // 速度 = 输出 token（含思考）÷ 生成用时。思考 token 是在首字出现之前生成的，所以有思考时起点取
     // “首字时刻 − 思考时长”（不早于发出请求），没有思考时从首字出现算起。
     // （11-09 之前只用“首字→结束”做分母，思考 token 却算在分子里，Flash 算出过 1637 tok/s 这种错数。）
@@ -1307,9 +1315,9 @@ function agyStatusBar(CFG) {
     const span = t2 - start;
     if (outTok > 0 && span > 50) {
       const tps = outTok / (span / 1000);
-      out.push(seg('timing', ICON('speed', { tps }), [Math.round(tps) + ' tok/s'],
+      out.push(tag('speed', seg('timing', ICON('speed', { tps }), [Math.round(tps) + ' tok/s'],
         '速度：' + SPEED_TIERS[speedTier(tps)][2] + '\n输出 ' + outTok.toLocaleString() + ' token ÷ ' + (span / 1000).toFixed(2) + ' 秒' +
-        (thinkTok > 0 ? '\n含思考 ' + thinkTok.toLocaleString() + ' token，从' + (thinkMs > 0 ? '思考开始算（思考 ' + (thinkMs / 1000).toFixed(1) + ' 秒）' : '发出请求算') : '\n没有思考，从首字算')));
+        (thinkTok > 0 ? '\n含思考 ' + thinkTok.toLocaleString() + ' token，从' + (thinkMs > 0 ? '思考开始算（思考 ' + (thinkMs / 1000).toFixed(1) + ' 秒）' : '发出请求算') : '\n没有思考，从首字算'))));
     }
     // 11-16 起不再单独显示“in · out · think”这一项（用处不大还占位置）；最近一次调用的 token 数在费用项的悬停说明里
     return out;
@@ -1350,9 +1358,9 @@ function agyStatusBar(CFG) {
         (groups.length ? '\n\n' + groups.map((g) => row(g[0], g[1])).join('\n') + '\n' + row('Free space', Math.max(0, max - used)) : '');
       // 2026-11-22：图标换成随用量变满的圆环（仿 ccline 的 gauge）；紧凑模式（默认）不写上限，上限在悬停说明里
       const usedText = S.look.dense === 'full' ? fmtK(used) + ' / ' + fmtK(max) : fmtK(used);
-      return seg('context', ringEl(used / max, 'ic svg gauge'), [pct + '%', usedText, compPiece], detail, level(pct, 70, 90, 'context'));
+      return tag('context', seg('context', ringEl(used / max, 'ic svg gauge'), [pct + '%', usedText, compPiece], detail, level(pct, 70, 90, 'context')));
     }
-    if (sent > 0) return seg('context', ICON('ctx'), [fmtK(sent), compPiece], '上下文：上次发给模型的 token（输入 + 缓存读写）' + compTip);
+    if (sent > 0) return tag('context', seg('context', ICON('ctx'), [fmtK(sent), compPiece], '上下文：上次发给模型的 token（输入 + 缓存读写）' + compTip));
     return null;
   };
   const cacheSeg = (mu) => {
@@ -1361,7 +1369,7 @@ function agyStatusBar(CFG) {
     const hit = Math.round((cache / (cache + input)) * 100);
     // 紧凑模式（默认）只写命中率：读到的 token 数和上下文用量差不多，重复了，放进悬停说明
     const pieces = S.look.dense === 'full' ? [fmtK(cache), hit + '% hit'] : [hit + '% hit'];
-    return seg('cache', ICON('cache'), pieces, '上次调用 · 命中 ' + hit + '%\n缓存读 ' + cache.toLocaleString() + ' token\n没命中 ' + input.toLocaleString() + ' token');
+    return tag('cache', seg('cache', ICON('cache'), pieces, '上次调用 · 命中 ' + hit + '%\n缓存读 ' + cache.toLocaleString() + ' token\n没命中 ' + input.toLocaleString() + ' token'));
   };
   // idle：不在生成，只占位置不显示（见 CSS 的 .seg.k-run.idle）
   const runSeg = (text, idle) => {
@@ -1425,7 +1433,7 @@ function agyStatusBar(CFG) {
       if (est && weekly) lines.push(SHARE_NOTE);
       if (S.account) lines.push('账号 ' + S.account.m + (S.account.t ? '（' + S.account.t + '）' : ''));
       const tip = lines.join('\n');
-      return seg('quota', ICON(weekly ? 'weekly' : 'h5'), pieces, tip, k);
+      return tag(weekly ? 'qw' : 'q5', seg('quota', ICON(weekly ? 'weekly' : 'h5'), pieces, tip, k));
     });
   };
 
@@ -1794,7 +1802,7 @@ function agyStatusBar(CFG) {
     }
     const costly = costlyNote(last);
     if (costly) tip += '\n\n⚠ 上次调用很贵\n' + costly;
-    if (shown != null) out.push(seg('cost', ICON('cost'), [fmtUsd(shown), costly ? costlyBadge(last, (md.executionId || '') + ':' + (md.createdAt || '')) : null], tip));
+    if (shown != null) out.push(tag('cost', seg('cost', ICON('cost'), [fmtUsd(shown), costly ? costlyBadge(last, (md.executionId || '') + ':' + (md.createdAt || '')) : null], tip)));
     // 今天没花钱、但有历史记录时也显示（$0 today），好点开看前几天
     // 2026-11-24 起今天花费含 agy CLI 的（注入程序按 CLI 对话库汇总，见 cliDay），悬停说明里分开写
     const cli = cliDay(dayName());
@@ -1805,7 +1813,7 @@ function agyStatusBar(CFG) {
         (day.undated ? '\n  另有 ' + day.undated + ' 次在查时间，暂未计入' : '') +
         (day.loading ? '\n  ' + day.loading + ' 个对话读取中' : '') +
         '\n' + priceSrcText() + '\n\n点击看每日用量';
-      const ts = seg('cost', ICON('today'), [fmtUsd(dayAll) + ' today'], dtip);
+      const ts = tag('today', seg('cost', ICON('today'), [fmtUsd(dayAll) + ' today'], dtip));
       ts.classList.add('p-open');
       ts.addEventListener('click', () => togglePanel(ts));
       out.push(ts);
@@ -3846,8 +3854,8 @@ function agyStatusBar(CFG) {
     const frac = Math.max(0, Math.min(1, Number(q.remainingFraction)));
     const pct = Math.round(frac * 100);
     const k = pct <= 10 ? 'crit' : pct <= 30 ? 'warn' : 'quota';
-    return [seg('quota', ICON('quota1'), [meter(frac, k), pct + '%', q.resetTime ? fmtReset(q.resetTime) : ''],
-      '这个模型的剩余额度' + (q.resetTime ? '，' + fmtReset(q.resetTime) + ' 重置' : ''), k)];
+    return [tag('q5', seg('quota', ICON('quota1'), [meter(frac, k), pct + '%', q.resetTime ? fmtReset(q.resetTime) : ''],
+      '这个模型的剩余额度' + (q.resetTime ? '，' + fmtReset(q.resetTime) + ' 重置' : ''), k))]; // 拿不到 5h / 每周额度时的旧写法，跟着 5h 的开关
   };
   // 按 0 宽排的项（主代理行末尾的 running、子代理行末尾的状态）套一层槽位 .fill，见 CSS 的“按 0 宽排”
   const fillSlot = (g) => {
@@ -3856,6 +3864,9 @@ function agyStatusBar(CFG) {
     f.append(g);
     return f;
   };
+  // 插件面板里关掉的项（look.hide，见 BAR_ITEMS）不画。keepShown 就地去掉关掉的项，返回去掉了几项
+  const shownItem = (g) => !!g && !(g.dataset.item && S.look.hide && S.look.hide.includes(g.dataset.item));
+  const keepShown = (arr) => { const n = arr.length; let j = 0; for (const g of arr) if (shownItem(g)) arr[j++] = g; arr.length = j; return n - j; };
   const toLines = (rows, cls) => rows.filter((r) => r.length).map((r) => {
     const l = el('div', 'ln' + (cls ? ' ' + cls : ''));
     l.append(...r.map(fillSlot));
@@ -3874,8 +3885,10 @@ function agyStatusBar(CFG) {
       const sconv = S.convs.get(paneId) || {};
       const line1 = [agentSeg(paneId, info), modelSeg(md, info.model, info.modelTier),
         ctxSeg(sconv.ctx || estCtx(md), mu, sconv.compactions, paneId), cacheSeg(mu), ...safeCost(md, [paneId]),
-        stateSeg(paneId, root)].filter(Boolean);
+        tag('run', stateSeg(paneId, root))].filter(Boolean);
       const line2 = [...callSegs(md), ...quotaPieces(modelKey(md) || info.model)];
+      keepShown(line1);
+      keepShown(line2);
       S.actShown = false;
       return toLines([line1, line2]);
     }
@@ -3889,14 +3902,15 @@ function agyStatusBar(CFG) {
     const selKey = md ? '' : selectedKey();
     if (rc && rc.ctx) noteCtxMax(md, rc.ctx);
     const line1 = [modelSeg(md, selKey), ctxSeg(rc && rc.ctx, mu, rc && rc.compactions, root), cacheSeg(mu),
-      ...safeCost(md, root ? treeIds(root) : []), root ? runSeg('', !isRunning(root)) : null].filter(Boolean);
+      ...safeCost(md, root ? treeIds(root) : []), root ? tag('run', runSeg('', !isRunning(root))) : null].filter(Boolean);
     const line2 = [...callSegs(md), ...quotaPieces(modelKey(md) || selKey)];
     // 还没有模型调用时只有“模型 + 额度”，合成一行
     if (!md && line2.length) line1.push(...line2.splice(0));
+    const hiddenN = keepShown(line1) + keepShown(line2);
 
     // 子代理：属于当前根对话、而且在跑（或刚跑完不到 DONE_SHOW_MS）的，运行中的排前面，其余按最近活动时间
     const subs = [];
-    if (root) {
+    if (root && !S.look.hide.includes('subs')) {
       for (const [id, info] of S.subInfo) {
         if (id === root || rootOf(id) !== root || !subVisible(id, root)) continue;
         subs.push({ id, info, ag: S.agents.get(id) || { id }, running: subRunning(id, root) });
@@ -3907,7 +3921,8 @@ function agyStatusBar(CFG) {
     const more = subs.length - shownSubs.length;
     // 各行按列对齐（11-22 用户要求）：所有行都没有的列去掉；某行缺的列放一个空的占位项（不画分隔竖线），
     // 每项标上列号 data-col，画完后 alignCols 把同一列设成一样宽
-    const subCells = shownSubs.map(({ id, info }, i) => subRow(id, info, root, i === shownSubs.length - 1 && !more));
+    // 子代理行里关掉的项换成 null：所有行都没有的列下面整列去掉
+    const subCells = shownSubs.map(({ id, info }, i) => subRow(id, info, root, i === shownSubs.length - 1 && !more).map((g) => (g && !shownItem(g) ? null : g)));
     const hasCol = subCells.length ? subCells[0].map((_, c) => subCells.some((r) => r[c])) : [];
     const subRows = subCells.map((r) => r.map((g, c) => {
       if (!hasCol[c]) return null;
@@ -3929,7 +3944,7 @@ function agyStatusBar(CFG) {
       lines.push(...toLines([[seg('warn', '', ['Press ' + reloadKey + ' to reload this window and enable usage stats'],
         '注入程序是在这个窗口打开之后才启动的，需要刷新一次窗口')]]));
     }
-    if (!lines.length) {
+    if (!lines.length && !hiddenN) { // 所有项都被关掉了：什么都不画
       const l = el('div', 'ln');
       l.append(el('span', 'seg k-muted', S.convs.size || S.models.size ? 'waiting for conversation data…' : 'waiting for Antigravity data…'));
       lines.push(l);
@@ -4470,7 +4485,7 @@ ${T}{position:fixed; z-index:2147483600; pointer-events:none; box-sizing:border-
   S.setLook = (o, fromFile) => {
     // 从文件来的（注入程序推过来的 look.json）是完整的一份：里面没有 colors 就是没有自定义颜色，不能沿用页面里旧的
     // （v2.0.18 修：插件面板点“还原”清掉了文件里的颜色，页面合并时把旧颜色留了下来，点了没反应）
-    const l = cleanLook(fromFile ? { ...S.look, ...o, colors: o.colors } : { ...S.look, ...o });
+    const l = cleanLook(fromFile ? { ...S.look, ...o, colors: o.colors, hide: o.hide } : { ...S.look, ...o });
     if (fromFile) {
       if (!((l.at || 0) > (S.look.at || 0))) return;
     } else {
@@ -4608,7 +4623,7 @@ ${T}{position:fixed; z-index:2147483600; pointer-events:none; box-sizing:border-
     out.quota.sort((a, b) => a.weekly - b.weekly);
     out.week = lastDays(7).reverse().map((d) => ({ day: d, usd: +((d === nm ? rec : dayRecord(d)) || {}).usd || 0 }));
     // 配色（v2.0.18）：插件面板和状态栏共用一个配色；pals 是每套配色给面板用的颜色，custom 是自定义的 4 个主色（look.colors）
-    out.look = { pal: S.look.pal, name: (PAL_INFO[S.look.pal] || PAL_INFO.cometix)[0], pals: palsForPanel(), custom: S.look.colors || null };
+    out.look = { pal: S.look.pal, name: (PAL_INFO[S.look.pal] || PAL_INFO.cometix)[0], pals: palsForPanel(), custom: S.look.colors || null, hide: S.look.hide || [] };
     out.speed = speedNow(mainBar());
     // 今天缓存没命中（方案 A 的格子）：次数、多花的钱、今天合计（算占比）、按原因从多到少 [原因, 次数, 美元]
     const mo = missOfDay(nm);
