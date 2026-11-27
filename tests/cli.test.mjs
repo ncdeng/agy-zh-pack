@@ -9,7 +9,7 @@ import { cutInject } from './_helpers.mjs';
 
 const code = cutInject('function pbGet(', '// packed') + cutInject('function pbVarints(', 'const dayOf')
   + cutInject('const pbDur =', 'function readCliDb(') + cutInject('function readCliDb(', '// 同一次调用') + cutInject('const cliCallKey =', 'const dayMs');
-const { readCliDb, cliCallKey, pbGet, pbVarints } = new Function(code + '\nreturn { readCliDb, cliCallKey, pbGet, pbVarints };')();
+const { readCliDb, readCliDbFrom, cliCallKey, pbGet, pbVarints } = new Function(code + '\nreturn { readCliDb, readCliDbFrom, cliCallKey, pbGet, pbVarints };')();
 
 // 最小的 protobuf 编码：varint 字段、长度型字段（Buffer / 字符串）、packed varint
 const varint = (n) => { const b = []; do { let c = n % 128; n = Math.floor(n / 128); if (n) c |= 0x80; b.push(c); } while (n); return Buffer.from(b); };
@@ -57,4 +57,48 @@ test('读 CLI 对话库：按步骤找时间、按 executionId 兜底、跳过�
   assert.deepEqual(b, [t2 * 1000, 'claude-opus-5-5', 500, 0, 100, 20, 0, 0, '', '']);
   assert.equal(cliCallKey('conv1', a), 'req-1', '有请求 ID 时按请求 ID 去重');
   assert.equal(cliCallKey('conv1', b), `conv1:${t2 * 1000}:500:20`, '没有请求 ID 时用 对话 + 时间 + token 数');
+});
+
+test('接着上次读（readCliDbFrom）：只读最后一行（含）往后的；步骤后到的调用以后补上；最后一行被改、超过 10 分钟整个重读，结果都和整个读一样', (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'agycli-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const file = path.join(dir, '00000000-0000-0000-0000-000000000002.db');
+  const db = new DatabaseSync(file);
+  // 和真库一样：两张表的主键 idx 是 integer，就是 rowid，从 0 开始
+  db.exec('create table steps (idx integer, metadata blob, primary key (idx)); create table gen_metadata (idx integer, data blob, primary key (idx));');
+  const T = 1795600000;
+  const step = (idx, sec, exec) => db.prepare('insert or replace into steps values (?, ?)').run(idx, Buffer.concat([fb(1, fv(1, sec)), fb(12, exec)]));
+  const usage = (inp, out, rid) => Buffer.concat([fv(2, inp), fv(3, out), ...(rid ? [fb(11, rid)] : [])]);
+  const gen = (idx, inp, out, steps, exec, rid) => db.prepare('insert or replace into gen_metadata values (?, ?)')
+    .run(idx, Buffer.concat([fb(1, Buffer.concat([fb(4, usage(inp, out, rid)), fb(19, 'gemini-4-neon')])), packed(2, steps), fb(4, exec)]));
+  const same = (st) => { const r = readCliDbFrom(DatabaseSync, file, st); assert.deepEqual(r.calls, readCliDb(DatabaseSync, file)); return r; };
+
+  step(0, T, 'exec-a'); step(1, T + 10, 'exec-a');
+  gen(0, 1000, 50, [1], 'exec-a', 'r0');
+  let r = same(null);
+  assert.equal(r.calls.length, 1);
+  const at0 = r.st.at;
+  // 调用先写进库、它的步骤 3 还没有（exec-z 也没有）：先等着，不算
+  gen(1, 2000, 60, [3], 'exec-z', 'r1');
+  r = same(r.st);
+  assert.equal(r.calls.length, 1);
+  assert.equal(r.st.at, at0, '接着读不改起点时间（10 分钟后整个重读）');
+  // 步骤 2、3 到了；最后那次调用（idx 1）被改了用量；又来两次调用（一次没有用量）
+  step(2, T + 20, 'exec-b'); step(3, T + 30, 'exec-z');
+  gen(1, 2100, 70, [3], 'exec-z', 'r1');
+  gen(2, 0, 0, [2], 'exec-b');
+  gen(3, 500, 5, [2], 'exec-b', 'r3');
+  r = same(r.st);
+  assert.deepEqual(r.calls.map((c) => c[9]), ['r0', 'r1', 'r3']);
+  assert.equal(r.calls[1][2], 2100, '最后一行改过的用量读到了');
+  assert.equal(r.calls[1][0], (T + 30) * 1000, '后到的步骤补上了时间');
+  // 最后一个步骤的时间被改：从最后一行重读，照样对得上
+  step(3, T + 31, 'exec-z');
+  r = same(r.st);
+  assert.equal(r.calls[1][0], (T + 31) * 1000);
+  // 超过 10 分钟：整个重读，起点时间换新
+  const old = { ...r.st, at: Date.now() - 11 * 60e3 };
+  r = same(old);
+  assert.ok(r.st.at > old.at);
+  db.close();
 });

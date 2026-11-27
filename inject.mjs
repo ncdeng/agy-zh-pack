@@ -322,27 +322,36 @@ function mergeCostBook(b) {
 // 加载不改对话的修改时间）。这样 Antigravity 重启后，今天早些时候的对话也能算进来。
 const BRAIN_DIR = path.join(os.homedir(), '.gemini', 'antigravity', 'brain');
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+// 只看新出现的对话（2026-11-28）：原来每次同步（30 秒一次，agy CLI 在用时更勤）把 brain 下面几百个对话的 transcript 都 stat 一遍，
+// 11-28 给插件进程采样，这一项约占它空闲开销的六分之一。今天动过的到 0 点前一直算今天，不用再看；不是今天的只在每 10 分钟、
+// 过 0 点时全部重看一遍。这份清单只是补充（状态栏还从后台摘要、对话文件清单里找今天的对话），旧对话今天又动了最晚 10 分钟后进来
+let todaySeen = null; // { d0, at, all: Set(看过、有 transcript 的对话), today: Set(今天动过的) }
 function todayConversations() {
   const d0 = new Date();
   d0.setHours(0, 0, 0, 0);
+  const t0 = d0.getTime();
   let names = [];
   try { names = fs.readdirSync(BRAIN_DIR); } catch { return []; }
-  const out = [];
+  const full = !todaySeen || todaySeen.d0 !== t0 || Date.now() - todaySeen.at >= 10 * 60e3;
+  const s = full ? { d0: t0, at: Date.now(), all: new Set(), today: new Set() } : todaySeen;
   for (const n of names) {
-    if (!UUID_RE.test(n)) continue;
+    if (!UUID_RE.test(n) || s.all.has(n)) continue;
     let m = 0;
-    try { m = fs.statSync(path.join(BRAIN_DIR, n, '.system_generated', 'logs', 'transcript.jsonl')).mtimeMs; } catch {}
-    if (m >= d0.getTime()) out.push(n);
+    try { m = fs.statSync(path.join(BRAIN_DIR, n, '.system_generated', 'logs', 'transcript.jsonl')).mtimeMs; } catch { continue; } // 还没有 transcript：下次再看
+    s.all.add(n);
+    if (m >= t0) s.today.add(n);
   }
-  return out;
+  todaySeen = s;
+  return names.filter((n) => s.today.has(n));
 }
 // 本机对话库文件清单（2026-11-22 加，v1.6，调用明细页用）：[[对话 ID, 创建时间毫秒, 最后修改毫秒], …]，只给最近 HISTORY_KEEP_DAYS（400）天改过的（11-24 以前是 32 天）。
 // 后台的对话摘要（GetAllCascadeTrajectories）只列一部分对话（11-22 实测：摘要 21 个，本机库文件 79 个），
 // 没列出的对话按 ID 照样能取到调用记录，所以把文件清单交给页面，明细页按创建 / 修改时间挑出某一天动过的对话。
-// 只读文件名和时间，不打开文件。60 秒内重复要就用上次的结果。
+// 只读文件名和时间，不打开文件。5 分钟内重复要就用上次的结果（见下面）。
 let convFilesCache = null, convFilesAt = 0;
 function convFiles() {
-  if (convFilesCache && Date.now() - convFilesAt < 60000) return convFilesCache;
+  // 5 分钟内重复要就用上次的结果（11-28：60 秒 → 5 分钟。每次要 stat 三百个库，这份清单只是补充，几分钟的延迟不影响）
+  if (convFilesCache && Date.now() - convFilesAt < 300000) return convFilesCache;
   const out = [];
   const cut = Date.now() - HISTORY_KEEP_DAYS * 86400e3; // 11-24：32 → 400 天（面板的 all 能点到更早的日子）
   let names = [];
@@ -985,45 +994,92 @@ const CLI_CALLS_KEEP_MS = 32 * 86400e3;
 const cliCache = new Map(); // 文件名 → { mtime, calls: [[时间, 模型名, 输入, 缓存读, 缓存写, 输出, 首字秒, 生成秒, 界面名, 请求 ID]] }
 let cliBusy = false;
 let cliScanAt = Date.now() - CLI_SCAN_MS + 20000; // 启动 20 秒后第一次扫
-const pbDur = (b) => (Buffer.isBuffer(b) ? (pbGet(b, 1) || 0) + (pbGet(b, 2) || 0) / 1e9 : 0);
-function readCliDb(DatabaseSync, file) {
-  const db = new DatabaseSync(file, { readOnly: true });
-  const calls = [];
+// 只看动过的库（2026-11-28）：原来每 30 秒把 conversations 下面 300 多个库和它们的 -wal 都 stat 一遍，
+// 11-28 给插件进程采样，这一项占它空闲开销的一半（Windows 上一次 stat 约 60 微秒，每次扫约 40 毫秒，几乎都花在 stat 上）。
+// 改成 fs.watch 记下动过的文件（cliDirty），平时只看这些和没见过的库；每 10 分钟仍全部看一遍，防 fs.watch 漏报。
+// 监视不了这个目录（出错、不支持）时照旧每次全看
+const CLI_FULL_MS = 10 * 60e3;
+const cliDirty = new Set(); // 动过的库的文件名（xxx.db；-wal、-shm 的变化也记在库名下）
+const cliSeen = new Map(); // 文件名 → 上次 stat 到的修改时间（包括太旧、不读的库），没见过的库下次一定看
+let cliWatch = null;
+let cliFullAt = 0;
+function watchCliDir() {
+  if (cliWatch) return true;
   try {
-    const stepAt = new Map();
-    const when = new Map();
-    for (const r of db.prepare('select idx, metadata from steps').iterate()) {
-      if (!r.metadata) continue;
-      const m = Buffer.from(r.metadata);
-      const ts = pbGet(m, 1);
+    const w = fs.watch(CLI_CONV_DIR, { persistent: false }, (ev, name) => {
+      const m = name ? /^([0-9a-f-]{36}\.db)/.exec(String(name)) : null;
+      if (m) cliDirty.add(m[1]);
+      else cliFullAt = 0; // 不知道是哪个文件：下次全看
+    });
+    w.on('error', () => { try { w.close(); } catch {} if (cliWatch === w) cliWatch = null; cliFullAt = 0; });
+    cliWatch = w;
+    return true;
+  } catch { return false; }
+}
+const pbDur = (b) => (Buffer.isBuffer(b) ? (pbGet(b, 1) || 0) + (pbGet(b, 2) || 0) / 1e9 : 0);
+// 一行 gen_metadata → 一次调用 [时间, 模型名, 输入, 缓存读, 缓存写, 输出, 首字秒, 生成秒, 界面名, 请求 ID]。
+// 没有用量的不算，返回 null；找不到时间返回 0（这次调用的步骤可能还没写进库，以后再试）
+function cliGenCall(data, stepAt, when) {
+  const g = Buffer.from(data);
+  const exec = pbGet(g, 4), cm = pbGet(g, 1);
+  if (!Buffer.isBuffer(cm)) return null;
+  const u = pbGet(cm, 4);
+  if (!Buffer.isBuffer(u)) return null;
+  const inp = pbGet(u, 2) || 0, cw = pbGet(u, 4) || 0, cr = pbGet(u, 5) || 0;
+  const out = Math.max(pbGet(u, 3) || 0, (pbGet(u, 9) || 0) + (pbGet(u, 10) || 0));
+  if (!inp && !cr && !cw && !out) return null;
+  const steps = pbGet(g, 2);
+  let at = 0;
+  for (const i of Buffer.isBuffer(steps) ? pbVarints(steps) : typeof steps === 'number' ? [steps] : []) if ((at = stepAt.get(i) || 0)) break;
+  if (!at && Buffer.isBuffer(exec)) at = when.get(exec.toString('utf8')) || 0;
+  if (!(at > 0)) return 0;
+  const str = (b, n) => (Buffer.isBuffer(b) ? b.toString('utf8').slice(0, n) : '');
+  const rid = pbGet(u, 11);
+  return [at, str(pbGet(cm, 19), 60) || 'unknown', inp, cr, cw, out,
+    Math.round(pbDur(pbGet(cm, 11)) * 1000) / 1000, Math.round(pbDur(pbGet(cm, 12)) * 1000) / 1000, str(pbGet(cm, 21), 60), str(rid, 80)];
+}
+// 接着上次读（2026-11-28）：agy CLI 正在用的对话库每 30 秒都会变，原来每次整个重读（11-28 实测 24 MB 的库约 26 毫秒，
+// 正在用的主代理和子代理两个库每次约 36 毫秒，是插件进程空闲时最大的一块）。同一天实测库里已有的行只有最后一行会被改
+// （还在写的那一步、那次调用），所以从上次读到的最后一行（含）往后读，前面的结果留着。步骤比调用晚写进库时，
+// 那次调用先记成“等时间”（wait），以后每次用新读到的步骤再试。st = 上次返回的状态，null 或超过 10 分钟就整个重读（兜底）。
+// 两张表的主键 idx 都是 integer，就是 rowid。返回 { calls, st }
+const CLI_REREAD_MS = 10 * 60e3;
+function readCliDbFrom(DatabaseSync, file, st) {
+  const inc = !!(st && Date.now() - st.at < CLI_REREAD_MS);
+  const s = inc
+    ? { at: st.at, stepAt: new Map(st.stepAt), when: new Map(st.when), gens: new Map(st.gens), stepNext: st.stepNext, genNext: st.genNext }
+    : { at: Date.now(), stepAt: new Map(), when: new Map(), gens: new Map(), stepNext: 0, genNext: 0 };
+  const db = new DatabaseSync(file, { readOnly: true });
+  const seenTo = s.stepNext; // 上次读到的最后一个步骤：这一行（含）以前的是重读
+  let redo = false; // 重读的步骤时间变了：前面算好的调用可能要换时间，整个重读
+  try {
+    for (const r of db.prepare('select rowid as r, idx, metadata from steps where rowid >= ? order by rowid').iterate(s.stepNext)) {
+      s.stepNext = Math.max(s.stepNext, Number(r.r));
+      const m = r.metadata ? Buffer.from(r.metadata) : null;
+      const ts = m ? pbGet(m, 1) : null;
       const sec = Buffer.isBuffer(ts) ? pbGet(ts, 1) : 0;
+      if (inc && Number(r.r) <= seenTo && s.stepAt.get(Number(r.idx)) !== (sec > 0 ? sec * 1000 : undefined)) { redo = true; break; }
       if (!(sec > 0)) continue;
-      stepAt.set(Number(r.idx), sec * 1000);
+      s.stepAt.set(Number(r.idx), sec * 1000);
       const exec = pbGet(m, 12);
-      if (Buffer.isBuffer(exec) && !when.has(exec.toString('utf8'))) when.set(exec.toString('utf8'), sec * 1000);
+      if (Buffer.isBuffer(exec) && !s.when.has(exec.toString('utf8'))) s.when.set(exec.toString('utf8'), sec * 1000);
     }
-    for (const r of db.prepare('select data from gen_metadata').iterate()) {
-      if (!r.data) continue;
-      const g = Buffer.from(r.data);
-      const exec = pbGet(g, 4), cm = pbGet(g, 1);
-      if (!Buffer.isBuffer(cm)) continue;
-      const u = pbGet(cm, 4);
-      if (!Buffer.isBuffer(u)) continue;
-      const inp = pbGet(u, 2) || 0, cw = pbGet(u, 4) || 0, cr = pbGet(u, 5) || 0;
-      const out = Math.max(pbGet(u, 3) || 0, (pbGet(u, 9) || 0) + (pbGet(u, 10) || 0));
-      if (!inp && !cr && !cw && !out) continue;
-      const steps = pbGet(g, 2);
-      let at = 0;
-      for (const i of Buffer.isBuffer(steps) ? pbVarints(steps) : typeof steps === 'number' ? [steps] : []) if ((at = stepAt.get(i) || 0)) break;
-      if (!at && Buffer.isBuffer(exec)) at = when.get(exec.toString('utf8')) || 0;
-      if (!(at > 0)) continue;
-      const str = (b, n) => (Buffer.isBuffer(b) ? b.toString('utf8').slice(0, n) : '');
-      const rid = pbGet(u, 11);
-      calls.push([at, str(pbGet(cm, 19), 60) || 'unknown', inp, cr, cw, out,
-        Math.round(pbDur(pbGet(cm, 11)) * 1000) / 1000, Math.round(pbDur(pbGet(cm, 12)) * 1000) / 1000, str(pbGet(cm, 21), 60), str(rid, 80)]);
+    if (!redo) {
+      for (const [k, v] of s.gens) if (v && v.wait) { const c = cliGenCall(v.wait, s.stepAt, s.when); if (c !== 0) s.gens.set(k, c); }
+      for (const r of db.prepare('select rowid as r, data from gen_metadata where rowid >= ? order by rowid').iterate(s.genNext)) {
+        s.genNext = Math.max(s.genNext, Number(r.r));
+        const c = r.data ? cliGenCall(r.data, s.stepAt, s.when) : null;
+        s.gens.set(Number(r.r), c === 0 ? { wait: Buffer.from(r.data) } : c);
+      }
     }
   } finally { db.close(); }
-  return calls;
+  if (redo) return readCliDbFrom(DatabaseSync, file, null);
+  const calls = [];
+  for (const v of s.gens.values()) if (Array.isArray(v)) calls.push(v);
+  return { calls, st: s };
+}
+function readCliDb(DatabaseSync, file) {
+  return readCliDbFrom(DatabaseSync, file, null).calls;
 }
 // 同一次调用可能在两个库里都有（子代理），按请求 ID 去重；没有请求 ID 用 对话 + 时间 + token 数
 const cliCallKey = (id, c) => c[9] || `${id}:${c[0]}:${c[2]}:${c[5]}`;
@@ -1050,23 +1106,35 @@ async function scanCli() {
     const present = new Set(names);
     for (const n of [...cliCache.keys()]) if (!present.has(n)) cliCache.delete(n); // 对话被删了
     for (const n of Object.keys(cliIndex.files)) if (!present.has(n)) { delete cliIndex.files[n]; cliOld.delete(n); cliIndexDirty = true; }
+    for (const n of [...cliSeen.keys()]) if (!present.has(n)) cliSeen.delete(n);
+    for (const e of cliCache.values()) if (e.st && now - e.st.at >= CLI_REREAD_MS) delete e.st; // 过了 10 分钟下次也是整个重读，不用留着
+    // 这次看哪些库（见 cliDirty）：第一次、每 10 分钟、补算历史时、监视不了目录时全看；其余时候只看动过的和没见过的
+    const watching = watchCliDir();
+    const fullPass = full || !watching || now - cliFullAt >= CLI_FULL_MS;
+    if (fullPass) cliFullAt = now;
+    const dirty = new Set(cliDirty);
+    cliDirty.clear();
     for (const n of names) {
+      if (!fullPass && cliSeen.has(n) && !dirty.has(n)) continue; // 上次看过，之后没动过
       const f = path.join(CLI_CONV_DIR, n);
       let mt = 0;
       try { mt = fs.statSync(f).mtimeMs; } catch { continue; }
       try { mt = Math.max(mt, fs.statSync(f + '-wal').mtimeMs); } catch {} // WAL 模式时新写的在 -wal 里
+      cliSeen.set(n, mt);
       if (mt < Math.min(from, keepFrom)) continue;
       const old = cliCache.get(n);
       if (old && old.mtime === mt) continue;
       try {
-        const calls = readCliDb(DatabaseSync, f);
-        cliCache.set(n, { mtime: mt, calls });
+        const got = readCliDbFrom(DatabaseSync, f, old && old.st); // 接着上次读（见 readCliDbFrom）
+        const calls = got.calls;
+        cliCache.set(n, { mtime: mt, calls, st: got.st });
         cliOld.delete(n);
         cliIndex.files[n] = { m: mt, d: [...new Set(calls.map((c) => dayOf(c[0])))].sort() };
         cliIndexDirty = true;
         read++;
       } catch {
         if (old) stale++; else if (mt >= from) missing++; // 读不了：有旧的就先用旧的
+        cliDirty.add(n); // 下次再试（之后不一定还有变化通知）
       }
       await new Promise((r) => setImmediate(r));
     }
@@ -1319,7 +1387,7 @@ function pageScript() {
 // - Theme 页的 updates 选 off（look.json 的 online = 'off'）：不再联网，也不用 remote/ 里存的，只用安装包自带的。
 // - 换了版本（安装了新的安装包）以后，remote/ 里存的词典和规则先不用，等下一次取到再用（新安装包里的可能更新）。
 // - 测试：环境变量 AGY_REMOTE_BASE 换成别的地址（例如本机起的 http://127.0.0.1:端口/），只试这一个地址。
-const PACK_VERSION = '2.0.22';
+const PACK_VERSION = '2.0.23';
 const REMOTE_DIR = path.join(DATA, 'remote');
 const REMOTE_STATE = path.join(REMOTE_DIR, 'state.json');
 const REMOTE_BASES = process.env.AGY_REMOTE_BASE ? [process.env.AGY_REMOTE_BASE] : [
