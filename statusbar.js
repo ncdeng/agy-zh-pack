@@ -1247,8 +1247,18 @@ function agyStatusBar(CFG) {
   // 配置名（plannerConfig.modelName，例如 gemini-4-argon-high）
   const cfgName = (md, key) => (md && S.execModel.get(md.executionId)) || (key ? S.enumModel.get(key) : '') || '';
   // 界面名 "Gemini 4 Argon (High)" 去掉括号里的推理强度，就是接口正常返回的名字 "gemini-4-argon"。
-  // Gemini 的接口名对不上就标黄（可能是灰测版本或被换了模型）。点号按连字符比较；Claude 的命名规则不同，不比较。
   const baseName = (label) => label.replace(/\s*\([^)]*\)\s*$/, '').toLowerCase().trim().replace(/[\s.]+/g, '-');
+  // 接口返回的模型名和界面名对得上吗：true 对得上，false 对不上（可能是灰测版本或被换了模型），null 不比较。
+  // 点号按连字符比较，后面可以多带括号里的推理强度：Claude 的接口名就是这样（"Claude Opus 5.5 (High)" → claude-opus-5-5-high，
+  // 2026-11 本机记录）。只比较 Gemini 和 Claude；Orchestrator、GPT-OSS 的接口名是另一套（如 gemini-pro-orchestrator），不比较。
+  // 本机记录里对不上的例子：Gemini 3.8 Flash 有一次返回 gemini-3.8-flash-n。
+  const sameModel = (label, name) => {
+    if (!label || !name || !/^(gemini|claude)\b/i.test(label)) return null;
+    const base = baseName(label);
+    const n = String(name).toLowerCase().trim().replace(/\./g, '-');
+    const m = /\(([^)]+)\)\s*$/.exec(label);
+    return n === base || (!!m && n === base + '-' + m[1].toLowerCase().trim().replace(/\s+/g, '-'));
+  };
   const modelSeg = (md, fallbackKey, tier) => {
     const key = modelKey(md) || fallbackKey || '';
     const info = S.models.get(key);
@@ -1263,18 +1273,18 @@ function agyStatusBar(CFG) {
       const m = /^(.*?)\s*\(([^)]+)\)\s*$/.exec(label);
       pieces.push(...(m ? [m[1], m[2]] : [label]));
     }
-    let odd = false;
-    if (shown) {
-      const fromApi = !!(resp || lastResp);
-      odd = fromApi && !!label && /^gemini/i.test(label) && shown.replace(/\./g, '-') !== baseName(label);
-      pieces.push(el('span', 'tx real' + (odd ? ' odd' : '') + (fromApi && !resp ? ' prev' : ''), shown));
-    }
+    // 状态栏上只在对不上时写接口名（2026-11-27，issue #4）：对得上的是重复的信息，还占第一行的地方；
+    // 对不上多半是在灰测新模型，标黄提醒。模型列表里没有这个模型（没有界面名）时，接口名是唯一的名字，照写。
+    // 其余情况（对得上、不比较的模型、还没查到接口名只有配置名）接口名只在悬停说明里。
+    const fromApi = !!(resp || lastResp);
+    const odd = fromApi && sameModel(label, shown) === false;
+    if (shown && (odd || !label)) pieces.push(el('span', 'tx real' + (odd ? ' odd' : '') + (fromApi && !resp ? ' prev' : ''), shown));
     if (!pieces.length && tier) pieces.push(tier.replace(/^MODEL_TIER_/, '').toLowerCase().replace(/^./, (c) => c.toUpperCase()) + ' tier');
     if (!pieces.length && key) pieces.push(key.replace(/^MODEL_/, ''));
     const tip = '界面名：' + (label || '（不在模型列表里）') +
       '\n接口返回的模型：' + (resp ? resp.name + (resp.full ? '（' + resp.full + '）' : '') : lastResp ? lastResp + '（这个模型上次的结果，本次还没查到）' : '（还没查到）') +
       '\n配置名：' + (cfg || '?') + '\n编号：' + (key || '?') +
-      (odd ? '\n接口返回的模型名和界面名对不上，可能是灰测版本' : '');
+      (odd ? '\n接口返回的模型名和界面名对不上，可能是灰测版本' + (resp ? '' : '（这是这个模型上次的结果）') : '');
     return pieces.length ? seg('model', ICON('model'), pieces, tip) : null;
   };
 
@@ -1422,12 +1432,14 @@ function agyStatusBar(CFG) {
   // ---------- 费用：最近一次调用 + 这个对话累计（单价和算法见上面“费用估算”） ----------
   // 金额（2026-11-22 改）：状态栏、面板、表格统一写法——0 是 $0.00，不到 1 分是 <$0.01，不到 $100 两位小数，
   // 满 $100 写整数（加千分位）。以前不到 $0.01 写 4 位、不到 $1 写 3 位，0 元会显示成 “$0.0000 today”。
+  // 千分位用一个现成的格式器（和 toLocaleString('en-US') 写出来一样；toLocaleString 每次都要新建，重画时调几十次，11-27 实测排在前几）
+  const USD_INT = new Intl.NumberFormat('en-US');
   const fmtUsd = (v) => {
     const x = Number(v) || 0;
     if (x < 0.00005) return '$0.00';
     if (x < 0.01) return '<$0.01';
     if (x < 99.995) return '$' + x.toFixed(2);
-    return '$' + Math.round(x).toLocaleString('en-US');
+    return '$' + USD_INT.format(Math.round(x));
   };
   // 悬停说明里的算式和单次调用用精确值（一次调用常常只有零点几分钱）
   const fmtUsdFine = (v) => {
@@ -1578,6 +1590,29 @@ function agyStatusBar(CFG) {
     if (Date.now() - S.costlySeen.get(key) < 6000) b.classList.add('flash');
     return b;
   };
+  // 按对话缓存算好的钱（2026-11-27）。对话累计原来每次重画都把整个对话的调用算一遍：在 6000 步的对话上实测每次约 3 毫秒，
+  // 占重画 JS 耗时的七成多，生成回复时 300 毫秒画一次；今天花费（2 秒一次）也要把今天动过的对话全算一遍。
+  // 改成对话的输入没变就用上次的结果。输入 = 调用列表（fetchCost 只覆盖最后一条、往后追加，所以看列表本身、长度和最后一条）、
+  // 副本分界、已知的每步时间（状态流的、调用明细取过的）、价目表、日子、callNames 用到的三张模型表。
+  // 结果最多用 60 秒（callTimes 里没有确切时间的调用按“现在”夹范围）。有调用跨调价时间点、选价要看会变的 S.execAt 时不缓存。
+  const convMemo = { tree: new Map(), day: new Map() }; // 对话 ID → { sig, at, v }
+  const convSig = (id, c, k0, meta) => {
+    const sm = S.stepAt.get(id), dc = S.detCache && S.detCache.get(id);
+    return [c.list, c.list.length, c.list[c.list.length - 1], k0, priceRules, dayStart(), sm, sm ? sm.size : 0,
+      dc, dc && dc.times ? dc.times.size : 0, meta ? meta.created : 0, S.execModel.size, S.enumModel.size, S.models.size];
+  };
+  const memoConv = (map, id, sig, f) => {
+    const m = map.get(id);
+    if (m && Date.now() - m.at < 60000 && m.sig.every((x, i) => x === sig[i])) return m.v;
+    const v = f();
+    if (v.volatile) map.delete(id);
+    else {
+      map.delete(id); // 重新放到最后：超过 300 个时删最久没用的
+      map.set(id, { sig, at: Date.now(), v });
+      if (map.size > 300) map.delete(map.keys().next().value);
+    }
+    return v;
+  };
   const treeCost = (ids) => {
     const t = { usd: 0, calls: 0, unpriced: 0, by: new Map(), cascades: 0 };
     for (const id of ids) {
@@ -1586,22 +1621,31 @@ function agyStatusBar(CFG) {
       const meta = convMeta(id);
       const k0 = ownFrom(id, c.list, meta); // 副本只算自己的调用；分界还不知道时先不算（见 ownFrom）
       if (k0 < 0) continue;
-      const list = k0 ? c.list.slice(k0) : c.list;
       t.cascades++;
-      const ts = callTimes(id, list, meta, dayStart()); // 选价按每次调用自己的时间（见 callTimes，审查 A2）
-      for (let i = 0; i < list.length; i++) {
-        const g = list[i];
-        if (!g) continue;
-        t.calls++;
-        const x = ts[i];
-        const cc = callCost(g.usage, callNames(g.resp, g.key, g.exec), x.priceAt != null ? x.priceAt : (S.execAt.get(g.exec) || x.at));
-        if (!cc || cc.usd == null) { t.unpriced++; continue; }
-        t.usd += cc.usd;
-        const b = t.by.get(cc.pr.name) || { usd: 0, n: 0 };
-        b.usd += cc.usd;
-        b.n++;
-        t.by.set(cc.pr.name, b);
-      }
+      const v = memoConv(convMemo.tree, id, convSig(id, c, k0, meta), () => {
+        const list = k0 ? c.list.slice(k0) : c.list;
+        const r = { usd: 0, calls: 0, unpriced: 0, by: new Map(), volatile: false };
+        const ts = callTimes(id, list, meta, dayStart()); // 选价按每次调用自己的时间（见 callTimes，审查 A2）
+        for (let i = 0; i < list.length; i++) {
+          const g = list[i];
+          if (!g) continue;
+          r.calls++;
+          const x = ts[i];
+          if (x.priceAt == null) r.volatile = true;
+          const cc = callCost(g.usage, callNames(g.resp, g.key, g.exec), x.priceAt != null ? x.priceAt : (S.execAt.get(g.exec) || x.at));
+          if (!cc || cc.usd == null) { r.unpriced++; continue; }
+          r.usd += cc.usd;
+          const b = r.by.get(cc.pr.name) || { usd: 0, n: 0 };
+          b.usd += cc.usd;
+          b.n++;
+          r.by.set(cc.pr.name, b);
+        }
+        return r;
+      });
+      t.calls += v.calls;
+      t.unpriced += v.unpriced;
+      t.usd += v.usd;
+      for (const [k, b] of v.by) { const x = t.by.get(k) || { usd: 0, n: 0 }; x.usd += b.usd; x.n += b.n; t.by.set(k, x); }
     }
     return t;
   };
@@ -1675,28 +1719,35 @@ function agyStatusBar(CFG) {
       const k0 = ownFrom(id, c.list, meta); // 副本（/btw 旁支、分叉）只算自己的调用；还没确认时算“正在加载”、不进账本
       if (k0 < 0) { loading++; continue; }
       if (k0 > 0) fixBy[id] = 1; // 确认是副本：账本里这个对话的数可以改小（见 mergeBook）
-      const list = k0 ? c.list.slice(k0) : c.list;
-      let usd = 0;
-      const det = {};
-      const ts = callTimes(id, list, meta, d0); // 每次调用的时间（见 callTimes）
-      for (let i = 0; i < list.length; i++) {
-        const g = list[i];
-        if (!g) continue;
-        const x = ts[i];
-        if (x.day == null) { undated++; continue; } // 还不知道是不是今天的（跨 0 点、在补取时间）
-        if (x.day === 'before') continue;
-        const cc = callCost(g.usage, callNames(g.resp, g.key, g.exec), x.priceAt != null ? x.priceAt : x.at);
-        if (!cc) continue;
-        const r = det[cc.pr ? cc.pr.name : 'Other'] || (det[cc.pr ? cc.pr.name : 'Other'] = [0, 0, 0, 0, 0, 0]);
-        r[1]++; r[2] += cc.inp; r[3] += cc.cr; r[4] += cc.cw; r[5] += cc.out;
-        if (cc.usd == null) continue;
-        r[0] += cc.usd;
-        usd += cc.usd;
-        calls++;
-      }
-      for (const r of Object.values(det)) r[0] = Math.round(r[0] * 1e6) / 1e6;
-      by[id] = Math.round(usd * 1e6) / 1e6;
-      detBy[id] = det;
+      const v = memoConv(convMemo.day, id, convSig(id, c, k0, meta), () => { // 输入没变就用上次的结果（见 convMemo）
+        const list = k0 ? c.list.slice(k0) : c.list;
+        const o = { usd: 0, det: {}, calls: 0, undated: 0, volatile: false };
+        const ts = callTimes(id, list, meta, d0); // 每次调用的时间（见 callTimes）
+        for (let i = 0; i < list.length; i++) {
+          const g = list[i];
+          if (!g) continue;
+          const x = ts[i];
+          if (x.day == null) { o.undated++; continue; } // 还不知道是不是今天的（跨 0 点、在补取时间）
+          if (x.day === 'before') continue;
+          if (x.priceAt == null) o.volatile = true;
+          const cc = callCost(g.usage, callNames(g.resp, g.key, g.exec), x.priceAt != null ? x.priceAt : x.at);
+          if (!cc) continue;
+          const r = o.det[cc.pr ? cc.pr.name : 'Other'] || (o.det[cc.pr ? cc.pr.name : 'Other'] = [0, 0, 0, 0, 0, 0]);
+          r[1]++; r[2] += cc.inp; r[3] += cc.cr; r[4] += cc.cw; r[5] += cc.out;
+          if (cc.usd == null) continue;
+          r[0] += cc.usd;
+          o.usd += cc.usd;
+          o.calls++;
+        }
+        for (const r of Object.values(o.det)) r[0] = Math.round(r[0] * 1e6) / 1e6;
+        o.usd = Math.round(o.usd * 1e6) / 1e6;
+        return o;
+      });
+      undated += v.undated;
+      calls += v.calls;
+      by[id] = v.usd;
+      // 账本会留着交进去的对象（mergeBook 直接存引用），交一份拷贝，缓存里的不会被改
+      detBy[id] = Object.fromEntries(Object.entries(v.det).map(([k, a]) => [k, a.slice()]));
     }
     const book = loadBook();
     const before = JSON.stringify([book.by, book.det, book.fix]);
@@ -2040,13 +2091,22 @@ function agyStatusBar(CFG) {
   };
   // 今天缓存没命中的合计，用 S.missDay 里已经取到的调用算，不触发取数（每日面板底部、插件面板的“缓存没命中”格子）。
   // S.missDay 由 missToday（每日面板开着时）和后台的速度统计（今天的每 5 分钟，见 speedTick）更新
+  // 结果按输入缓存（2026-11-27）：插件面板开着时每 3 秒取一次快照（见 inject.mjs），原来每次都把今天的调用（含 agy CLI 的几千次）
+  // 重新配对、找没命中、算钱，实测平均每秒约 1.3 毫秒，是空闲时插件最大的一块。今天的调用、agy CLI 的明细、价目表、模型表都没变就用上次的；
+  // 最多用 60 秒。两个调用方都只读结果
+  let missMemo = null;
   const missOfDay = (nm) => {
     const c = S.missDay;
     if (!c || c.day !== nm || !c.rows) return null;
+    const cli = S.cliCalls[nm];
+    const sig = [nm, c.rows, c.rows.length, cli, cli && cli.rows, cli && cli.rows ? cli.rows.length : 0, priceRules,
+      S.execModel.size, S.enumModel.size, S.models.size];
+    if (missMemo && Date.now() - missMemo.at < 60000 && missMemo.sig.every((x, i) => x === sig[i])) return missMemo.v;
     const rows = c.rows.concat(cliMiss(cliRows(nm)));
     const s = missSum(rows);
     s.total = 0;
     for (const r of rows) { const cc = callCost(r.usage, r.cli ? r.resp : callNames(r.resp, r.key, r.exec), r.at); s.total += (cc && cc.usd) || 0; }
+    missMemo = { sig, at: Date.now(), v: s };
     return s;
   };
   S.capPart = S.capPart || {};
@@ -3742,7 +3802,6 @@ function agyStatusBar(CFG) {
     if (sconv.ctx) noteCtxMax(smd, sconv.ctx);
     let ms = modelSeg(smd, info.model, info.modelTier);
     if (ms && /PLACEHOLDER|MODEL_/.test(plainText(ms))) ms = null;
-    if (ms && ms.querySelectorAll('.tx').length > 1) ms.querySelectorAll('.tx.real:not(.odd)').forEach((x) => { const d = x.previousElementSibling; if (d && d.classList.contains('dot')) d.remove(); x.remove(); });
     const calls = callSegs(smd).map(plainText);
     const name = seg('agent', ICON('agent'), [info.typeName || 'subagent', info.role && info.role !== info.typeName ? clip(info.role, 32) : ''],
       '子代理' + (info.typeName ? ' ' + info.typeName : '') + (info.role ? '：' + info.role : '') +
@@ -3790,9 +3849,16 @@ function agyStatusBar(CFG) {
     return [seg('quota', ICON('quota1'), [meter(frac, k), pct + '%', q.resetTime ? fmtReset(q.resetTime) : ''],
       '这个模型的剩余额度' + (q.resetTime ? '，' + fmtReset(q.resetTime) + ' 重置' : ''), k)];
   };
+  // 按 0 宽排的项（主代理行末尾的 running、子代理行末尾的状态）套一层槽位 .fill，见 CSS 的“按 0 宽排”
+  const fillSlot = (g) => {
+    if (!g.classList.contains('k-run') && !g.classList.contains('sst')) return g;
+    const f = el('span', 'fill');
+    f.append(g);
+    return f;
+  };
   const toLines = (rows, cls) => rows.filter((r) => r.length).map((r) => {
     const l = el('div', 'ln' + (cls ? ' ' + cls : ''));
-    l.append(...r);
+    l.append(...r.map(fillSlot));
     return l;
   });
 
@@ -4005,24 +4071,22 @@ ${B} .costly .ex{margin-right:.15em; font-weight:800}
 ${B} .costly.flash{animation:agyCostly .9s ease-in-out 6}
 @keyframes agyCostly{50%{background:color-mix(in srgb, var(--k-crit) 42%, transparent)}}
 /* running 一直占着位置，空闲时只是看不见：开始、结束生成时状态栏的行数不变，不会上下跳。
-   11-22：第一行太长时 running 会被挤到第二行（issue #2 的老问题，花费数字变长后又出现了）。改成按 0 宽排：永远留在第一行，
-   行里有空位就显示全，空位不够就截短。plain 外形的分隔竖线画在项的左外侧，这一项要裁掉溢出，所以把竖线挪进项里 */
-${B} .ln > .seg.k-run{flex:1 1 0; min-width:0; max-width:max-content; overflow:hidden}
-${B} .ln > .seg.k-run > *{flex-shrink:0}
-${B}[data-skin="plain"] .ln > .seg.k-run{margin-left:.55em; padding-left:1.05em}
-${B}[data-skin="plain"] .ln > .seg.k-run::before{left:0}
+   11-22：第一行太长时 running 会被挤到第二行（issue #2）。改成按 0 宽排：永远留在第一行，行里有空位就显示全，空位不够就截短。
+   按 0 宽排（running 和子代理行末尾的状态）：项本身放进槽位 .fill（见 fillSlot），槽位没有外边距、内边距，基准宽度是 0，
+   所以换不换行不看它；行里剩多少空槽位就占多少，项在槽位里照常画（竖线、底色、箭头都和别的项一样），放不下的部分裁掉。
+   11-27（issue #4）：原来直接把项按 0 宽排，可 plain 外形的项还有 1.6em 的左外边距和左内边距（竖线的位置）、powerline 有内边距、
+   pill 有 5px 的列间距，这些压不掉；行尾剩的空不到这么宽时，flex 照样把整项折到下一行 */
+${B} .ln > .fill{display:flex; flex:1 1 0; min-width:0; max-width:max-content; overflow:hidden}
+${B} .fill > .seg{flex-shrink:0}
+${B}[data-skin="pill"] .ln > .fill{margin-left:-5px} ${B}[data-skin="pill"] .fill > .seg{margin-left:5px} /* 抵掉 .ln 的列间距 */
+${B}[data-skin="powerline"] .ln > .fill{margin-left:-.3em} ${B}[data-skin="powerline"] .fill > .seg{margin-left:0} /* 箭头叠在前一块上 */
 ${B} .seg.k-run.idle{visibility:hidden}
 ${B} .pace-ok{color:var(--k-run)}
 ${B} .pace-hi{color:var(--k-warn)}
 ${B} .real.odd{opacity:1; font-weight:600; color:var(--k-warn)}
 ${B} .real.prev{font-style:italic}
 ${B} .ln.sub{margin-left:-.5em; font-size:11.5px} /* 子代理行比主代理行缩进 1.1em */
-/* 子代理行末尾的状态（● 9m47s / ✓ done …）：按 0 宽排，所以永远不会被挤到第二行；行里剩多少空就占多少，放不下就截掉末尾。
-   plain 外形的分隔竖线画在项的左外侧，这一项要裁掉溢出，所以把竖线挪进项里（左内边距） */
-${B} .seg.sst{flex:1 1 0; min-width:0; max-width:max-content; overflow:hidden}
-${B} .seg.sst > *{flex-shrink:0}
-${B}[data-skin="plain"] .seg.sst{margin-left:.55em; padding-left:1.05em}
-${B}[data-skin="plain"] .seg.sst::before{left:0}
+/* 子代理行末尾的状态（● 9m47s / ✓ done …）：按 0 宽排（见上面 running），永远不会被挤到第二行，放不下就截掉末尾 */
 /* 子代理行按列对齐（见 alignCols）：最小宽度按边框盒算；占位项不画分隔竖线和底色 */
 ${B} .ln.sub > .seg[data-col]{box-sizing:border-box}
 ${B} .ln.sub > .seg.ph::before{visibility:hidden}
@@ -4055,7 +4119,7 @@ ${B}[data-skin="pill"] .seg::before{content:none}
 ${B}[data-skin="powerline"] .ln{margin-left:0; clip-path:none; row-gap:3px}
 ${B}[data-skin="powerline"] .seg{margin-left:-.3em; padding:0 .95em 0 1.05em; line-height:1.75; background:var(--kc); color:var(--pl-ink);
   clip-path:polygon(0 0, calc(100% - .6em) 0, 100% 50%, calc(100% - .6em) 100%, 0 100%, .6em 50%)}
-${B}[data-skin="powerline"] .seg:first-child{margin-left:0; padding-left:.7em; border-radius:5px 0 0 5px;
+${B}[data-skin="powerline"] .ln > .seg:first-child{margin-left:0; padding-left:.7em; border-radius:5px 0 0 5px;
   clip-path:polygon(0 0, calc(100% - .6em) 0, 100% 50%, calc(100% - .6em) 100%, 0 100%)}
 ${B}[data-skin="powerline"] .seg::before{content:none}
 ${B}[data-skin="powerline"] .seg .pace-ok, ${B}[data-skin="powerline"] .seg .pace-hi, ${B}[data-skin="powerline"] .seg .real.odd{color:inherit; font-weight:700}
@@ -4323,7 +4387,7 @@ ${T}{position:fixed; z-index:2147483600; pointer-events:none; box-sizing:border-
     for (const l of lines) {
       for (const g of l.children) {
         const c = g.dataset.col;
-        if (c === undefined || g.classList.contains('sst') || g.classList.contains('k-run')) continue;
+        if (c === undefined || g.classList.contains('fill')) continue; // 按 0 宽排的槽位（没有 data-col）不参与
         if (!cols.has(c)) cols.set(c, []);
         cols.get(c).push(g);
         sig += '\n' + c + ':' + g.className + ':' + g.textContent;
@@ -4369,8 +4433,18 @@ ${T}{position:fixed; z-index:2147483600; pointer-events:none; box-sizing:border-
       if (bar.hasAttribute('data-off') !== !!S.barOff) bar.toggleAttribute('data-off', !!S.barOff);
       if (force || fresh) {
         S.actShown = false;
-        bar.replaceChildren(...build(paneConvId(box)));
-        alignCols(bar);
+        const lines = build(paneConvId(box));
+        // 内容没变就不动 DOM（2026-11-27）：换掉整条状态栏，浏览器要重新排版输入框周围那一片（实测在 Antigravity 里每次约 3 毫秒，
+        // 比 build 本身还贵），图标、running 的呼吸动画也会从头开始（300 毫秒换一次时一直闪不完一个周期）。
+        // 比较的是新生成的各行的 HTML（含悬停说明），再加上 alignCols 量宽度要看的外观设置、缩放、字体；tickClocks 改过的用时文字不算，
+        // 下次重画时间变了自然就不一样。费用图标的遮罩 id 每画一次加一（见 costIcon），比较时不算编号
+        const sig = JSON.stringify(S.look) + '|' + devicePixelRatio + '|' + document.fonts.status + '|' + document.fonts.size + '\n' +
+          lines.map((l) => l.outerHTML).join('\n').replace(/agyCostMask\d+/g, 'agyCostMask');
+        if (fresh || sig !== bar._agySig) {
+          bar.replaceChildren(...lines);
+          bar._agySig = sig;
+          alignCols(bar);
+        }
         act = act || S.actShown;
       }
     }

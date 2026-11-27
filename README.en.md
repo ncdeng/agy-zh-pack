@@ -74,7 +74,7 @@ Download the new package and run `一键安装` once. Your daily records and loo
 
 | Line | Example | Meaning |
 |---|---|---|
-| First | `Gemini 4 Neon · XHigh · gemini-4-neon` | Model: UI name, thinking level, and the model name the API returns. Shown in yellow when they do not match for a Gemini model |
+| First | `Gemini 4 Neon · XHigh` | Model: UI name and thinking level. When the model name the API returns does not match the UI name (usually a new model in a gray test), it follows in yellow, for example `· gemini-3.8-flash-n`. When they match, it is only in the hover text |
 | | `61% · 311k · ↻3×` | Context: used share and tokens; the icon is a ring that fills up. `↻3×` means 3 automatic compactions; click it to open the compaction viewer |
 | | `98% hit` | Cache hit rate of the last call |
 | | `$4.49` | Total cost of this conversation, subagents included. A red badge appears when a single call costs $0.50 or more |
