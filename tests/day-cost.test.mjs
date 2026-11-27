@@ -251,3 +251,38 @@ test('调用明细 loadConv0：取步骤失败时抛错，不记成“取完了�
   assert.ok(c.done);
   assert.equal(c.times.get(3), Date.parse('2026-11-25T01:03:00Z'));
 });
+
+// 周期开始那天按调用时间算花费（statusbar.js 的 callsPart）：刚启动时对话列表还没到，一个对话都找不到
+test('callsPart：一个对话都没找到、那天桌面版却有花费时当成没取到，15 秒后再试；对话列表到了以后照常算；那天桌面版没花钱时 $0 照常记', async () => {
+  const flush = () => new Promise((r) => setTimeout(r, 0));
+  const mk = (rec, load) => {
+    const S = { lsHeaders: {}, cliAsk() {}, loadCalls: async () => load() };
+    const fn = new Function('S', 'dayName', 'dayRecord', 'callCost', 'callNames', 'modelGroup', 'cliRows', 'P', 'refreshPanel', 'document',
+      cut('statusbar.js', '  S.capPart = S.capPart || {};', '  // 一段时间（start～end') + '\nreturn callsPart;')(
+      S, () => '2026-11-27', () => rec, (u) => ({ usd: u.usd, pr: { name: 'Gemini 4 Hydrogen' }, inp: u.tok, cr: 0, cw: 0, out: 0 }),
+      () => '', () => 'gemini', () => [], '.p', () => {}, { querySelector: () => null });
+    return { S, callsPart: fn };
+  };
+  const from = T('2026-11-26T15:03:00');
+  // 有 CLI 的那天：usd 含 CLI，桌面版的在 deskUsd
+  let rows = { rows: [], convs: 0, failed: 0 };
+  const a = mk({ usd: 82, deskUsd: 60, cli: { usd: 22 } }, () => rows);
+  assert.equal(a.callsPart('gemini', '2026-11-26', from, Infinity), null);
+  await flush();
+  const k = Object.keys(a.S.capPart)[0];
+  assert.equal(a.S.capPart[k].desk, null); // 没记成 $0
+  const wait = Date.now() - a.S.capPart[k].at;
+  assert.ok(wait > 3600e3 - 16000 && wait <= 3600e3 - 14000, '15 秒后再试，实际 ' + wait); // 以前的天正常 1 小时才重取
+  // 15 秒后：对话列表到了
+  a.S.capPart[k].at -= 15000;
+  rows = { rows: [{ at: from + H, usage: { usd: 30, tok: 1e6 } }, { at: from - H, usage: { usd: 9, tok: 1 } }], convs: 3, failed: 0 };
+  a.callsPart('gemini', '2026-11-26', from, Infinity);
+  await flush();
+  assert.deepEqual(a.callsPart('gemini', '2026-11-26', from, Infinity), { usd: 30, tok: 1e6, failed: 0 }); // 15:03 以前的那次不算
+  assert.ok(Date.now() - a.S.capPart[k].at < 1000);
+  // 那天桌面版没花钱（只用了 CLI）：找不到对话是正常的，$0 照常记
+  const b = mk({ usd: 5, deskUsd: 0, cli: { usd: 5 } }, () => ({ rows: [], convs: 0, failed: 0 }));
+  b.callsPart('gemini', '2026-11-26', from, Infinity);
+  await flush();
+  assert.deepEqual(b.callsPart('gemini', '2026-11-26', from, Infinity), { usd: 0, tok: 0, failed: 0 });
+});

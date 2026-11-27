@@ -2051,13 +2051,19 @@ function agyStatusBar(CFG) {
   };
   S.capPart = S.capPart || {};
   const inRange = (at, from, to) => at >= from && at < to;
+  // 那天桌面版花了多少（有 agy CLI 的天 usd 含 CLI，桌面版的在 deskUsd）
+  const deskUsdOf = (nm) => { const r = dayRecord(nm) || {}; return r.cli ? +r.deskUsd || 0 : +r.usd || 0; };
   const callsPart = (grp, nm, from, to) => {
     const k = grp + '|' + nm + '|' + from + '|' + to;
-    const c = S.capPart[k] || (S.capPart[k] = { at: 0, busy: false, desk: null });
-    if (!c.busy && Date.now() - c.at >= (nm === dayName() ? 120000 : 3600e3) && S.lsHeaders && S.loadCalls) {
+    const c = S.capPart[k] || (S.capPart[k] = { at: 0, busy: false, desk: null, retry: false });
+    const ttl = nm === dayName() ? 120000 : 3600e3;
+    if (!c.busy && Date.now() - c.at >= ttl && S.lsHeaders && S.loadCalls) {
       c.busy = true;
       S.cliAsk(nm);
       S.loadCalls(nm).then((res) => {
+        // 一个对话都没找到、那天桌面版却有花费：对话列表还没到（刚启动时 S.casMeta 是空的、S.convFiles 还没交来），当成没取到，
+        // 15 秒后再试（v2.0.19 修：原来记成 $0 并缓存 1 小时，重启 Antigravity 后周额度的 cap 少算了周期开始那天的花费，$2,090 → $1,612）
+        if (!res.convs && deskUsdOf(nm) > 0) { c.retry = true; return; }
         let usd = 0, tok = 0;
         for (const r of res.rows) {
           if (!inRange(r.at, from, to)) continue;
@@ -2068,7 +2074,8 @@ function agyStatusBar(CFG) {
         }
         c.desk = { usd, tok, failed: res.failed || 0 };
       }).catch(() => {}).then(() => {
-        c.at = Date.now();
+        c.at = c.retry ? Date.now() - ttl + 15000 : Date.now();
+        c.retry = false;
         c.busy = false;
         if (S.panelView === 'usage' && document.querySelector(P)) refreshPanel();
       });
