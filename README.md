@@ -295,7 +295,7 @@ node tools/dev/probe.mjs all        # 开着 Antigravity 时，检查插件在�
 - 状态栏的外观和英文写法借鉴 Haleclipse（哈雷）的 [CCometixLine](https://github.com/Haleclipse/CCometixLine)（ccline）的 cometix 预设；外观分层（配色、外形、进度条、详略）和上下文圆环参考 ccline v2。本项目没有用 ccline 的代码。感谢哈雷做出这么好看的状态栏。
 - 5h 和每周额度的显示方式参考 agyline。
 - 配色的色值取自各方案公开的定义：[Catppuccin](https://catppuccin.com)、[Tokyo Night](https://github.com/folke/tokyonight.nvim)、[Rosé Pine](https://rosepinetheme.com)、[Gruvbox](https://github.com/morhetz/gruvbox)、[Nord](https://www.nordtheme.com)、[Dracula](https://draculatheme.com)（浅色是官方的 Alucard）。Nord 官方只有深色，浅色版把偏淡的颜色调深了。
-- 图标：Material Symbols 和 Material Icons “translate”（Apache License 2.0）；模型的备选图标是 [Font Awesome Free](https://fontawesome.com) 6.7.2 的 meteor（[CC BY 4.0](https://fontawesome.com/license/free)，Fonticons, Inc.）。
+- 图标：状态栏用 Material Symbols（Apache License 2.0）；插件图标（四角星和轨道）是本项目自己画的；模型的备选图标是 [Font Awesome Free](https://fontawesome.com) 6.7.2 的 meteor（[CC BY 4.0](https://fontawesome.com/license/free)，Fonticons, Inc.）。
 
 ## 许可
 

@@ -296,7 +296,7 @@ How the plugin starts, injects and reopens Antigravity, how to run from source, 
 - The status bar look and its English wording follow the cometix preset of [CCometixLine](https://github.com/Haleclipse/CCometixLine) (ccline) by Haleclipse; the look layers (palette, style, bars, detail) and the context ring follow ccline v2. No ccline code is used. Thanks to Haleclipse for such a good-looking status bar.
 - The 5h and weekly quota display follows agyline.
 - Palette colors come from the public definitions of [Catppuccin](https://catppuccin.com), [Tokyo Night](https://github.com/folke/tokyonight.nvim), [Rosé Pine](https://rosepinetheme.com), [Gruvbox](https://github.com/morhetz/gruvbox), [Nord](https://www.nordtheme.com) and [Dracula](https://draculatheme.com) (light is the official Alucard). Nord has only a dark version; its light version darkens the pale colors.
-- Icons: Material Symbols and the Material Icons "translate" icon (Apache License 2.0); the alternative model icon is meteor from [Font Awesome Free](https://fontawesome.com) 6.7.2 ([CC BY 4.0](https://fontawesome.com/license/free), Fonticons, Inc.).
+- Icons: the status bar uses Material Symbols (Apache License 2.0); the plugin icon (a four-point star with an orbit) is drawn by this project; the alternative model icon is meteor from [Font Awesome Free](https://fontawesome.com) 6.7.2 ([CC BY 4.0](https://fontawesome.com/license/free), Fonticons, Inc.).
 
 ## License
 
