@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import net from 'node:net';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { ROOT, cutInject, read } from './_helpers.mjs';
+import { ROOT, cut, cutInject, read } from './_helpers.mjs';
 
 const { startPanel } = await import(pathToFileURL(path.join(ROOT, 'lib/panel.mjs')).href);
 
@@ -164,4 +164,28 @@ test('面板样式的类名不和状态栏样式里的类重名', () => {
   assert.ok(first.size > 20 && bar.size > 20, '没取到类名（代码改过了？测试要跟着改）');
   const clash = [...first].filter((c) => bar.has(c) && c !== 'agy-usage-bar');
   assert.deepEqual(clash, []);
+});
+
+// 面板取不到状态时顶上写一行，之后取到了要清掉（2026-11-28 修：原来一直挂着。那次本机回环连接整体卡了约 8 分钟，
+// language server 转发面板请求连不上插件、回了 502；恢复后数字照常刷新，“连不上插件：HTTP 502”却一直显示）
+test('面板：取不到状态时写一行，下次取到就清掉；按钮操作的提示不被清掉', async () => {
+  const src = cut('lib/panel.mjs', 'let lastAt = 0;', '\nrefresh();');
+  // 很小的假元素：innerHTML / textContent 共用一份内容，querySelector 只认 [data-conn]
+  const msg = { html: '', get innerHTML() { return this.html; }, set innerHTML(v) { this.html = v; },
+    get textContent() { return this.html.replace(/<[^>]*>/g, ''); }, set textContent(v) { this.html = v; },
+    querySelector(sel) { return sel === '[data-conn]' && /data-conn/.test(this.html) ? {} : null; } };
+  let fail = null, renders = 0;
+  const api = async () => { if (fail) throw Error(fail); return { ok: 1 }; };
+  const refresh = new Function('$', 'api', 'render', 'esc', 'cssKey', src + '\nreturn refresh;')(
+    () => msg, api, () => { renders++; }, (s) => String(s), 'k');
+  fail = 'HTTP 502';
+  await refresh();
+  assert.match(msg.textContent, /暂时连不上插件（HTTP 502）/);
+  fail = null;
+  await refresh();
+  assert.equal(msg.textContent, '');
+  assert.equal(renders, 1);
+  msg.textContent = '已换配色'; // 按钮操作写的提示：取数成功时不动
+  await refresh();
+  assert.equal(msg.textContent, '已换配色');
 });
