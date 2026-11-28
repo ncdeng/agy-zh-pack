@@ -4,14 +4,14 @@
 
 [简体中文](README.md) | [English](README.en.md)
 
-A Chinese plugin for Antigravity Desktop: a full Simplified Chinese UI, plus a usage status bar above the input box. For Windows and macOS.
+A Chinese plugin for Antigravity Desktop: a full Simplified Chinese UI, plus a usage status bar above the input box. 8 palettes and 3 shapes, each in light and dark. For Windows and macOS.
 
 [![Download](https://img.shields.io/github/v/release/ncdeng/agy-zh-pack?label=download&color=D97757)](https://github.com/ncdeng/agy-zh-pack/releases/latest)
 [![License](https://img.shields.io/github/license/ncdeng/agy-zh-pack)](LICENSE)
 ![Windows](https://img.shields.io/badge/platform-Windows-0078D6)
 ![macOS](https://img.shields.io/badge/platform-macOS-555555)
 
-![The usage status bar above the input box](docs/images/statusbar.png)
+![The status bar in 8 palettes, light on the left and dark on the right](docs/images/palettes.png)
 
 </div>
 
@@ -20,13 +20,13 @@ A Chinese plugin for Antigravity Desktop: a full Simplified Chinese UI, plus a u
 
 ## Highlights
 
-- **Full Chinese UI**: menus, settings, buttons, hints and the Swarm panel, with 3582 dictionary entries and 128 rules. Conversations, code and file names stay as they are. Press `Ctrl+Alt+E` (`Ctrl+Option+E` on macOS) to switch back to English at any time.
+- **8 palettes × 3 shapes**: Cometix (the default, from the cometix preset of Haleclipse's ccline), Catppuccin, Tokyo Night, Rosé Pine, Gruvbox, Nord, Dracula and Mono. Shapes: `plain`, `pill` and `powerline`; quota bars: `thin`, `cells` and `ring`. Every palette has a light and a dark version that follow Antigravity. You can pick your own colors for cost, 5h quota, weekly quota and alerts.
+- **Full Chinese UI**: menus, settings, buttons, hints and the Swarm panel, with 3659 dictionary entries and 133 rules. Conversations, code and file names stay as they are. Press `Ctrl+Alt+E` (`Ctrl+Option+E` on macOS) to switch back to English at any time.
 - **Usage at a glance**: two lines above the input box show the model (with the name the API actually returns), context, cache hits, conversation cost, today's cost, time to first token, output speed, and the 5h and weekly quotas. Each subagent gets its own line.
 - **Will the quota last**: projects how much of each quota you will have used at reset, and when it runs out if it will. From your spending, it also estimates what the full 5h and weekly quotas are worth.
 - **Daily usage panel**: cost for 7 days, 30 days or all history, tokens and quota per day, every call in detail, and output speed per model.
 - **Cache misses**: finds large calls that missed the cache, and shows the extra cost and the cause (a pause, a compaction, a model switch).
 - **Compaction viewer**: click `↻3×` after the context to see what the agent still has after an automatic compaction.
-- **8 palettes, customizable**: Cometix, Catppuccin, Tokyo Night, Rosé Pine, Gruvbox, Nord, Dracula and Mono, each with light and dark versions that follow Antigravity. You can pick your own colors for cost, 5h quota, weekly quota and alerts.
 - **agy CLI included**: CLI calls count toward cost, call details and quota estimates.
 - **Signed updates**: click "更新" (Update) in the plugin panel; the plugin checks the author's signature and every file before it installs. The dictionary and prices update online every 6 hours.
 
@@ -72,19 +72,21 @@ Download the new package and run `一键安装` once. Your daily records and loo
 
 ## Status bar
 
+![The usage status bar above the input box: two lines for the main agent, one line per subagent](docs/images/statusbar.png)
+
 | Line | Example | Meaning |
 |---|---|---|
 | First | `Gemini 4 Neon · XHigh` | Model: UI name and thinking level. When the model name the API returns does not match the UI name (usually a new model in a gray test), it follows in yellow, for example `· gemini-3.8-flash-n`. When they match, it is only in the hover text |
 | | `61% · 311k · ↻3×` | Context: used share and tokens; the icon is a ring that fills up. `↻3×` means 3 automatic compactions; click it to open the compaction viewer |
 | | `98% hit` | Cache hit rate of the last call |
 | | `$4.49` | Total cost of this conversation, subagents included. A red badge appears when a single call costs $0.50 or more |
-| | `$4.49 today` | Today's cost since midnight, all conversations and agy CLI. Click it to open the daily usage panel |
+| | `$12.80 today` | Today's cost since midnight, all conversations and agy CLI. Click it to open the daily usage panel |
 | | `running` | The model is generating |
 | Second | `11.4s` | Time to first token |
 | | `74 tok/s` | Output speed |
-| | `1% · 19:41` | 5h quota: used share and reset time |
-| | `1% · 11-29 09:41 · ↓3%` | Weekly quota: used share, reset time, and how far ahead (↑) or behind (↓) an even pace |
-| Subagent | `├ research · Paper Reviewer … ● 1m05s` | One line per subagent: type and task, model, context, hit rate, cost, and state (run time, `waiting` or `✓ done`) |
+| | `18% · 19:41` | 5h quota: used share and reset time |
+| | `41% · Thu 09:41 · ↓3%` | Weekly quota: used share, reset time, and how far ahead (↑) or behind (↓) an even pace |
+| Subagent | `├ worker · Swarm Worker (rev-neon) … ● 9m37s` | One line per subagent: type and task, model, context, hit rate, cost, and state (run time, `waiting` or `✓ done`) |
 
 You can turn off each item under "显示 → 状态栏显示哪些项" (Display → Status bar items) in the plugin panel. All items are shown by default. An item that is turned off is also hidden in the subagent rows.
 
@@ -122,6 +124,8 @@ After the install, the plugin backfills earlier days from the local conversation
 ## Look
 
 Click `theme` at the top right of the daily usage panel. Changes apply at once, in all windows.
+
+![3 shapes and 3 quota bars: plain · thin, pill · cells, powerline · ring](docs/images/skins.png)
 
 | Option | Values | Default |
 |---|---|---|

@@ -90,7 +90,7 @@ The private key is kept on the author's computer, encrypted with Windows DPAPI (
 | `package/app/setup.mjs` | Install, uninstall |
 | `package/build.mjs` | Builds the package |
 | `macos/` | macOS scripts for running from source (the v1.x way); to install the plugin, use the package |
-| `docs/images/statusbar.png`, `docs/images/panel.png` | The screenshots in the README |
+| `docs/images/` | The screenshots in the README: `palettes.png` (8 palettes), `skins.png` (3 shapes), `statusbar.png`, `panel.png`, `usage.png`. The palette, shape and status bar images use sample numbers, not local conversations |
 | `docs/testing.md`, `docs/development.md` | Test records; how it works and development (this page). Each has an English version `*.en.md` |
 
 For the files in the data folder, see [Data](../README.en.md#data).

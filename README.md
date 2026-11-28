@@ -4,26 +4,26 @@
 
 [简体中文](README.md) | [English](README.en.md)
 
-Antigravity 桌面版的中文插件：整套界面汉化，加一条输入框上方的用量状态栏。支持 Windows 和 macOS。
+Antigravity 汉化插件：整套界面中文，加一条输入框上方的用量状态栏。8 套配色、3 种外形，浅色深色各一套。支持 Windows 和 macOS。
 
 [![下载](https://img.shields.io/github/v/release/ncdeng/agy-zh-pack?label=%E4%B8%8B%E8%BD%BD&color=D97757)](https://github.com/ncdeng/agy-zh-pack/releases/latest)
 [![License](https://img.shields.io/github/license/ncdeng/agy-zh-pack)](LICENSE)
 ![Windows](https://img.shields.io/badge/platform-Windows-0078D6)
 ![macOS](https://img.shields.io/badge/platform-macOS-555555)
 
-![输入框上方的用量状态栏](docs/images/statusbar.png)
+![8 套配色的状态栏，左边浅色、右边深色](docs/images/palettes.png)
 
 </div>
 
 ## 亮点
 
-- **整套界面中文**：菜单、设置、按钮、提示和 Swarm 面板，3582 条词典加 128 条规则。对话、代码、文件名保持原样。按 `Ctrl+Alt+E`（macOS 是 `Ctrl+Option+E`）随时切回英文对照。
+- **8 套配色 × 3 种外形**：Cometix（默认，来自哈雷 ccline 的 cometix 预设）、Catppuccin、Tokyo Night、Rosé Pine、Gruvbox、Nord、Dracula、Mono；外形有 `plain`、`pill`、`powerline`，额度进度条有 `thin`、`cells`、`ring`。每套配色都有浅色和深色，跟着 Antigravity 切换。花费、5h 额度、周额度、提醒这 4 个主色可以自己挑。
+- **整套界面中文**：菜单、设置、按钮、提示和 Swarm 面板，3659 条词典加 133 条规则。对话、代码、文件名保持原样。按 `Ctrl+Alt+E`（macOS 是 `Ctrl+Option+E`）随时切回英文对照。
 - **用量一眼可见**：输入框上方两行，写模型（含接口实际返回的名字）、上下文、缓存命中、对话花费、今天花费、首字时间、生成速度、5h 和每周额度。子代理各占一行。
 - **额度够不够用**：按现在的速度推算到重置时会用到多少、会不会提前用完；再按花费推出 5h 和每周额度大约值多少钱。
 - **每日用量面板**：7 天、30 天或全部历史的花费，每天的 token 和额度，每次调用的明细，每个模型的生成速度。
 - **缓存没命中**：找出没走缓存的大调用，写出多花了多少钱、是什么原因（停顿、压缩、换模型）。
 - **压缩查看器**：点上下文后面的 `↻3×`，看自动压缩以后智能体手里还剩什么。
-- **8 套配色，可以自定义**：Cometix、Catppuccin、Tokyo Night、Rosé Pine、Gruvbox、Nord、Dracula、Mono，跟着 Antigravity 切浅色和深色；花费、5h 额度、周额度、提醒这 4 个主色可以自己挑。
 - **agy CLI 一起算**：CLI 的调用算进花费、调用明细和额度预估。
 - **签名更新**：在插件面板里点“更新”，先校验作者签名和每个文件再安装。词典和价格每 6 小时在线更新。
 
@@ -71,19 +71,21 @@ Antigravity 开着也可以装。这次启动没带这个参数时，安装程�
 
 状态栏上的字和 ccline 一样用英文。鼠标停在任何一项上，显示中文说明。
 
+![输入框上方的用量状态栏：主代理两行，子代理各一行](docs/images/statusbar.png)
+
 | 行 | 示例 | 说明 |
 |---|---|---|
 | 第一行 | `Gemini 4 Neon · XHigh` | 模型：界面名和思考档位。接口实际返回的模型名和界面名对不上时（多半是在灰测新模型），后面用黄字写出接口名，例如 `· gemini-3.8-flash-n`；对得上时只在悬停说明里 |
 | | `61% · 311k · ↻3×` | 上下文：已用比例和 token 数，图标是随用量变满的圆环。`↻3×` 是自动压缩过 3 次，点它打开压缩查看器 |
 | | `98% hit` | 最近一次调用的缓存命中率 |
 | | `$4.49` | 这个对话累计花费（含子代理）。单次调用 ≥ $0.50 时后面多一个红色徽章 |
-| | `$4.49 today` | 今天的花费（0 点起，所有对话和 agy CLI）。点它打开每日用量面板 |
+| | `$12.80 today` | 今天的花费（0 点起，所有对话和 agy CLI）。点它打开每日用量面板 |
 | | `running` | 正在生成 |
 | 第二行 | `11.4s` | 首字时间 |
 | | `74 tok/s` | 生成速度 |
-| | `1% · 19:41` | 5h 额度：已用比例和重置时间 |
-| | `1% · 11-29 09:41 · ↓3%` | 每周额度：已用比例、重置时间、比匀速用得快（↑）还是慢（↓） |
-| 子代理 | `├ research · Paper Reviewer … ● 1m05s` | 每个子代理一行：类型和任务、模型、上下文、命中率、花费、状态（运行时间、`waiting` 或 `✓ done`） |
+| | `18% · 19:41` | 5h 额度：已用比例和重置时间 |
+| | `41% · Thu 09:41 · ↓3%` | 每周额度：已用比例、重置时间、比匀速用得快（↑）还是慢（↓） |
+| 子代理 | `├ worker · Swarm Worker (rev-neon) … ● 9m37s` | 每个子代理一行：类型和任务、模型、上下文、命中率、花费、状态（运行时间、`waiting` 或 `✓ done`） |
 
 每一项都可以在插件面板的“显示 → 状态栏显示哪些项”里单独关掉，默认全部显示。关掉的项在子代理行里也不显示。
 
@@ -121,6 +123,8 @@ Antigravity 开着也可以装。这次启动没带这个参数时，安装程�
 ## 外观
 
 在每日用量面板右上角点 `theme`。选了立刻生效，所有窗口一起换。
+
+![3 种外形和 3 种额度进度条：plain · thin、pill · cells、powerline · ring](docs/images/skins.png)
 
 | 选项 | 可选值 | 默认 |
 |---|---|---|

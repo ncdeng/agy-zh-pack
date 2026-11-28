@@ -90,7 +90,7 @@ node tools/publish.mjs <版本> --title "<Release 标题>" --notes <发布说明
 | `package/app/setup.mjs` | 一键安装、卸载 |
 | `package/build.mjs` | 生成安装包 |
 | `macos/` | 从源码运行时的 macOS 脚本（v1.x 的方式）；装插件请用安装包 |
-| `docs/images/statusbar.png`、`docs/images/panel.png` | README 里的截图 |
+| `docs/images/` | README 里的截图：`palettes.png`（8 套配色）、`skins.png`（3 种外形）、`statusbar.png`、`panel.png`、`usage.png`。配色、外形和状态栏三张用示例数字画的，不含本机对话 |
 | `docs/testing.md`、`docs/development.md` | 测试记录；原理和开发说明（本页）。各有英文版 `*.en.md` |
 
 数据目录里的文件见 [数据](../README.md#数据)。
